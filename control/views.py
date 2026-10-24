@@ -1,7 +1,8 @@
 """
 The dashboard. Every page is computed once into a pydantic model, rendered server-side from a template,
 and also served as JSON under `/api/<page>.json` so other tools (and tests) read the same numbers people
-see. `/api/stream` is the server-sent events feed the live pages refresh on.
+see; the website on its own origin renders every page from that JSON (CORS for CONTROL_ALLOWED_ORIGINS is
+set up in app.py). `/api/stream` is the server-sent events feed the live pages refresh on.
 """
 
 import contextlib
@@ -216,6 +217,11 @@ class SchedulerPage(BaseModel):
 
 class SkipsPage(BaseModel):
     skips: list[Skip]
+
+
+class ActionsPage(BaseModel):
+    actions: list[Action]
+    """The public member-action log, newest first."""
 
 
 class StatusPage(BaseModel):
@@ -533,6 +539,10 @@ def skips_page(state: State) -> SkipsPage:
     return SkipsPage(skips=state.model.skips())
 
 
+def actions_page(state: State) -> ActionsPage:
+    return ActionsPage(actions=state.model.recent_actions(100))
+
+
 def status_page(state: State) -> StatusPage:
     credentials = state.credentials.load()
     return StatusPage(
@@ -712,6 +722,11 @@ def scheduler_json(
 @router.get("/api/skips.json")
 def skips_json(request: Request) -> SkipsPage:
     return skips_page(state_of(request))
+
+
+@router.get("/api/actions.json")
+def actions_json(request: Request) -> ActionsPage:
+    return actions_page(state_of(request))
 
 
 @router.get("/api/status.json")

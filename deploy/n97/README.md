@@ -15,6 +15,7 @@ for `*.thelamer.duckdns.org` and proxies by container name. Nothing here publish
    DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/<id>/<token>
    CONTROL_EVENTS_SECRET=<openssl rand -hex 32>   # the same value goes into the workflows repo as CONTROL_EVENTS_SECRET
    CONTROL_SESSION_SECRET=<openssl rand -hex 32>  # signs the member sign-in cookie; without it a restart signs everyone out
+   CONTROL_ALLOWED_ORIGINS=https://linuxserver-playground.github.io  # the default; the website origin(s) that may drive the JSON API
    CONTROL_BACKFILL_ON_START=true
    CONTROL_SCHEDULER=true                         # the default; false stops dispatching builds
    EOF

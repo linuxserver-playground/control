@@ -126,7 +126,8 @@ def test_callback_signs_in_a_member(
     user = auth.User.model_validate(auth.unsign(https_state.session_secret, cookie, auth.SESSION_TTL) or {})
     assert user.login == "octocat" and user.member and user.csrf and not user.stale()
     session_header = next(h for h in done.headers.get_list("set-cookie") if h.startswith(auth.SESSION_COOKIE))
-    assert "HttpOnly" in session_header and "Secure" in session_header and "samesite=lax" in session_header.lower()
+    # An external origin is allowed by default, so the cookie must travel on its credentialed fetches.
+    assert "HttpOnly" in session_header and "Secure" in session_header and "samesite=none" in session_header.lower()
 
     page = https_client.get("/management")
     assert "Signed in as <strong>octocat</strong>" in page.text and 'action="/manage/dispatch"' in page.text
@@ -195,6 +196,17 @@ def test_safe_next() -> None:
     assert auth.safe_next("//evil.example") == "/"
     assert auth.safe_next("https://evil.example") == "/"
     assert auth.safe_next(None) == "/"
+    site = ("https://linuxserver-playground.github.io",)
+    assert auth.safe_next("https://linuxserver-playground.github.io/site/fleet/?x=1", site).endswith("/site/fleet/?x=1")
+    assert (
+        auth.safe_next("HTTPS://LinuxServer-Playground.github.io/site/", site)
+        == "HTTPS://LinuxServer-Playground.github.io/site/"
+    )
+    assert auth.safe_next("https://linuxserver-playground.github.io.evil.example/", site) == "/"
+    assert auth.safe_next("https://linuxserver-playground.github.io:8443/", site) == "/"
+    assert auth.safe_next("http://linuxserver-playground.github.io/", site) == "/"
+    assert auth.safe_next("https://linuxserver-playground.github.io/site/", ()) == "/"
+    assert auth.safe_next("javascript:alert(1)", site) == "/"
 
 
 def test_session_secret_from_env_or_random(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> None:

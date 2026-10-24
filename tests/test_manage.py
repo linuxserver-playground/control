@@ -70,10 +70,10 @@ def actions(client: TestClient) -> list[tuple[str, str, str | None, str]]:
 
 
 @pytest.mark.parametrize(("path", "form"), MUTATING)
-def test_anonymous_and_non_members_get_403(
+def test_anonymous_gets_401_and_non_members_403(
     client: TestClient, state: State, github: FakeActions, path: str, form: dict[str, str]
 ) -> None:
-    assert client.post(path, data=form, follow_redirects=False).status_code == 403
+    assert client.post(path, data=form, follow_redirects=False).status_code == 401
     guest = sign_in(client, state, login="stranger", member=False)
     assert client.post(path, data={**form, "csrf": guest.csrf}, follow_redirects=False).status_code == 403
     assert github.posts == [] and actions(client) == [] and state.model.skips() == []
@@ -169,6 +169,13 @@ def test_skip_flags(client: TestClient, state: State, github: FakeActions) -> No
     assert actions(client)[0] == ("octocat", "unskip", "sonarr", "error")
     page = client.get("/management").text
     assert 'name="scope" value="sonarr/main"' in page and "no skip flag on sonarr" in page
+
+
+def test_unknown_action_is_404(client: TestClient, state: State, github: FakeActions) -> None:
+    user = sign_in(client, state)
+    assert client.post("/manage/explode", data={"csrf": user.csrf}).status_code == 404
+    assert client.post("/api/actions/explode", json={}, headers={"X-CSRF-Token": user.csrf}).status_code == 404
+    assert actions(client) == []
 
 
 def test_reconcile_runs_discovery(client: TestClient, state: State, github: FakeActions) -> None:

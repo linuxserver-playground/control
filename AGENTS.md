@@ -60,8 +60,14 @@ All three must pass before a commit. Match the existing style: short modules, do
   `workflow_dispatch` on `build.yml` with the branch as `ref`. Member dispatches go through the same
   `Scheduler.dispatch`, so the cooldown and the log see them.
 - Mutating routes live in `control/manage.py` only: POST, CSRF token from the session, `require_member`
-  (403 for anyone else), rate limited, and an `actions` row whatever the outcome. The user's OAuth token
-  is used once for `GET /user` and never stored; membership is read with the installation token.
+  (401 anonymous, 403 for anyone else), rate limited, and an `actions` row whatever the outcome. Each action
+  is one `prepare_*` function in `ACTIONS`; `POST /manage/{action}` (form, `csrf` field, redirect) and
+  `POST /api/actions/{action}` (JSON body, `X-CSRF-Token` header, JSON result) both run it, so never add
+  logic to one route family only. The user's OAuth token is used once for `GET /user` and never stored;
+  membership is read with the installation token.
+- The website on `CONTROL_ALLOWED_ORIGINS` drives the JSON API with the session cookie (CORS with
+  credentials, `SameSite=None`); every new page needs its `/api/*.json` twin and a README row, and anything
+  the site must know about the visitor goes through `/api/me`, never a token in a URL.
 - Dockerfile: `git` is a build dependency (the `lsio-builder` git dependency) and pip runs with
   `--ignore-requires-python` because Alpine ships Python 3.12 while `lsio-builder` declares 3.13.
 - Dockerfile and `root/` follow LinuxServer conventions (single RUN chain, s6-rc.d oneshot/longrun, no

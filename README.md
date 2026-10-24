@@ -5,8 +5,9 @@ acts as a GitHub App that it bootstraps itself through the app manifest flow, re
 org and stores the deliveries, turns them into a state model (repos, runs, jobs, pull requests, issues,
 releases, builds), takes the signed `build.started` / `build.summary` events the shared workflow POSTs to
 `/events`, posts to Discord, and serves the dashboard: fleet board, live runs, queue and capacity, pull
-requests, issues, releases, build pages, a CI badge per image. The scheduler and member actions come in a
-later increment; `scheduler_decisions` and the Management page are placeholders for them.
+requests, issues, releases, build pages, a CI badge per image, plus the scheduler and the member actions.
+Every page is also JSON under `/api/`, and the website on GitHub Pages renders the fleet pages from that
+JSON (see *Driving control from the website*); the HTML pages here stay as the fallback.
 
 ## Running locally
 
@@ -57,6 +58,7 @@ docker run --rm -p 8080:8080 -e PUID=1000 -e PGID=1000 -e CONTROL_PUBLIC_URL=htt
 | `CONTROL_CONCURRENCY_LIMIT` | `20`                    | GitHub's concurrent job limit for the org; the queue page measures in-progress jobs against it. |
 | `CONTROL_SCHEDULER`   | `true`                        | Run fleet discovery and the scheduler loop beside the server. `false` keeps the pages and member actions and stops dispatching. |
 | `CONTROL_SESSION_SECRET` | unset                      | Signs the sign-in cookie (HMAC-SHA256). **Set it** (`openssl rand -hex 32`): unset means a random secret per process, logged as a warning, and every restart signs everyone out. |
+| `CONTROL_ALLOWED_ORIGINS` | `https://linuxserver-playground.github.io` | Comma-separated web origins (`scheme://host[:port]`, never `*`) allowed to drive the JSON API from the browser: CORS with credentials, `next` after sign-in may point there, and the session cookie becomes `SameSite=None; Secure`. Empty turns all three off. |
 
 ## Routes
 
@@ -77,10 +79,12 @@ Every page is server-rendered and also available as JSON (pydantic models in `co
 | `GET /scheduler`                 | `/api/scheduler.json`             | The decision log (filters `?image=`, `?kind=` and `?outcome=`) and the next 24 hours of checks. Live-refreshing. |
 | `GET /management`                | `/api/management.json`            | The public action log and skip flags; the action forms for signed-in members.          |
 |                                  | `/api/skips.json`                 | Active skip flags.                                                                     |
+|                                  | `/api/actions.json`               | The public member-action log (last 100), newest first.                                 |
+|                                  | `GET /api/me`                     | Who is signed in, for the website: `{authenticated, login, avatar_url, member, checked_at, csrf}`; never 401, anonymous is `authenticated: false`. Re-checks a stale membership. |
 | `GET /status`                    | `/api/status.json`                | App configured/installed, Discord, `/events`, scheduler, row counts, last backfill and discovery, last 20 deliveries. |
 | `GET /api/stream`                |                                   | Server-sent events: `{"type": "<table>", "key": ...}` whenever a handler changes a row, including `scheduler_decisions`, `actions`, `skips` and `manifests`. |
-| `GET /login`, `/login/callback`, `POST /logout` | | Member sign-in (below).                                                                 |
-| `POST /manage/{rerun,cancel,dispatch,packages,skip,unskip,reconcile}` | | Member actions (below).                                 |
+| `GET /login`, `/login/callback`, `POST /logout` | | Member sign-in (below). `POST /api/logout` with `X-CSRF-Token` is the website's sign-out: `204`, cookie cleared. |
+| `POST /manage/{rerun,cancel,dispatch,packages,skip,unskip,reconcile}` | `POST /api/actions/{same}` | Member actions (below): the HTML form, or a JSON body with the same fields plus the `X-CSRF-Token` header, answering `{ok, action_id, detail}`. |
 | `GET /badge/{name}/{tag}.svg`    |                                   | Shields-style `CI | passing / failing / unknown` from the latest live build publishing that release tag (`latest`, `develop`…). Cached 5 minutes. |
 | `GET /healthz`                   |                                   | `{"status":"ok","db":true}`                                                            |
 | `GET /setup`                     |                                   | Start the GitHub App manifest flow, or show the app's status once it exists.           |
@@ -173,17 +177,19 @@ exchanges the code (with `client_secret`) for a user token, uses it for exactly 
 drops it. Membership is then read with **our** installation token: `GET /orgs/{org}/memberships/{login}`
 must answer `state: active`. The session cookie (`control_session`: login, avatar, member flag, when it was
 checked, a CSRF token) is HMAC-signed with `CONTROL_SESSION_SECRET`, `HttpOnly`, `Secure` when the public URL
-is https, `SameSite=Lax`, and lives 7 days; the member flag is re-checked hourly on `/management` and before
-every action. Sign-in needs no OAuth scopes and no "Request user authorization (OAuth) during installation".
+is https, `SameSite=None` when `CONTROL_ALLOWED_ORIGINS` names an external origin (else `Lax`), and lives 7
+days; the member flag is re-checked hourly on `/management`, on `/api/me` and before every action. Sign-in needs no OAuth scopes and no "Request user authorization (OAuth) during installation".
 
 **The GitHub App needs the callback URL**: `${CONTROL_PUBLIC_URL}/login/callback` under *Identifying and
 authorizing users → Callback URL* in the app's settings. New apps get it from the manifest
 (`callback_urls`); an app created before this increment must have it added by hand, or GitHub answers
 `redirect_uri is not associated with this application`.
 
-Actions are POST forms carrying the session's CSRF token; anyone not signed in or not an active member gets
-`403`, a bad token `403`, more than 30 actions in an hour per member `429`. Every attempt that passes those
-checks is written to `actions` (actor, action, target, result, detail) and shown on `/management`:
+Actions are POST forms carrying the session's CSRF token; anyone not signed in gets `401`, a non-member or a
+bad token `403`, more than 30 actions in an hour per member `429`. Every attempt that passes those checks is
+written to `actions` (actor, action, target, result, detail) and shown on `/management` and `/api/actions.json`.
+The same seven actions exist as `POST /api/actions/{action}` with a JSON body of the same fields (the website
+uses these; see below); both route families run one `prepare_*` function per action in `control/manage.py`.
 
 | Action      | Form fields              | What                                                                        |
 | ----------- | ------------------------ | --------------------------------------------------------------------------- |
@@ -193,6 +199,45 @@ checks is written to `actions` (actor, action, target, result, detail) and shown
 | `packages`  | `repo`, `branch`         | A package check now; recorded as a `packages` decision, which resets that branch's weekly slot (so does `python -m control schedule --once --kind packages`). |
 | `skip` / `unskip` | `scope`, `reason`  | Set or clear a skip flag.                                                   |
 | `reconcile` |                          | Run fleet discovery now, in the background; the outcome shows on `/status`. |
+
+## Driving control from the website
+
+The site (`https://linuxserver-playground.github.io/site/`, static) renders every fleet page from the JSON
+above and lets members act from there. Production will serve site and control from one registrable domain,
+so **the session cookie is the one credential**; the playground origins differ (github.io vs duckdns.org),
+and the team tests with Chromium, which still sends a `SameSite=None; Secure` cookie on credentialed
+cross-site fetches. A bearer-token handoff was considered and dropped for now: it only becomes necessary for
+browsers that partition or block third-party cookies (Safari), and it would reintroduce a token the page
+script can read. The contract:
+
+1. **CORS**: `CONTROL_ALLOWED_ORIGINS` lists the site origin(s). Those, and only those, get
+   `Access-Control-Allow-Origin: <origin>` and `Access-Control-Allow-Credentials: true` on every route, with
+   `GET`, `POST`, `OPTIONS` and the request headers `Content-Type` and `X-CSRF-Token`. Every fetch from the
+   site sends `credentials: "include"`; `EventSource("…/api/stream", {withCredentials: true})` for the live
+   feed (the stream is public, the flag just keeps one code path).
+2. **Sign-in**: send the browser to `GET /login?next=<absolute url on an allowed origin>` (local paths keep
+   working as before). After GitHub, `/login/callback` sets the cookie (`SameSite=None; Secure; HttpOnly`,
+   7 days) and redirects straight back to `next`; anything not local and not on an allowed origin becomes `/`.
+   Nothing is passed in the URL: no token, no fragment.
+3. **Who am I**: `GET /api/me` answers `{authenticated, login, avatar_url, member, checked_at, csrf}` and is
+   never a 401. The site renders the action buttons when `member` is true and keeps `csrf` in memory (it is
+   per session, so it may be re-read from `/api/me` on every load; never store it in `localStorage`).
+4. **Actions**: `POST /api/actions/{rerun|cancel|dispatch|packages|skip|unskip|reconcile}` with
+   `Content-Type: application/json`, a body of the form's fields (`run_id`, `repo`, `branch`, `reason`,
+   `scope`), and the header `X-CSRF-Token: <csrf>` (double submit: the cookie alone is ambient, the header is
+   not). `200 {ok, action_id, detail}` whenever the attempt was logged (`ok: false` when GitHub or the check
+   refused; `detail` says why); `400`/`404` for bad fields (`{"detail": …}`), `401` not signed in, `403`
+   non-member or bad token, `429` rate limit. The `actions` SSE event follows, so the site refreshes the log.
+5. **Sign-out**: `POST /api/logout` with `X-CSRF-Token`: `204` and the cookie is cleared.
+6. **Data**: `/api/fleet.json`, `/api/runs.json`, `/api/runs/{id}.json`, `/api/queue.json`, `/api/pulls.json`,
+   `/api/issues.json`, `/api/releases.json`, `/api/builds/{owner}/{repo}/{run_id}.json`,
+   `/api/images/{name}.json`, `/api/images/{name}/{tag}.json`, `/api/scheduler.json?kind=&image=&outcome=`,
+   `/api/skips.json`, `/api/actions.json`, `/api/status.json`; `/api/stream` for refreshes. Models are the
+   pydantic classes in `control/views.py`.
+
+Local development of the site against a local control: run control with `CONTROL_PUBLIC_URL=http://…`
+and the dev server's origin in `CONTROL_ALLOWED_ORIGINS`; the cookie falls back to `SameSite=Lax` on plain
+http (browsers refuse `SameSite=None` without `Secure`), which works as long as both run on `localhost`.
 
 ## Events contract
 

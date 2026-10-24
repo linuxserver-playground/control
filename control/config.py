@@ -7,7 +7,7 @@ webhook secret) lives in the data dir, not here.
 import os
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class Settings(BaseModel):
@@ -48,6 +48,24 @@ class Settings(BaseModel):
     """Run the fleet discovery and scheduler loop beside the server (once the app is configured and installed)."""
     session_secret: str | None = None
     """Signs the sign-in cookie. Unset means a random one per process: sign-ins do not survive a restart."""
+    allowed_origins: tuple[str, ...] = ("https://linuxserver-playground.github.io",)
+    """Web origins (`scheme://host[:port]`) allowed to drive the JSON API from the browser: they get CORS with
+    credentials, may be `next` after sign-in, and make the session cookie `SameSite=None` so it travels with
+    their fetches. Env CONTROL_ALLOWED_ORIGINS (csv); empty disables all of that. Never `*`."""
+
+    @field_validator("allowed_origins")
+    @classmethod
+    def _origins(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        origins: list[str] = []
+        for raw in value:
+            origin = raw.strip().rstrip("/").lower()
+            if not origin:
+                continue
+            scheme, sep, host = origin.partition("://")
+            if scheme not in ("http", "https") or not sep or not host or "/" in host or "*" in host:
+                raise ValueError(f"allowed origin must be scheme://host[:port], got {raw!r}")
+            origins.append(origin)
+        return tuple(origins)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -87,6 +105,8 @@ class Settings(BaseModel):
             fields["scheduler"] = scheduler.strip().lower() in ("1", "true", "yes", "on")
         if session_secret := env("CONTROL_SESSION_SECRET"):
             fields["session_secret"] = session_secret
+        if (origins := env("CONTROL_ALLOWED_ORIGINS")) is not None:
+            fields["allowed_origins"] = tuple(o.strip() for o in origins.split(",") if o.strip())
         return cls.model_validate(fields)
 
     @property

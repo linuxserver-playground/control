@@ -7,6 +7,11 @@ the App's organisation permission Members: read). Either way nothing of the user
 keep is a signed cookie: login, avatar, the member verdict and when it was reached (re-checked hourly),
 and a CSRF token every management form carries. The secret comes from CONTROL_SESSION_SECRET or is random
 per process, in which case everyone is signed out by a restart.
+
+The website on another origin (CONTROL_ALLOWED_ORIGINS) uses the same cookie: it is issued `SameSite=None;
+Secure` whenever an external origin is allowed, so credentialed cross-origin fetches carry it, `/api/me`
+tells the site who is signed in (and hands over the CSRF token, which JSON actions send back as
+`X-CSRF-Token`), and `/login?next=<allowed origin url>` returns there after GitHub.
 """
 
 import base64
@@ -16,8 +21,9 @@ import hmac
 import json
 import logging
 import secrets
-from typing import Any
-from urllib.parse import urlencode
+from collections.abc import Sequence
+from typing import Any, Literal
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -114,6 +120,12 @@ def _secure(state: State) -> bool:
     return state.settings.public_url.startswith("https://")
 
 
+def session_samesite(state: State) -> Literal["lax", "none"]:
+    """`None` so the cookie rides on credentialed fetches from an allowed origin (browsers accept `SameSite=None`
+    only with `Secure`, so plain http stays `Lax`); `Lax` when no external origin may drive the API."""
+    return "none" if state.settings.allowed_origins and _secure(state) else "lax"
+
+
 def set_session(response: Response, state: State, user: User) -> None:
     response.set_cookie(
         SESSION_COOKIE,
@@ -121,13 +133,16 @@ def set_session(response: Response, state: State, user: User) -> None:
         max_age=int(SESSION_TTL.total_seconds()),
         httponly=True,
         secure=_secure(state),
-        samesite="lax",
+        samesite=session_samesite(state),
         path="/",
     )
 
 
-def clear_session(response: Response) -> None:
-    response.delete_cookie(SESSION_COOKIE, path="/")
+def clear_session(response: Response, state: State) -> None:
+    """The clearing Set-Cookie carries the same attributes: a cross-site response may only set `SameSite=None`."""
+    response.delete_cookie(
+        SESSION_COOKIE, path="/", httponly=True, secure=_secure(state), samesite=session_samesite(state)
+    )
 
 
 def new_user(login: str, avatar_url: str | None, member: bool) -> User:
@@ -220,11 +235,32 @@ async def refresh_if_stale(state: State, user: User) -> tuple[User, bool]:
     return user.model_copy(update={"member": member, "checked_at": now}), True
 
 
-def safe_next(value: str | None) -> str:
-    """Only local paths come back from `next`, so the login flow cannot be used to bounce people elsewhere."""
+def safe_next(value: str | None, origins: Sequence[str] = ()) -> str:
+    """Local paths, or an absolute URL on an allowed origin (the website), come back from `next`; anything else
+    is `/`, so the login flow cannot be used to bounce people elsewhere."""
     if value and value.startswith("/") and not value.startswith("//"):
         return value
+    if value and origins:
+        parts = urlsplit(value)
+        if parts.scheme and parts.netloc and f"{parts.scheme}://{parts.netloc}".lower() in origins:
+            return value
     return "/"
+
+
+def csrf_ok(user: User, token: str | None) -> bool:
+    return secrets.compare_digest(user.csrf, token or "")
+
+
+class Me(BaseModel):
+    """Who is looking, for the website: never a 401, an anonymous visitor is `authenticated: false`. The CSRF
+    token is here because the cookie is HttpOnly and JSON actions must send it back as `X-CSRF-Token`."""
+
+    authenticated: bool
+    login: str | None = None
+    avatar_url: str | None = None
+    member: bool = False
+    checked_at: str | None = None
+    csrf: str | None = None
 
 
 # -- routes -------------------------------------------------------------------------------------------------------
@@ -247,9 +283,11 @@ def login(request: Request, next: str | None = None) -> RedirectResponse:
         params["scope"] = oauth.scopes
     query = urlencode(params)
     response = RedirectResponse(f"{GITHUB}/login/oauth/authorize?{query}", status_code=303)
+    # Lax is right here: GitHub brings the browser back by a top-level navigation, which sends Lax cookies.
+    pending = {"state": token, "next": safe_next(next, state.settings.allowed_origins), "issued_at": issued}
     response.set_cookie(
         OAUTH_COOKIE,
-        sign(state.session_secret, {"state": token, "next": safe_next(next), "issued_at": issued}),
+        sign(state.session_secret, pending),
         max_age=int(OAUTH_TTL.total_seconds()),
         httponly=True,
         secure=_secure(state),
@@ -299,7 +337,8 @@ async def login_callback(request: Request, code: str, state: str) -> RedirectRes
         member = await is_member(app_state, login)
     user = new_user(login, profile.get("avatar_url"), member)
     log.info("%s signed in (member: %s)", login, user.member)
-    response = RedirectResponse(safe_next(str(pending.get("next") or "/")), status_code=303)
+    target = safe_next(str(pending.get("next") or "/"), app_state.settings.allowed_origins)
+    response = RedirectResponse(target, status_code=303)
     set_session(response, app_state, user)
     response.delete_cookie(OAUTH_COOKIE, path="/login")
     return response
@@ -308,9 +347,47 @@ async def login_callback(request: Request, code: str, state: str) -> RedirectRes
 @router.post("/logout")
 async def logout(request: Request) -> RedirectResponse:
     """POST with the CSRF token, like every other action; an unsigned logout is still only a redirect."""
+    state = state_of(request)
     form = await request.form()
     user = current_user(request)
-    response = RedirectResponse(safe_next(str(form.get("next") or "/")), status_code=303)
-    if user and secrets.compare_digest(user.csrf, str(form.get("csrf") or "")):
-        clear_session(response)
+    target = safe_next(str(form.get("next") or "/"), state.settings.allowed_origins)
+    response = RedirectResponse(target, status_code=303)
+    if user and csrf_ok(user, str(form.get("csrf") or "")):
+        clear_session(response, state)
+    return response
+
+
+@router.get("/api/me")
+async def me(request: Request) -> Response:
+    """The website's sign-in state. Re-checks a stale membership like /management does, and rewrites the cookie."""
+    state = state_of(request)
+    user = current_user(request)
+    if user is None:
+        return Response(Me(authenticated=False).model_dump_json(), media_type="application/json")
+    user, changed = await refresh_if_stale(state, user)
+    body = Me(
+        authenticated=True,
+        login=user.login,
+        avatar_url=user.avatar_url,
+        member=user.member,
+        checked_at=user.checked_at,
+        csrf=user.csrf,
+    )
+    response = Response(body.model_dump_json(), media_type="application/json")
+    if changed:
+        set_session(response, state, user)
+    return response
+
+
+@router.post("/api/logout", status_code=204)
+def logout_json(request: Request) -> Response:
+    """Sign-out for the website: the CSRF token from `/api/me` as `X-CSRF-Token`; 401 anonymous, 403 bad token."""
+    state = state_of(request)
+    user = current_user(request)
+    if user is None:
+        raise HTTPException(401, "not signed in")
+    if not csrf_ok(user, request.headers.get("X-CSRF-Token")):
+        raise HTTPException(403, "bad CSRF token; read it again from /api/me")
+    response = Response(status_code=204)
+    clear_session(response, state)
     return response

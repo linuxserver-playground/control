@@ -11,7 +11,8 @@ services:
       - PGID=1000
       - TZ=Etc/UTC
     # holds CONTROL_PUBLIC_URL, DISCORD_WEBHOOK_URL, CONTROL_SETUP_TOKEN, CONTROL_EVENTS_SECRET,
-    # CONTROL_SESSION_SECRET, CONTROL_BACKFILL_ON_START and CONTROL_SCHEDULER; mode 600, never committed
+    # CONTROL_SESSION_SECRET, CONTROL_ALLOWED_ORIGINS, CONTROL_BACKFILL_ON_START and CONTROL_SCHEDULER;
+    # mode 600, never committed
     env_file: /home/thelamer/control/.env
     volumes:
       - /home/thelamer/control/config:/config

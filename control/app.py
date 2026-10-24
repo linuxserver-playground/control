@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request
+from starlette.middleware.cors import CORSMiddleware
 
 from . import auth, events, manage, scheduler, setup, views, webhooks
 from .backfill import backfill_once
@@ -75,6 +76,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             await task
 
     app = FastAPI(title="LinuxServer CI control", version=package_version(), lifespan=lifespan, docs_url=None)
+    if settings.allowed_origins:
+        # The website lives on another origin and drives the JSON API with the session cookie: only the listed
+        # origins, never `*`, with credentials, and the headers the JSON actions send. Everything else is same-origin.
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(settings.allowed_origins),
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["Content-Type", "X-CSRF-Token"],
+        )
     app.include_router(webhooks.router)
     app.include_router(events.router)
     app.include_router(setup.router)
