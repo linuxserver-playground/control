@@ -15,6 +15,7 @@ RUN \
   echo "**** install build packages ****" && \
   apk add --no-cache --virtual=build-dependencies \
     build-base \
+    git \
     libffi-dev \
     openssl-dev \
     python3-dev && \
@@ -26,7 +27,9 @@ RUN \
   /lsiopy/bin/pip install -U --no-cache-dir \
     pip \
     wheel && \
-  /lsiopy/bin/pip install -U --no-cache-dir --find-links https://wheel-index.linuxserver.io/alpine-3.22/ \
+  # lsio-builder (the contracts package) declares python >=3.13 but runs on the 3.12 Alpine ships
+  /lsiopy/bin/pip install -U --no-cache-dir --ignore-requires-python \
+    --find-links https://wheel-index.linuxserver.io/alpine-3.22/ \
     /tmp/app && \
   printf "Linuxserver.io version: ${VERSION}\nBuild-date: ${BUILD_DATE}\n" > /build_version && \
   echo "**** cleanup ****" && \

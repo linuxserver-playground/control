@@ -13,6 +13,8 @@ for `*.thelamer.duckdns.org` and proxies by container name. Nothing here publish
    CONTROL_PUBLIC_URL=https://ci.thelamer.duckdns.org:8443
    CONTROL_SETUP_TOKEN=<openssl rand -hex 24>
    DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/<id>/<token>
+   CONTROL_EVENTS_SECRET=<openssl rand -hex 32>   # the same value goes into the workflows repo as CONTROL_EVENTS_SECRET
+   CONTROL_BACKFILL_ON_START=true
    EOF
    chmod 600 /home/thelamer/control/.env
    ```
@@ -47,7 +49,9 @@ for `*.thelamer.duckdns.org` and proxies by container name. Nothing here publish
    (0600, owned by `abc`) and sends you on to the install page.
 3. Install the app on `linuxserver-playground` (all repositories). GitHub redirects to `/setup/installed`
    and control records the installation id. Discord gets a message for each step if the webhook is set.
-4. `/` now shows configured + installed, and webhook deliveries start appearing as repos see activity.
+4. `/status` now shows configured + installed, and webhook deliveries start appearing as repos see activity.
+   With `CONTROL_BACKFILL_ON_START=true` the next restart fills the dashboard from the GitHub API; or run
+   `docker exec control /lsiopy/bin/python -m control backfill` once by hand.
 
 ## Upgrading
 
