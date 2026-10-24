@@ -73,6 +73,9 @@ def manifest(settings: Settings) -> dict[str, Any]:
         "url": base,
         "hook_attributes": {"url": f"{base}/webhooks/github", "active": True},
         "redirect_url": f"{base}/setup/callback",
+        # Where GitHub sends members after they authorise the sign-in (control/auth.py). An app created
+        # before this existed needs the URL added by hand under the app's settings.
+        "callback_urls": [f"{base}/login/callback"],
         "setup_url": f"{base}/setup/installed",
         "setup_on_update": True,
         "public": False,

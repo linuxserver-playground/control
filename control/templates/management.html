@@ -1,14 +1,71 @@
 {% extends "base.html" %}
+{% from "_actions.html" import hidden %}
 {% block title %}Management · control{% endblock %}
 {% block body %}
 <h1>Management</h1>
-<p class="note">
-  Actions here are for members of the organisation. Sign-in through the GitHub App and the actions themselves
-  come in a later increment; until then everything is shown disabled{% if not page.member %} and you are not signed in{% endif %}.
-</p>
-<div class="actions">
-  {% for action in page.actions %}
-    <button type="button" disabled title="Not available yet">{{ action }}</button>
+{% if page.member %}
+<p class="muted">Signed in as <strong>{{ page.member }}</strong>, a member of {{ settings.github_org }}. Every action below is logged publicly; at most 30 an hour per member.</p>
+
+<h2>Dispatch a build</h2>
+<form class="row" method="post" action="/manage/dispatch">
+  {{ hidden(csrf, path) }}
+  <label>Repository <select name="repo">{% for repo in page.repos %}<option value="{{ repo }}">{{ repo.split('/')[-1] }}</option>{% endfor %}</select></label>
+  <label>Branch <input name="branch" list="branches" placeholder="main" required></label>
+  <datalist id="branches">{% for m in page.branches %}<option value="{{ m.branch }}">{{ m.repo.split('/')[-1] }}</option>{% endfor %}</datalist>
+  <label>Reason <select name="reason">{% for reason in page.reasons %}<option value="{{ reason }}">{{ reason }}</option>{% endfor %}</select></label>
+  <button type="submit">Dispatch build.yml</button>
+</form>
+
+<h2>Package check now</h2>
+<form class="row" method="post" action="/manage/packages">
+  {{ hidden(csrf, path) }}
+  <label>Repository <select name="repo">{% for repo in page.repos %}<option value="{{ repo }}">{{ repo.split('/')[-1] }}</option>{% endfor %}</select></label>
+  <label>Branch <input name="branch" list="branches" placeholder="main" required></label>
+  <button type="submit">Run package check</button>
+</form>
+
+<h2>Skip flags</h2>
+<form class="row" method="post" action="/manage/skip">
+  {{ hidden(csrf, path) }}
+  <label>Scope <input name="scope" placeholder="image, image/branch or image/branch/version" size="40" required></label>
+  <label>Reason <input name="reason" placeholder="why" size="30"></label>
+  <button type="submit">Add skip flag</button>
+</form>
+
+<h2>Fleet manifests</h2>
+<form class="row" method="post" action="/manage/reconcile">
+  {{ hidden(csrf, path) }}
+  <button type="submit" class="quiet">Re-read every live branch's image.yml now</button>
+  <span class="muted">{% if page.last_discovery %}last discovery {{ page.last_discovery.started | ago }}{% if page.last_discovery.error %}, <span class="bad">{{ page.last_discovery.error }}</span>{% endif %}{% else %}never run{% endif %}</span>
+</form>
+{% elif page.signed_in %}
+<p class="note">You are signed in as <strong>{{ page.signed_in }}</strong> but not an active member of {{ settings.github_org }}, so the actions are hidden. Membership is re-checked hourly.</p>
+{% else %}
+<p class="note">Actions here are for members of the <a href="https://github.com/{{ settings.github_org }}">{{ settings.github_org }}</a> organisation. <a href="/login?next=/management">Sign in with GitHub</a> to see them; the log is public.</p>
+{% endif %}
+
+<h2>Active skip flags</h2>
+{% if page.skips %}
+<table>
+  <thead><tr><th>Scope</th><th>Reason</th><th>Set by</th><th>When</th>{% if page.member %}<th></th>{% endif %}</tr></thead>
+  <tbody>
+  {% for s in page.skips %}
+    <tr><td><code>{{ s.scope }}</code></td><td>{{ s.reason or "" }}</td><td>{{ s.set_by }}</td><td class="muted">{{ s.set_at | ago }}</td>
+    {% if page.member %}<td><form class="inline" method="post" action="/manage/unskip">{{ hidden(csrf, path) }}<input type="hidden" name="scope" value="{{ s.scope }}"><button type="submit" class="small quiet">Remove</button></form></td>{% endif %}</tr>
   {% endfor %}
-</div>
+  </tbody>
+</table>
+{% else %}<p class="muted">None. The scheduler builds every live branch.</p>{% endif %}
+
+<h2>Action log</h2>
+{% if page.actions %}
+<table>
+  <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Target</th><th>Result</th><th>Detail</th></tr></thead>
+  <tbody>
+  {% for a in page.actions %}
+    <tr><td class="muted" title="{{ a.at | timestamp }}">{{ a.at | ago }}</td><td>{{ a.actor }}</td><td>{{ a.action }}</td><td>{% if a.target %}<code>{{ a.target }}</code>{% endif %}</td><td><span class="pill {{ a.result | kind }}">{{ a.result }}</span></td><td>{{ a.detail or "" }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="muted">No actions yet.</p>{% endif %}
 {% endblock %}

@@ -24,6 +24,17 @@
   </dd>
   <dt>Discord</dt><dd>{% if page.discord %}<span class="ok">configured</span>{% else %}<span class="muted">not configured</span>{% endif %}</dd>
   <dt>/events</dt><dd>{% if page.events_secret %}<span class="ok">enabled</span>{% else %}<span class="warn">disabled</span>, set <code>CONTROL_EVENTS_SECRET</code>{% endif %}</dd>
+  <dt>Scheduler</dt><dd>{% if page.scheduler %}<span class="ok">enabled</span>{% else %}<span class="muted">disabled</span> (<code>CONTROL_SCHEDULER=false</code>){% endif %}</dd>
+  <dt>Last fleet discovery</dt>
+  <dd>
+    {% if page.last_discovery %}
+      started {{ page.last_discovery.started | timestamp }}{% if page.last_discovery.finished %}, finished {{ page.last_discovery.finished | timestamp }}{% else %}, <span class="warn">running</span>{% endif %}
+      {% if page.last_discovery.error %}<span class="bad">{{ page.last_discovery.error }}</span>{% endif %}
+      {% if page.last_discovery.counts %}<span class="muted">{% for k, n in page.last_discovery.counts.items() %}{{ k }} {{ n }}{{ ", " if not loop.last }}{% endfor %}</span>{% endif %}
+    {% else %}
+      <span class="muted">never</span>; the scheduler runs it every 30 minutes, or <code>python -m control discover</code>
+    {% endif %}
+  </dd>
   <dt>Webhook deliveries</dt><dd>{{ page.deliveries_count }}</dd>
   <dt>Rows</dt><dd>{% for table, n in page.counts.items() %}{{ table }} {{ n }}{{ ", " if not loop.last }}{% endfor %}</dd>
   <dt>Last backfill</dt>

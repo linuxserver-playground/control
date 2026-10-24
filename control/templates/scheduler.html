@@ -1,16 +1,53 @@
 {% extends "base.html" %}
 {% block title %}Scheduler · control{% endblock %}
 {% block body %}
-<h1>Scheduler log</h1>
-<p class="note">The scheduler is not deployed yet. When it is, every decision it takes (build, skip, defer, and why) lands here.</p>
-{% if page.decisions %}
+<h1>Scheduler</h1>
+{% if not page.enabled %}<p class="note">The scheduler loop is off (<code>CONTROL_SCHEDULER=false</code>); the log below is history and member actions only.</p>{% endif %}
+<p class="muted">{{ page.live_branches }} live branch{{ "" if page.live_branches == 1 else "es" }}. Every branch gets an upstream check once an hour and, unless its manifest says otherwise, a package check once a week; both spread by a hash of the branch so the fleet never checks all at once.</p>
+
+<h2>Upcoming (next 24 hours)</h2>
+{% if page.upcoming %}
 <table>
-  <thead><tr><th>When</th><th>Image</th><th>Branch</th><th>Outcome</th><th>Detail</th></tr></thead>
+  <thead><tr><th>When</th><th>Image</th><th>Branch</th><th>Check</th></tr></thead>
   <tbody>
-  {% for d in page.decisions %}
-    <tr><td class="muted">{{ d.at | timestamp }}</td><td>{{ d.image }}</td><td><code>{{ d.branch }}</code></td><td><span class="pill {{ d.outcome | kind }}">{{ d.outcome }}</span></td><td>{{ d.detail or "" }}</td></tr>
+  {% for u in page.upcoming %}
+    <tr><td class="muted" title="{{ u.at | timestamp }}">{{ u.at | until }}</td><td><a href="/images/{{ u.image }}">{{ u.image }}</a></td><td><code>{{ u.branch }}</code></td><td>{{ u.kind }}</td></tr>
   {% endfor %}
   </tbody>
 </table>
-{% else %}<p class="muted">No decisions recorded.</p>{% endif %}
+{% else %}<p class="muted">Nothing scheduled: fleet discovery has not found a live branch yet.</p>{% endif %}
+
+<h2>Decisions</h2>
+<form class="row" method="get" action="/scheduler">
+  <label>Image <select name="image"><option value="">all</option>{% for image in page.images %}<option value="{{ image }}" {% if image == page.image %}selected{% endif %}>{{ image }}</option>{% endfor %}</select></label>
+  <label>Outcome <select name="outcome"><option value="">all</option>{% for outcome in page.outcomes %}<option value="{{ outcome }}" {% if outcome == page.outcome %}selected{% endif %}>{{ outcome }}</option>{% endfor %}</select></label>
+  <button type="submit" class="small quiet">Filter</button>
+  {% if page.image or page.outcome %}<a href="/scheduler">clear</a>{% endif %}
+</form>
+{% if page.decisions %}
+<table>
+  <thead><tr><th>When</th><th>Image</th><th>Branch</th><th>Check</th><th>Outcome</th><th>Detail</th></tr></thead>
+  <tbody>
+  {% for v in page.decisions %}
+    {% set d = v.decision %}
+    <tr>
+      <td class="muted" title="{{ d.at | timestamp }}">{{ d.at | ago }}</td>
+      <td><a href="/scheduler?image={{ d.image | urlencode }}">{{ d.image }}</a></td>
+      <td><code>{{ d.branch }}</code></td>
+      <td class="muted">{{ d.kind }}</td>
+      <td><span class="pill {{ d.outcome | kind }}">{{ d.outcome }}</span></td>
+      <td>
+        {% if v.info.upstream or v.info.released %}upstream <code>{{ v.info.upstream or "?" }}</code>, released <code>{{ v.info.released or "none" }}</code>{% if v.info.reason or v.info.message %}; {% endif %}{% endif %}
+        {% if v.info.reason %}{{ v.info.reason }}{% if v.info.scope %} <code>{{ v.info.scope }}</code>{% endif %}{% if v.info.note %} ({{ v.info.note }}){% endif %}{% if v.info.source %} <code>{{ v.info.source }}</code>{% endif %}{% endif %}
+        {% if v.info.dispatch_reason %}<span class="muted"> · reason {{ v.info.dispatch_reason }}</span>{% endif %}
+        {% if v.info.message %}<span class="{{ 'bad' if d.outcome == 'error' else 'muted' }}">{{ v.info.message }}</span>{% endif %}
+        {% if v.info.run_url %} · <a href="{{ v.info.run_url }}">run</a>{% endif %}
+        {% if v.run %} · <a href="/runs/{{ v.run.id }}">run #{{ v.run.run_number }}</a> <span class="pill {{ kind(v.run.status, v.run.conclusion) }}">{{ v.run.conclusion or v.run.status }}</span>{% endif %}
+        {% if v.info.dry_run %}<span class="muted"> (dry run)</span>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="muted">No decisions recorded{% if page.image or page.outcome %} for this filter{% endif %}.</p>{% endif %}
 {% endblock %}

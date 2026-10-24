@@ -51,6 +51,16 @@ def format_ago(iso: str | None, now: datetime.datetime | None = None) -> str:
     return f"{format_duration((at - when).total_seconds())} ago"
 
 
+def format_until(iso: str | None, now: datetime.datetime | None = None) -> str:
+    """Time to a future timestamp: "in 23m 10s"; "now" once it has passed; "—" for None."""
+    if not iso:
+        return "—"
+    when = datetime.datetime.fromisoformat(iso)
+    at = now or datetime.datetime.now(datetime.UTC)
+    remaining = (when - at).total_seconds()
+    return "now" if remaining <= 0 else f"in {format_duration(remaining)}"
+
+
 def span(start: str | None, end: str | None, now: datetime.datetime | None = None) -> float | None:
     """Seconds between two ISO timestamps; an open interval runs to now."""
     if not start:
@@ -63,7 +73,7 @@ def span(start: str | None, end: str | None, now: datetime.datetime | None = Non
 def kind(status: str | None, conclusion: str | None = None) -> str:
     """Map a GitHub status/conclusion (or a build result) to a pill class: ok, bad, warn, neutral."""
     value = (conclusion or status or "").lower()
-    if value in ("success", "passing", "passed", "approved", "open", "merged"):
+    if value in ("success", "passing", "passed", "approved", "open", "merged", "ok", "dispatch", "same"):
         return "ok"
     if value in (
         "failure",
@@ -73,9 +83,10 @@ def kind(status: str | None, conclusion: str | None = None) -> str:
         "startup_failure",
         "action_required",
         "changes_requested",
+        "error",
     ):
         return "bad"
-    if value in ("in_progress", "running", "queued", "waiting", "pending", "requested", "stuck"):
+    if value in ("in_progress", "running", "queued", "waiting", "pending", "requested", "stuck", "ahead", "skipped"):
         return "warn"
     return "neutral"
 
@@ -91,7 +102,9 @@ env = Environment(
     lstrip_blocks=True,
     keep_trailing_newline=True,
 )
-env.filters.update(timestamp=format_timestamp, duration=format_duration, ago=format_ago, kind=kind, sha=short_sha)
+env.filters.update(
+    timestamp=format_timestamp, duration=format_duration, ago=format_ago, until=format_until, kind=kind, sha=short_sha
+)
 env.globals.update(kind=kind, span=span)
 
 

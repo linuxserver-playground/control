@@ -185,7 +185,7 @@ class Scheduler:
         state: State,
         github: GitHub | None,
         dry_run: bool = False,
-        resolver: Resolver = resolve_in_thread,
+        resolver: Resolver | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.state = state
@@ -237,7 +237,8 @@ class Scheduler:
             return self.record(image, branch, kind, "skipped", {"reason": "cooldown", "dispatched_at": dispatched_at})
 
         try:
-            resolved = await self.resolver(manifest.manifest, self.github.token if self.github else None)
+            resolver = self.resolver or resolve_in_thread
+            resolved = await resolver(manifest.manifest, self.github.token if self.github else None)
         except rv.AssetsNotReady as exc:
             return self.record(image, branch, kind, "skipped", {"reason": "assets not ready", "message": str(exc)})
         except Exception as exc:

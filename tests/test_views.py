@@ -62,7 +62,9 @@ def test_fleet_board_rows(client: TestClient, state: State) -> None:
     radarr, sonarr = rows
     assert radarr.result is None and radarr.released is None
     assert sonarr.result == "success" and sonarr.version_tag == "4.0.20.3014-ls1" and sonarr.run_id == 5001
-    assert sonarr.released == "4.0.20.3014-ls1" and sonarr.upstream == "4.0.20.3014" and sonarr.drift == "unknown"
+    # Without a scheduler decision the build's own upstream stands in, and it matches the release: no drift.
+    assert sonarr.released == "4.0.20.3014-ls1" and sonarr.upstream == "4.0.20.3014" and sonarr.drift == "same"
+    assert sonarr.next_check is None and sonarr.skip == []  # discovery has not found this branch live yet
     page = client.get("/")
     assert "4.0.20.3014-ls1" in page.text and 'href="/builds/example-org/docker-sonarr/5001"' in page.text
     assert 'href="/images/sonarr"' in page.text and 'href="/images/sonarr/latest"' in page.text
@@ -202,16 +204,29 @@ def test_status_and_management_pages(client: TestClient, state: State) -> None:
     assert status.events_secret and status.counts["builds"] == 1 and status.app_slug is None
     assert "not configured" in client.get("/status").text
     management = client.get("/management")
-    assert management.text.count("<button") == len(views.MANAGEMENT_ACTIONS)
-    assert management.text.count('<button type="button" disabled') == len(views.MANAGEMENT_ACTIONS)
-    assert "later increment" in management.text
+    assert "Sign in with GitHub" in management.text and 'action="/manage/' not in management.text
+    page = views.ManagementPage.model_validate(client.get("/api/management.json").json())
+    assert page.member is None and page.signed_in is None and page.actions == []
+    assert page.repos == ["example-org/docker-radarr", REPO]
 
 
 def test_scheduler_page_reads_decisions(client: TestClient, state: State) -> None:
-    state.model.add_decision("sonarr", "main", "build", "upstream 4.0.21 > 4.0.20")
+    state.model.add_decision("sonarr", "main", "dispatch", '{"upstream": "4.0.21", "released": "4.0.20"}')
+    state.model.add_decision("radarr", "main", "unchanged", '{"upstream": "5.1", "released": "5.1"}')
     page = views.SchedulerPage.model_validate(client.get("/api/scheduler.json").json())
-    assert [(d.image, d.outcome) for d in page.decisions] == [("sonarr", "build")]
-    assert "4.0.21" in client.get("/scheduler").text
+    assert [(v.decision.image, v.decision.outcome) for v in page.decisions] == [
+        ("radarr", "unchanged"),
+        ("sonarr", "dispatch"),
+    ]
+    assert page.images == ["radarr", "sonarr"] and page.upcoming == [] and page.enabled
+    html = client.get("/scheduler").text
+    assert "4.0.21" in html and "<select" in html
+    filtered = views.SchedulerPage.model_validate(client.get("/api/scheduler.json?image=sonarr").json())
+    assert [v.decision.image for v in filtered.decisions] == ["sonarr"] and filtered.image == "sonarr"
+    by_outcome = views.SchedulerPage.model_validate(client.get("/api/scheduler.json?outcome=unchanged").json())
+    assert [v.decision.image for v in by_outcome.decisions] == ["radarr"]
+    rows = client.get("/scheduler?image=sonarr&outcome=dispatch").text.split("<tbody>")[-1]
+    assert "sonarr" in rows and "radarr" not in rows
 
 
 def test_badge_passing_failing_unknown(client: TestClient, state: State) -> None:

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_actions.html" import dispatch_button, skip_toggle %}
 {% block title %}{{ page.image }}{% if page.tag %}:{{ page.tag }}{% endif %} · control{% endblock %}
 {% block body %}
 <h1>
@@ -21,7 +22,7 @@
 <h2>Live branches</h2>
 {% if page.rows %}
 <table>
-  <thead><tr><th>Branch</th><th>Tag</th><th>Last build</th><th>Age</th><th>Released</th><th>Upstream</th><th>Drift</th></tr></thead>
+  <thead><tr><th>Branch</th><th>Tag</th><th>Last build</th><th>Age</th><th>Released</th><th>Upstream</th><th>Drift</th><th>Next check</th><th>Skip</th>{% if member %}<th></th>{% endif %}</tr></thead>
   <tbody>
   {% for row in page.rows %}
     <tr>
@@ -31,7 +32,16 @@
       <td class="muted">{{ row.built_at | ago }}</td>
       <td>{% if row.released %}<code>{{ row.released }}</code>{% else %}<span class="muted">none</span>{% endif %}</td>
       <td>{{ row.upstream or "—" }}</td>
-      <td class="muted">{{ row.drift }}</td>
+      <td><span class="pill {{ row.drift | kind }}">{{ row.drift }}</span></td>
+      <td class="muted" title="{{ row.next_check | timestamp }}">{{ row.next_check | until }}</td>
+      <td>{% for flag in row.skip %}<span class="pill neutral">{{ flag }}</span> {% endfor %}</td>
+      {% if member %}
+      <td class="actions" style="margin:0">
+        {{ dispatch_button(row.repo, row.branch, "manual", "Build", csrf, path) }}
+        {{ dispatch_button(row.repo, row.branch, "packages", "Packages", csrf, path) }}
+        {{ skip_toggle(row.image ~ "/" ~ row.branch, (row.image ~ "/" ~ row.branch) in row.skip, csrf, path) }}
+      </td>
+      {% endif %}
     </tr>
   {% endfor %}
   </tbody>

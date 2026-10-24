@@ -1,0 +1,22 @@
+{# Member action forms. Every one is a POST to /manage/* with the session's CSRF token and a `next` to come back to. #}
+{% macro hidden(csrf, next) %}<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="next" value="{{ next }}">{% endmacro %}
+
+{% macro run_buttons(run, csrf, next) %}
+  {% if run.status != "completed" %}
+    <form class="inline" method="post" action="/manage/cancel">{{ hidden(csrf, next) }}<input type="hidden" name="run_id" value="{{ run.id }}"><button type="submit" class="small">Cancel run</button></form>
+  {% elif run.conclusion in ("failure", "cancelled", "timed_out", "startup_failure", "action_required") %}
+    <form class="inline" method="post" action="/manage/rerun">{{ hidden(csrf, next) }}<input type="hidden" name="run_id" value="{{ run.id }}"><button type="submit" class="small">Re-run failed jobs</button></form>
+  {% endif %}
+{% endmacro %}
+
+{% macro dispatch_button(repo, branch, reason, label, csrf, next) %}
+  <form class="inline" method="post" action="/manage/dispatch">{{ hidden(csrf, next) }}<input type="hidden" name="repo" value="{{ repo }}"><input type="hidden" name="branch" value="{{ branch }}"><input type="hidden" name="reason" value="{{ reason }}"><button type="submit" class="small">{{ label }}</button></form>
+{% endmacro %}
+
+{% macro skip_toggle(scope, flagged, csrf, next) %}
+  {% if flagged %}
+    <form class="inline" method="post" action="/manage/unskip">{{ hidden(csrf, next) }}<input type="hidden" name="scope" value="{{ scope }}"><button type="submit" class="small quiet" title="Remove the skip flag {{ scope }}">Unskip</button></form>
+  {% else %}
+    <form class="inline" method="post" action="/manage/skip">{{ hidden(csrf, next) }}<input type="hidden" name="scope" value="{{ scope }}"><button type="submit" class="small quiet" title="Hold the scheduler back for {{ scope }}">Skip</button></form>
+  {% endif %}
+{% endmacro %}

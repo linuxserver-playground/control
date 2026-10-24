@@ -13,10 +13,26 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from . import badge
+from . import auth, badge
+from . import scheduler as sched
 from .backfill import last_backfill
 from .db import Delivery
-from .model import Build, Issue, Job, PullRequest, Release, Repo, Run, SchedulerDecision, stuck_threshold
+from .fleet import last_discovery
+from .manage import REASONS
+from .model import (
+    Action,
+    Build,
+    Issue,
+    Job,
+    Manifest,
+    PullRequest,
+    Release,
+    Repo,
+    Run,
+    SchedulerDecision,
+    Skip,
+    stuck_threshold,
+)
 from .state import State, state_of
 from .stream import Broadcaster, sse
 from .templating import package_version, render
@@ -30,9 +46,23 @@ def now_utc() -> datetime.datetime:
     return datetime.datetime.now(datetime.UTC)
 
 
-def html(request: Request, template: str, page: BaseModel, **extra: Any) -> HTMLResponse:
+def html(request: Request, template: str, page: BaseModel, user: auth.User | None = None, **extra: Any) -> HTMLResponse:
+    """Every page knows who is looking: members see the action forms, everyone else the same page read-only.
+    `user` overrides the cookie when the caller just refreshed the membership verdict."""
     state = state_of(request)
-    return HTMLResponse(render(template, page=page, settings=state.settings, path=request.url.path, **extra))
+    user = user or auth.current_user(request)
+    return HTMLResponse(
+        render(
+            template,
+            page=page,
+            settings=state.settings,
+            path=request.url.path,
+            user=user,
+            member=bool(user and user.member),
+            csrf=user.csrf if user else "",
+            **extra,
+        )
+    )
 
 
 # -- page models --------------------------------------------------------------------------------------------------
@@ -51,11 +81,21 @@ class FleetRow(BaseModel):
     reason: str | None
     version_tag: str | None
     released: str | None
+    """The branch's newest release tag."""
     released_at: str | None
     upstream: str | None
+    """The upstream version the scheduler last resolved, else the one the last build reported."""
     drift: str = "unknown"
+    """ahead (upstream newer than released), same, or unknown."""
     next_check: str | None = None
+    """When the scheduler looks at this branch next; None for branches discovery has not found live."""
+    last_check: str | None = None
+    last_outcome: str | None = None
+    source: str | None = None
+    """The manifest's upstream.version.type."""
+    package_check: bool = True
     skip: list[str] = []
+    """Skip-flag scopes that hold the branch back, plus `archived`."""
 
 
 class FleetPage(BaseModel):
@@ -145,8 +185,35 @@ class ImagePage(BaseModel):
     badge_url: str
 
 
+class DecisionView(BaseModel):
+    decision: SchedulerDecision
+    info: dict[str, Any]
+    """The detail JSON: versions, reason, run URL."""
+    run: Run | None
+    """For a dispatch: the workflow_dispatch run that appeared on the branch right after."""
+
+
+class Upcoming(BaseModel):
+    image: str
+    branch: str
+    kind: str
+    at: str
+
+
 class SchedulerPage(BaseModel):
-    decisions: list[SchedulerDecision]
+    enabled: bool
+    decisions: list[DecisionView]
+    image: str | None
+    outcome: str | None
+    images: list[str]
+    outcomes: list[str]
+    upcoming: list[Upcoming]
+    live_branches: int
+    generated_at: str
+
+
+class SkipsPage(BaseModel):
+    skips: list[Skip]
 
 
 class StatusPage(BaseModel):
@@ -160,15 +227,25 @@ class StatusPage(BaseModel):
     discord: bool
     events_secret: bool
     backfill_on_start: bool
+    scheduler: bool
     deliveries_count: int
     deliveries: list[Delivery]
     counts: dict[str, int]
     last_backfill: dict[str, Any] | None
+    last_discovery: dict[str, Any] | None
 
 
 class ManagementPage(BaseModel):
     member: str | None
-    actions: list[str]
+    """The signed-in member's login; None shows the log read-only."""
+    signed_in: str | None
+    actions: list[Action]
+    skips: list[Skip]
+    branches: list[Manifest]
+    """Every live branch, for the dispatch and skip forms."""
+    repos: list[str]
+    reasons: list[str]
+    last_discovery: dict[str, Any] | None
 
 
 # -- helpers -----------------------------------------------------------------------------------------------------
@@ -218,27 +295,48 @@ def pick_release(releases: list[Release], branch: str, default_branch: str, bran
     return next((r for r in releases if not any(r.tag.startswith(prefix) for prefix in others)), None)
 
 
-def current_member(request: Request) -> str | None:
-    """Member sign-in is a later increment; until then nobody is a member and management stays read-only."""
-    return None
+def drift(upstream: str | None, released: str | None) -> str:
+    if upstream is None or released is None:
+        return "unknown"
+    return "same" if upstream == released else "ahead"
 
 
 # -- page builders -----------------------------------------------------------------------------------------------
 
 
 def fleet_rows(state: State, repos: list[Repo]) -> list[FleetRow]:
+    """One row per live branch: the manifests discovery found, or (before discovery has run for a repo) the
+    default branch plus every branch that has had a live build."""
     rows: list[FleetRow] = []
+    now = now_utc()
+    skips = state.model.skips()
     for repo in repos:
         latest = {b.branch: b for b in state.model.latest_builds_per_branch(repo.full_name, "live") if b.branch}
-        branches = sorted(set(latest) | {repo.default_branch}, key=lambda b: (b != repo.default_branch, b))
+        manifests = {m.branch: m for m in state.model.manifests(repo.full_name)}
+        known = set(manifests) if manifests else set(latest) | {repo.default_branch}
+        branches = sorted(known, key=lambda b: (b != repo.default_branch, b))
         releases = state.model.releases_for_repo(repo.full_name)
+        image = repo.image_name or repo.name
         for branch in branches:
             build = latest.get(branch)
+            manifest = manifests.get(branch)
             release = pick_release(releases, branch, repo.default_branch, branches)
+            decision = state.model.last_decision(image, branch, sched.KIND_UPSTREAM)
+            info = decision.info if decision else {}
+            upstream = info.get("upstream") or (build.upstream_clean if build else None)
+            released = info.get("released")
+            if released is None and release is not None:
+                release_tag = "latest" if branch == repo.default_branch else branch
+                others = [b for b in branches if b != branch]
+                released = sched.released_from_tag(release.tag, release_tag, others)
+            if released is None and build is not None:
+                released = build.upstream_clean
+            flags = [skip.scope for skip in skips if skip.matches(image, branch, upstream)]
+            scheduled = manifest is not None and state.settings.scheduler and not repo.archived
             rows.append(
                 FleetRow(
                     repo=repo.full_name,
-                    image=repo.image_name or repo.name,
+                    image=image,
                     branch=branch,
                     default_branch=branch == repo.default_branch,
                     archived=repo.archived,
@@ -249,8 +347,16 @@ def fleet_rows(state: State, repos: list[Repo]) -> list[FleetRow]:
                     version_tag=build.version_tag if build else None,
                     released=release.tag if release else None,
                     released_at=release.published_at if release else None,
-                    upstream=build.upstream if build else None,
-                    skip=["archived"] if repo.archived else [],
+                    upstream=upstream,
+                    drift=drift(upstream, released),
+                    next_check=sched.next_upstream_check(repo.full_name, branch, now).isoformat(timespec="seconds")
+                    if scheduled
+                    else None,
+                    last_check=decision.at if decision else None,
+                    last_outcome=decision.outcome if decision else None,
+                    source=manifest.source_type if manifest else None,
+                    package_check=manifest.package_check if manifest else True,
+                    skip=(["archived"] if repo.archived else []) + flags,
                 )
             )
     return rows
@@ -388,8 +494,36 @@ def build_page(state: State, owner: str, repo: str, run_id: int) -> BuildPage:
     )
 
 
-def scheduler_page(state: State) -> SchedulerPage:
-    return SchedulerPage(decisions=state.model.recent_decisions(200))
+OUTCOMES = ["unchanged", "skipped", "dispatch", "error"]
+
+
+def decision_view(state: State, decision: SchedulerDecision) -> DecisionView:
+    run = None
+    if decision.outcome == "dispatch":
+        repo = state.model.repo_by_name(f"docker-{decision.image}")
+        if repo:
+            run = state.model.run_after(repo.full_name, decision.branch, "workflow_dispatch", decision.at)
+    return DecisionView(decision=decision, info=decision.info, run=run)
+
+
+def scheduler_page(state: State, image: str | None = None, outcome: str | None = None) -> SchedulerPage:
+    now = now_utc()
+    manifests = state.model.manifests()
+    return SchedulerPage(
+        enabled=state.settings.scheduler,
+        decisions=[decision_view(state, d) for d in state.model.recent_decisions(200, image or None, outcome or None)],
+        image=image or None,
+        outcome=outcome or None,
+        images=state.model.decision_images(),
+        outcomes=OUTCOMES,
+        upcoming=[Upcoming(**row) for row in sched.upcoming(manifests, now)],
+        live_branches=len(manifests),
+        generated_at=now.isoformat(timespec="seconds"),
+    )
+
+
+def skips_page(state: State) -> SkipsPage:
+    return SkipsPage(skips=state.model.skips())
 
 
 def status_page(state: State) -> StatusPage:
@@ -405,18 +539,28 @@ def status_page(state: State) -> StatusPage:
         discord=state.discord.configured,
         events_secret=bool(state.settings.events_secret),
         backfill_on_start=state.settings.backfill_on_start,
+        scheduler=state.settings.scheduler,
         deliveries_count=state.db.count_deliveries(),
         deliveries=state.db.recent_deliveries(20),
         counts=state.model.counts(),
         last_backfill=last_backfill(state),
+        last_discovery=last_discovery(state),
     )
 
 
-MANAGEMENT_ACTIONS = ["Trigger live build", "Re-run failed jobs", "Cancel run", "Pause scheduler", "Skip image"]
-
-
-def management_page(request: Request) -> ManagementPage:
-    return ManagementPage(member=current_member(request), actions=MANAGEMENT_ACTIONS)
+def management_page(state: State, user: auth.User | None) -> ManagementPage:
+    manifests = state.model.manifests()
+    repos = sorted({m.repo for m in manifests} | {r.full_name for r in state.model.repos(images_only=True)})
+    return ManagementPage(
+        member=user.login if user and user.member else None,
+        signed_in=user.login if user else None,
+        actions=state.model.recent_actions(100),
+        skips=state.model.skips(),
+        branches=manifests,
+        repos=repos,
+        reasons=list(REASONS),
+        last_discovery=last_discovery(state),
+    )
 
 
 # -- routes: HTML -------------------------------------------------------------------------------------------------
@@ -473,8 +617,8 @@ def image_tag(request: Request, name: str, tag: str) -> HTMLResponse:
 
 
 @router.get("/scheduler", response_class=HTMLResponse)
-def scheduler(request: Request) -> HTMLResponse:
-    return html(request, "scheduler.html", scheduler_page(state_of(request)))
+def scheduler(request: Request, image: str | None = None, outcome: str | None = None) -> HTMLResponse:
+    return html(request, "scheduler.html", scheduler_page(state_of(request), image, outcome), live=True)
 
 
 @router.get("/status", response_class=HTMLResponse)
@@ -483,8 +627,17 @@ def status(request: Request) -> HTMLResponse:
 
 
 @router.get("/management", response_class=HTMLResponse)
-def management(request: Request) -> HTMLResponse:
-    return html(request, "management.html", management_page(request))
+async def management(request: Request) -> HTMLResponse:
+    """The one read-only page that re-checks a stale membership, so the forms appear or vanish within the hour."""
+    state = state_of(request)
+    user = auth.current_user(request)
+    changed = False
+    if user is not None:
+        user, changed = await auth.refresh_if_stale(state, user)
+    response = html(request, "management.html", management_page(state, user), user=user, live=True)
+    if user is not None and changed:
+        auth.set_session(response, state, user)
+    return response
 
 
 # -- routes: JSON -------------------------------------------------------------------------------------------------
@@ -541,8 +694,13 @@ def image_tag_json(request: Request, name: str, tag: str) -> ImagePage:
 
 
 @router.get("/api/scheduler.json")
-def scheduler_json(request: Request) -> SchedulerPage:
-    return scheduler_page(state_of(request))
+def scheduler_json(request: Request, image: str | None = None, outcome: str | None = None) -> SchedulerPage:
+    return scheduler_page(state_of(request), image, outcome)
+
+
+@router.get("/api/skips.json")
+def skips_json(request: Request) -> SkipsPage:
+    return skips_page(state_of(request))
 
 
 @router.get("/api/status.json")
@@ -552,7 +710,7 @@ def status_json(request: Request) -> StatusPage:
 
 @router.get("/api/management.json")
 def management_json(request: Request) -> ManagementPage:
-    return management_page(request)
+    return management_page(state_of(request), auth.current_user(request))
 
 
 # -- routes: stream and badge -------------------------------------------------------------------------------------

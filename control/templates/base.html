@@ -38,7 +38,14 @@
   .note { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: .8rem 1rem; color: var(--muted); }
   button { font: inherit; padding: .5rem 1rem; border-radius: 6px; border: 1px solid var(--line); background: var(--accent); color: #0f1216; cursor: pointer; }
   button:disabled { opacity: .45; cursor: not-allowed; }
-  .actions { display: flex; flex-wrap: wrap; gap: .6rem; margin: 1rem 0; }
+  .actions { display: flex; flex-wrap: wrap; gap: .6rem; margin: 1rem 0; align-items: center; }
+  form.inline { display: inline; }
+  form.row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: .6rem 0; }
+  input, select { font: inherit; padding: .4rem .6rem; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); }
+  button.small { padding: .15rem .6rem; font-size: .85em; }
+  button.quiet { background: var(--panel); color: var(--fg); }
+  nav .user { margin-left: auto; display: flex; gap: .6rem; align-items: center; color: var(--muted); }
+  nav .user img { width: 20px; height: 20px; border-radius: 50%; vertical-align: middle; }
   footer { margin-top: 3rem; color: var(--muted); font-size: .85em; display: flex; gap: 1rem; }
   @media (max-width: 40rem) { body { padding: 1rem; } table { font-size: .9em; } th, td { padding: .3rem .4rem; } }
 </style>
@@ -51,6 +58,15 @@
   {% for href, label in nav %}
     <a href="{{ href }}" {% if path == href or (href != "/" and path.startswith(href)) %}class="current"{% endif %}>{{ label }}</a>
   {% endfor %}
+  <span class="user">
+    {% if user %}
+      {% if user.avatar_url %}<img src="{{ user.avatar_url }}" alt="">{% endif %}
+      <span>{{ user.login }}{% if user.member %} <span class="ok" title="member of {{ settings.github_org if settings else 'the org' }}">member</span>{% else %} <span class="muted" title="not a member of the organisation">guest</span>{% endif %}</span>
+      <form class="inline" method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="next" value="{{ path }}"><button type="submit" class="small quiet">Sign out</button></form>
+    {% else %}
+      <a href="/login?next={{ path | urlencode }}">Sign in</a>
+    {% endif %}
+  </span>
 </nav>
 <main id="main">
 {% block body %}{% endblock %}

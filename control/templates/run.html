@@ -1,9 +1,11 @@
 {% extends "base.html" %}
 {% from "_jobs.html" import steps %}
+{% from "_actions.html" import run_buttons %}
 {% block title %}Run {{ page.run.id }} · control{% endblock %}
 {% block body %}
 <h1>{{ page.run.repo.split('/')[-1] }} · {{ page.run.workflow_name or "workflow" }} #{{ page.run.run_number }}
   <span class="pill {{ kind(page.run.status, page.run.conclusion) }}">{{ page.run.conclusion or page.run.status }}</span></h1>
+{% if member %}<div class="actions">{{ run_buttons(page.run, csrf, path) }}</div>{% endif %}
 <dl>
   <dt>Repository</dt><dd><a href="https://github.com/{{ page.run.repo }}">{{ page.run.repo }}</a></dd>
   <dt>Title</dt><dd>{{ page.run.display_title or "" }}</dd>

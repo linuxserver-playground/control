@@ -12,6 +12,7 @@ def test_manifest_urls_derive_from_public_url(settings: Settings) -> None:
     assert m["hook_attributes"] == {"url": f"{PUBLIC_URL}/webhooks/github", "active": True}
     assert m["redirect_url"] == f"{PUBLIC_URL}/setup/callback"
     assert m["setup_url"] == f"{PUBLIC_URL}/setup/installed"
+    assert m["callback_urls"] == [f"{PUBLIC_URL}/login/callback"]
 
 
 def test_manifest_content(settings: Settings) -> None:
