@@ -184,3 +184,13 @@ def test_events_are_replayable_deliveries(client: TestClient, state: State) -> N
     assert post_event(client, fixture("control.build.summary")).status_code == 202
     (stored,) = state.db.recent_deliveries()
     assert stored.event == "control:build.summary" and stored.repo == REPO and stored.delivery_id.startswith("control-")
+
+
+def test_embed_links_hub_results_for_live_builds() -> None:
+    build = Build.from_event(fixture("control.build.summary"))
+    assert build.mode == "live" and build.version_tag
+    hub_link = f"https://hub.example/hub/builds/{build.image}/{build.version_tag}/"
+    assert hub_link in json.dumps(build_embed(build, "https://x", "https://hub.example/hub"))
+    assert "https://hub.example" not in json.dumps(build_embed(build, "https://x"))
+    dev = build.model_copy(update={"mode": "dev"})
+    assert "https://hub.example" not in json.dumps(build_embed(dev, "https://x", "https://hub.example/hub"))

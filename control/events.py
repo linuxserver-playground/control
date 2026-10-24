@@ -54,9 +54,12 @@ def platforms_field(build: Build) -> str:
     return ", ".join(f"{p.arch} ({p.result or 'unknown'})" for p in build.platforms)
 
 
-def build_embed(build: Build, public_url: str) -> dict[str, Any]:
+def build_embed(build: Build, public_url: str, hub_url: str | None = None) -> dict[str, Any]:
     """One embed per build; the same shape for the provisional and the final message so an edit reads well."""
     links = []
+    # The hub renders the CI results page from the release assets (CONVENTIONS §10); only live builds have one.
+    if hub_url and build.mode == "live" and build.version_tag and build.image:
+        links.append(f"[results]({hub_url}/builds/{build.image}/{build.version_tag}/)")
     if build.run_url:
         links.append(f"[run]({build.run_url})")
     if build.release_url:
@@ -98,7 +101,7 @@ async def announce(state: State, build: Build, event_type: str) -> None:
         return
     if event_type == "build.started" and build.mode != "live":
         return
-    embed = build_embed(build, state.settings.public_url)
+    embed = build_embed(build, state.settings.public_url, state.settings.hub_url)
     if build.discord_message_id and await state.discord.edit(build.discord_message_id, embeds=[embed]):
         return
     message_id = await state.discord.post(embeds=[embed])

@@ -25,6 +25,8 @@ class Settings(BaseModel):
     """Optional; when set, /setup only answers to ?token=<this>, so strangers cannot start the app flow."""
     app_name: str = "LinuxServer CI (playground)"
     """The GitHub App's display name; GitHub derives the slug from it."""
+    hub_url: str | None = None
+    """Public URL of the hub on GitHub Pages; live builds link their rendered results page there."""
     events_secret: str | None = None
     """Shared with the workflows repo; signs the build events POSTed to /events. Unset means /events is off."""
     backfill_on_start: bool = False
@@ -52,6 +54,8 @@ class Settings(BaseModel):
             fields["setup_token"] = token
         if name := env("CONTROL_APP_NAME"):
             fields["app_name"] = name
+        if hub := env("HUB_URL"):
+            fields["hub_url"] = hub.rstrip("/")
         if secret := env("CONTROL_EVENTS_SECRET"):
             fields["events_secret"] = secret
         if backfill := env("CONTROL_BACKFILL_ON_START"):
