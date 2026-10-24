@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}GitHub App · control{% endblock %}
+{% block body %}
+<h1>GitHub App</h1>
+<dl>
+  <dt>App</dt><dd><a href="{{ credentials.html_url }}">{{ credentials.slug }}</a> (id {{ credentials.id }})</dd>
+  <dt>Installation</dt>
+  <dd>
+    {% if installation_id %}
+      <span class="ok">installed</span> on {{ settings.github_org }} (installation {{ installation_id }})
+    {% else %}
+      <span class="warn">not installed yet</span>: <a href="{{ credentials.install_url }}">install on {{ settings.github_org }}</a>
+    {% endif %}
+  </dd>
+</dl>
+<p><a href="/">Back to status</a></p>
+{% endblock %}

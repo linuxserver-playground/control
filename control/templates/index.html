@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}control · {{ settings.github_org }}{% endblock %}
+{% block body %}
+<h1>LinuxServer CI control</h1>
+<dl>
+  <dt>Organisation</dt><dd><a href="https://github.com/{{ settings.github_org }}">{{ settings.github_org }}</a></dd>
+  <dt>GitHub App</dt>
+  <dd>
+    {% if credentials %}
+      <span class="ok">configured</span> as <a href="{{ credentials.html_url }}">{{ credentials.slug }}</a> (id {{ credentials.id }})
+    {% else %}
+      <span class="warn">not configured</span>, <a href="/setup">set it up</a>
+    {% endif %}
+  </dd>
+  <dt>Installation</dt>
+  <dd>
+    {% if installation_id %}
+      <span class="ok">installed</span> (installation {{ installation_id }})
+    {% elif credentials %}
+      <span class="warn">not installed</span>, <a href="{{ credentials.install_url }}">install on {{ settings.github_org }}</a>
+    {% else %}
+      <span class="muted">waiting for the app</span>
+    {% endif %}
+  </dd>
+  <dt>Discord</dt><dd>{% if discord %}<span class="ok">configured</span>{% else %}<span class="muted">not configured</span>{% endif %}</dd>
+  <dt>Webhook deliveries</dt><dd>{{ deliveries_count }}</dd>
+</dl>
+
+<h2>Last {{ deliveries | length }} deliveries</h2>
+{% if deliveries %}
+<table>
+  <thead><tr><th>Received</th><th>Event</th><th>Action</th><th>Repository</th></tr></thead>
+  <tbody>
+  {% for d in deliveries %}
+    <tr>
+      <td>{{ d.received_at | timestamp }}</td>
+      <td><code>{{ d.event }}</code></td>
+      <td>{{ d.action or "" }}</td>
+      <td>{{ d.repo or "" }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">None yet.</p>
+{% endif %}
+{% endblock %}

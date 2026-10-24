@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Set up GitHub App · control{% endblock %}
+{% block body %}
+<h1>Create the GitHub App</h1>
+<p>
+  This posts an app manifest to GitHub for the <strong>{{ settings.github_org }}</strong> organisation.
+  GitHub shows the app (name <strong>{{ settings.app_name }}</strong>, webhooks to
+  <code>{{ settings.public_url }}/webhooks/github</code>), you confirm, and GitHub sends you back here with
+  the credentials, which are stored in the data directory. Nothing is pasted by hand.
+</p>
+<form method="post" action="{{ action }}">
+  <input type="hidden" name="manifest" value="{{ manifest }}">
+  <button type="submit">Create GitHub App</button>
+</form>
+<h2>Manifest</h2>
+<pre><code>{{ manifest }}</code></pre>
+{% endblock %}
