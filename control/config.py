@@ -29,6 +29,8 @@ class Settings(BaseModel):
     """Public URL of the hub on GitHub Pages; live builds link their rendered results page there."""
     hub_repo: str = "hub"
     """Repository (in github_org) that receives a repository_dispatch `image-released` after a live release."""
+    site_repo: str = "site"
+    """Repository (in github_org) that receives a repository_dispatch `hub-updated` when the hub's Deploy succeeds."""
     oauth_client_id: str | None = None
     oauth_client_secret: str | None = None
     """A classic OAuth App used only for sign-in. Its consent screen lists plain scopes (read:user, read:org)
@@ -65,6 +67,8 @@ class Settings(BaseModel):
             fields["hub_url"] = hub.rstrip("/")
         if hub_repo := env("HUB_REPO"):
             fields["hub_repo"] = hub_repo
+        if site_repo := env("SITE_REPO"):
+            fields["site_repo"] = site_repo
         if oauth_id := env("OAUTH_CLIENT_ID"):
             fields["oauth_client_id"] = oauth_id
         if oauth_secret := env("OAUTH_CLIENT_SECRET"):
