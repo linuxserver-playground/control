@@ -33,14 +33,13 @@ PERMISSIONS: dict[str, str] = {
     "workflows": "write",
 }
 
+# installation and installation_repositories are delivered to every app without being listed, and
+# GitHub rejects a manifest that names them; package events cannot be subscribed from a manifest at all.
 EVENTS: list[str] = [
     "check_run",
     "check_suite",
-    "installation",
-    "installation_repositories",
     "issue_comment",
     "issues",
-    "package",
     "pull_request",
     "push",
     "release",

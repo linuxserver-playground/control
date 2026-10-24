@@ -23,7 +23,8 @@ def test_manifest_content(settings: Settings) -> None:
     assert m["default_permissions"]["workflows"] == "write"
     assert m["default_permissions"]["metadata"] == "read"
     assert m["default_events"] is EVENTS
-    assert {"workflow_run", "installation", "installation_repositories", "push"} <= set(m["default_events"])
+    assert {"workflow_run", "pull_request", "push"} <= set(m["default_events"])
+    assert not {"installation", "installation_repositories", "package"} & set(m["default_events"])
 
 
 def test_manifest_follows_app_name_override(settings: Settings) -> None:
