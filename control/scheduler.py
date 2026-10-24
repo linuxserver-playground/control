@@ -187,12 +187,14 @@ class Scheduler:
         dry_run: bool = False,
         resolver: Resolver | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        clock: Callable[[], datetime.datetime] = lambda: datetime.datetime.now(datetime.UTC),
     ) -> None:
         self.state = state
         self.github = github
         self.dry_run = dry_run
         self.resolver = resolver
         self.sleep = sleep
+        self.clock = clock
         self.model: Model = state.model
 
     # -- decisions ------------------------------------------------------------------------------------------------
@@ -200,7 +202,8 @@ class Scheduler:
     def record(self, image: str, branch: str, kind: str, outcome: str, detail: dict[str, Any]) -> Decision:
         decision = Decision(image=image, branch=branch, kind=kind, outcome=outcome, detail=detail)
         if not self.dry_run:
-            decision.id = self.model.add_decision(image, branch, outcome, json.dumps(detail), kind)
+            at = self.clock().isoformat(timespec="seconds")
+            decision.id = self.model.add_decision(image, branch, outcome, json.dumps(detail), kind, at)
             self.state.stream.publish("scheduler_decisions", decision.id)
         log.info("%s", decision.line())
         return decision
@@ -224,7 +227,7 @@ class Scheduler:
     async def check_upstream(self, manifest: Manifest, kind: str = KIND_UPSTREAM) -> Decision:
         image = manifest.image
         branch = manifest.branch
-        now = datetime.datetime.now(datetime.UTC)
+        now = self.clock()
         source = manifest.source_type
         if blocked := self.blocked(manifest, image):
             return self.record(image, branch, kind, "skipped", blocked)
@@ -316,9 +319,9 @@ class Scheduler:
 
     # -- the loop -------------------------------------------------------------------------------------------------
 
-    async def tick(self, now: datetime.datetime | None = None) -> list[Decision]:
+    async def tick(self) -> list[Decision]:
         """One pass: refresh the fleet when due, then every check whose slot has passed since its last record."""
-        at = now or datetime.datetime.now(datetime.UTC)
+        at = self.clock()
         if discovery_due(self.state, at):
             await discover_once(self.state)
         decisions: list[Decision] = []

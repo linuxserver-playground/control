@@ -12,11 +12,11 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
-from control import handlers
+from control import auth, handlers
 from control.app import create_app
 from control.config import Settings
 from control.github_app import AppCredentials
-from control.state import State
+from control.state import INSTALLATION_ID, State
 
 PUBLIC_URL = "https://ci.example.test:8443"
 EVENTS_SECRET = "events-secret"
@@ -127,6 +127,37 @@ def deliver(
 
 def mock_client(handler: Any) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def mock_github(state: State, monkeypatch: pytest.MonkeyPatch, handler: Any) -> None:
+    """Point every outbound call (GitHub, Discord) at a mock transport; Discord stays unconfigured."""
+    mock = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(state, "http", mock)
+    monkeypatch.setattr(state.discord, "client", mock)
+    monkeypatch.setattr(state.tokens, "client", mock)
+
+
+def install(state: State, credentials: AppCredentials, installation_id: int = 777) -> None:
+    """Credentials on disk and an installation id in kv: what `installation_client` needs."""
+    state.credentials.save(credentials)
+    state.db.set(INSTALLATION_ID, str(installation_id))
+
+
+def token_response(request: httpx.Request) -> httpx.Response | None:
+    """The installation token exchange, for handlers that serve the rest of the API themselves."""
+    if request.url.path.startswith("/app/installations/") and request.url.path.endswith("/access_tokens"):
+        import datetime
+
+        expires = datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=1)
+        return httpx.Response(201, json={"token": "ghs_token", "expires_at": expires.strftime("%Y-%m-%dT%H:%M:%SZ")})
+    return None
+
+
+def sign_in(client: TestClient, state: State, login: str = "octocat", member: bool = True, **fields: Any) -> auth.User:
+    """Put a signed session cookie on the test client, as /login/callback would, and return it (for the CSRF)."""
+    user = auth.new_user(login, f"https://avatars.example/{login}", member).model_copy(update=fields)
+    client.cookies.set(auth.SESSION_COOKIE, auth.sign(state.session_secret, user.model_dump()))
+    return user
 
 
 def mock_discord(state: State, monkeypatch: pytest.MonkeyPatch, handler: Any) -> None:

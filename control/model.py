@@ -941,9 +941,15 @@ class Model:
     # -- scheduler ------------------------------------------------------------------------------------------------
 
     def add_decision(
-        self, image: str, branch: str, outcome: str, detail: str | None = None, kind: str = "upstream"
+        self,
+        image: str,
+        branch: str,
+        outcome: str,
+        detail: str | None = None,
+        kind: str = "upstream",
+        at: str | None = None,
     ) -> int:
-        now = utcnow()
+        now = at or utcnow()
         with self.db.connect() as conn:
             cursor = conn.execute(
                 "INSERT INTO scheduler_decisions (at, image, branch, kind, outcome, detail, created_at, updated_at) "
