@@ -21,6 +21,7 @@ RUN \
     python3-dev && \
   echo "**** install runtime packages ****" && \
   apk add --no-cache \
+    jq \
     python3 && \
   echo "**** install control ****" && \
   python3 -m venv /lsiopy && \

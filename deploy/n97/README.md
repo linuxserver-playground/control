@@ -14,7 +14,9 @@ for `*.thelamer.duckdns.org` and proxies by container name. Nothing here publish
    CONTROL_SETUP_TOKEN=<openssl rand -hex 24>
    DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/<id>/<token>
    CONTROL_EVENTS_SECRET=<openssl rand -hex 32>   # the same value goes into the workflows repo as CONTROL_EVENTS_SECRET
+   CONTROL_SESSION_SECRET=<openssl rand -hex 32>  # signs the member sign-in cookie; without it a restart signs everyone out
    CONTROL_BACKFILL_ON_START=true
+   CONTROL_SCHEDULER=true                         # the default; false stops dispatching builds
    EOF
    chmod 600 /home/thelamer/control/.env
    ```
@@ -52,6 +54,15 @@ for `*.thelamer.duckdns.org` and proxies by container name. Nothing here publish
 4. `/status` now shows configured + installed, and webhook deliveries start appearing as repos see activity.
    With `CONTROL_BACKFILL_ON_START=true` the next restart fills the dashboard from the GitHub API; or run
    `docker exec control /lsiopy/bin/python -m control backfill` once by hand.
+
+## Member sign-in
+
+The GitHub App must know where to send members after they authorise: open the app's settings
+(`https://github.com/organizations/linuxserver-playground/settings/apps/<slug>`), and under **Identifying and
+authorizing users** add the callback URL `https://ci.thelamer.duckdns.org:8443/login/callback`. Leave
+"Request user authorization (OAuth) during installation" off; it is not needed. Apps created from the manifest
+after this increment get the URL automatically. Then `/login` works for anyone, and members of the org (active
+membership) see the action forms on `/management`, `/runs/{id}`, `/images/{name}` and the fleet board.
 
 ## Upgrading
 

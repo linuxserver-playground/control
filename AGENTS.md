@@ -2,7 +2,8 @@
 
 control is the CI control plane for the LinuxServer.io v2 playground: a FastAPI app that is a GitHub App,
 stores webhook deliveries in sqlite, builds a state model from them, takes signed build events from the
-shared workflow, posts to Discord and serves the dashboard. Python 3.12+, no ORM, no frontend framework.
+shared workflow, posts to Discord, serves the dashboard, schedules every upstream and package build of the
+fleet, and lets org members act (re-run, cancel, dispatch, skip). Python 3.12+, no ORM, no frontend framework.
 
 ## Layout
 
@@ -12,11 +13,17 @@ shared workflow, posts to Discord and serves the dashboard. Python 3.12+, no ORM
   cold start; `control/events.py` the signed `/events` endpoint and Discord embeds; `control/views.py` the
   pages, their JSON twins, the SSE stream and the badge route; `control/badge.py` the SVG;
   `control/stream.py` the in-process broadcaster; `control/github_app.py` manifest, conversion, credentials
-  file, JWT and installation tokens; `control/webhooks.py` signature check and intake; `control/setup.py`
-  the manifest bootstrap flow; `control/notify.py` Discord; `control/templating.py` Jinja filters;
-  `control/app.py` wires it together; `control/__main__.py` serve / replay / backfill.
-- `control/templates/` one template per page extending `base.html` (nav, CSS, live-refresh script);
-  `_jobs.html` holds the shared job and step macros.
+  file, JWT and installation tokens; `control/github.py` the authenticated REST client the scheduler, fleet
+  and actions share; `control/fleet.py` live-branch discovery from `image.yml` into `manifests`;
+  `control/scheduler.py` the hourly upstream and weekly package schedules, decisions and dispatch;
+  `control/vendor/resolve_version.py` the workflows repo's resolver, copied verbatim (header names the
+  commit; `tests/test_vendor.py` fails on drift); `control/auth.py` GitHub OAuth sign-in, the signed session
+  cookie and the membership check; `control/manage.py` the member POST actions; `control/webhooks.py`
+  signature check and intake; `control/setup.py` the manifest bootstrap flow; `control/notify.py` Discord;
+  `control/templating.py` Jinja filters; `control/app.py` wires it together; `control/__main__.py` serve /
+  replay / backfill / discover / schedule.
+- `control/templates/` one template per page extending `base.html` (nav with sign-in state, CSS,
+  live-refresh script); `_jobs.html` holds the shared job and step macros, `_actions.html` the member forms.
 - `tests/` pytest, one temp data dir per test; `tests/fixtures/` minimal realistic webhook, control-event
   and REST payloads (`seed()` in `conftest.py` runs them through the handlers); `root/` the s6 services;
   `deploy/n97/` the operator files.
@@ -46,6 +53,15 @@ All three must pass before a commit. Match the existing style: short modules, do
 - Incoming control events are validated with the `contracts` package from the builder repo, never with a
   hand-copied schema. Nothing may reference namespaces other than `linuxserver-playground` (use
   `settings.github_org`).
+- The upstream version is resolved only through `control/vendor/resolve_version.py`, never reimplemented;
+  to change it, change `workflows/scripts/resolve_version.py`, copy the file back and update the commit in
+  the header. The scheduler never runs `command` or `deb_repo` sources (shell from a repo, docker).
+- Every scheduler outcome is a `scheduler_decisions` row with a JSON detail; dispatch is always
+  `workflow_dispatch` on `build.yml` with the branch as `ref`. Member dispatches go through the same
+  `Scheduler.dispatch`, so the cooldown and the log see them.
+- Mutating routes live in `control/manage.py` only: POST, CSRF token from the session, `require_member`
+  (403 for anyone else), rate limited, and an `actions` row whatever the outcome. The user's OAuth token
+  is used once for `GET /user` and never stored; membership is read with the installation token.
 - Dockerfile: `git` is a build dependency (the `lsio-builder` git dependency) and pip runs with
   `--ignore-requires-python` because Alpine ships Python 3.12 while `lsio-builder` declares 3.13.
 - Dockerfile and `root/` follow LinuxServer conventions (single RUN chain, s6-rc.d oneshot/longrun, no

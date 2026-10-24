@@ -19,7 +19,10 @@ ruff check . && ruff format --check . && mypy control tests && pytest
 
 `python -m control replay` reprocesses every stored webhook delivery and control event through the handlers
 (after a migration, or to rebuild the model); `python -m control backfill` fills the model from the GitHub API
-once (see Backfill). Both read the same environment as the server.
+once (see Backfill); `python -m control discover` reads every live branch's `image.yml` once (see Scheduler);
+`python -m control schedule --once [--image x] [--branch y] [--dry-run]` runs the upstream check now and prints
+one line per branch (`--dry-run` resolves but records and dispatches nothing). All read the same environment
+as the server.
 
 The Alpine base image ships Python 3.12, so the package allows 3.12 and up; develop on 3.12 or 3.13. The
 `contracts` package (schema validation) is installed from the public
@@ -45,6 +48,8 @@ docker run --rm -p 8080:8080 -e PUID=1000 -e PGID=1000 -e CONTROL_PUBLIC_URL=htt
 | `CONTROL_EVENTS_SECRET` | unset                       | Shared with the `workflows` repo; signs the events POSTed to `/events`. Unset means `/events` answers 503. |
 | `CONTROL_BACKFILL_ON_START` | `false`                 | `true` runs one GitHub API backfill in the background after boot (once the app is configured and installed). |
 | `CONTROL_CONCURRENCY_LIMIT` | `20`                    | GitHub's concurrent job limit for the org; the queue page measures in-progress jobs against it. |
+| `CONTROL_SCHEDULER`   | `true`                        | Run fleet discovery and the scheduler loop beside the server. `false` keeps the pages and member actions and stops dispatching. |
+| `CONTROL_SESSION_SECRET` | unset                      | Signs the sign-in cookie (HMAC-SHA256). **Set it** (`openssl rand -hex 32`): unset means a random secret per process, logged as a warning, and every restart signs everyone out. |
 
 ## Routes
 
@@ -62,10 +67,13 @@ Every page is server-rendered and also available as JSON (pydantic models in `co
 | `GET /builds/{owner}/{repo}/{run_id}` | `/api/builds/{owner}/{repo}/{run_id}.json` | One build: envelope, bundle (version, per-platform result, tests, assets), jobs. The bundle's `test.report_url` and release notes link here (CONVENTIONS §10). |
 | `GET /images/{name}`             | `/api/images/{name}.json`         | One image: live branches, every build, releases, badge snippet.                        |
 | `GET /images/{name}/{tag}`       | `/api/images/{name}/{tag}.json`   | One release tag of an image (`latest`, `develop`…); README badges link here.           |
-| `GET /scheduler`                 | `/api/scheduler.json`             | Scheduler log (placeholder reading `scheduler_decisions`).                             |
-| `GET /management`                | `/api/management.json`            | Member actions; stubbed, buttons disabled until sign-in lands.                         |
-| `GET /status`                    | `/api/status.json`                | App configured/installed, Discord, `/events`, row counts, last backfill, last 20 deliveries. |
-| `GET /api/stream`                |                                   | Server-sent events: `{"type": "<table>", "key": ...}` whenever a handler changes a row. |
+| `GET /scheduler`                 | `/api/scheduler.json`             | The decision log (filters `?image=` and `?outcome=`) and the next 24 hours of checks. Live-refreshing. |
+| `GET /management`                | `/api/management.json`            | The public action log and skip flags; the action forms for signed-in members.          |
+|                                  | `/api/skips.json`                 | Active skip flags.                                                                     |
+| `GET /status`                    | `/api/status.json`                | App configured/installed, Discord, `/events`, scheduler, row counts, last backfill and discovery, last 20 deliveries. |
+| `GET /api/stream`                |                                   | Server-sent events: `{"type": "<table>", "key": ...}` whenever a handler changes a row, including `scheduler_decisions`, `actions`, `skips` and `manifests`. |
+| `GET /login`, `/login/callback`, `POST /logout` | | Member sign-in (below).                                                                 |
+| `POST /manage/{rerun,cancel,dispatch,packages,skip,unskip,reconcile}` | | Member actions (below).                                 |
 | `GET /badge/{name}/{tag}.svg`    |                                   | Shields-style `CI | passing / failing / unknown` from the latest live build publishing that release tag (`latest`, `develop`…). Cached 5 minutes. |
 | `GET /healthz`                   |                                   | `{"status":"ok","db":true}`                                                            |
 | `GET /setup`                     |                                   | Start the GitHub App manifest flow, or show the app's status once it exists.           |
@@ -82,9 +90,83 @@ with the same name in the same repo (at least 10 samples; otherwise a fixed 60 m
 Webhooks are stored whole in `deliveries` first, then `control/handlers.py` upserts the model tables:
 `repos` (image repos are those named `docker-*`), `runs` and `jobs` (`workflow_run`, `workflow_job`),
 `pull_requests` (+ `pull_request_review` for the review state), `issues`, `releases`, `builds` (from
-`/events`), and `scheduler_decisions` (written by the later scheduler). Upserts are keyed by GitHub ids and
-guarded so a late or replayed delivery never moves a row backwards; unknown events are stored and ignored;
-a handler failure is logged and never fails the webhook response.
+`/events`). Upserts are keyed by GitHub ids and guarded so a late or replayed delivery never moves a row
+backwards; unknown events are stored and ignored; a handler failure is logged and never fails the webhook
+response. The scheduler owns `manifests` (one row per live branch), `scheduler_decisions` and `skips`;
+member actions write `actions`.
+
+## Scheduler
+
+**Fleet discovery** (`control/fleet.py`) lists the org's `docker-*` repos with the installation token and
+reads `image.yml` from each default branch. `release.tags` there names every tag the image publishes; for
+each tag other than the default branch's own, discovery lists the repo's branches, tries the one named after
+the tag first, and reads `image.yml` until it finds the branch whose `release.tag` is that tag and whose
+`release.branch` is itself (CONVENTIONS §3). The result is the `manifests` table (repo, branch, blob sha,
+manifest JSON, `release.tag`, `upstream.version`, `build.package_check`), refreshed every 30 minutes, on
+every `push` webhook to a branch it knows, by `python -m control discover`, and by the **Re-read** button on
+`/management`. The fleet board lists these branches; before discovery has run for a repo it falls back to the
+default branch plus branches with past live builds.
+
+**Upstream check** (`control/scheduler.py`): every live branch once an hour, at a minute of the hour fixed by
+`sha256(repo/branch)`, so the fleet spreads across the hour and the slot survives restarts. The check
+resolves the upstream version with the resolver the build uses, vendored byte for byte in
+`control/vendor/resolve_version.py` from `workflows/scripts/resolve_version.py` (a test fails on drift), run
+in a thread with the installation token on `api.github.com` calls. The released version is the `<upstream>`
+part of the branch's newest Release tag, `[T-]<upstream>-ls<N>`, matched the way `next_tag.py` does (the
+unprefixed branch never claims another branch's `develop-…` tag); with no Release the last `build.summary`
+of the branch is the hint. Both sides are compared as sanitised strings (§3). Outcomes, all recorded in
+`scheduler_decisions` with a JSON detail (versions, reason, source URL):
+
+| Outcome     | When                                                                                                   |
+| ----------- | ------------------------------------------------------------------------------------------------------ |
+| `unchanged` | Released equals upstream.                                                                              |
+| `dispatch`  | They differ, or nothing was released yet: `workflow_dispatch` of `build.yml` on the branch with `reason: upstream`. |
+| `skipped`   | A skip flag matches; a run of the branch is in progress; a dispatch for the branch happened in the last 2 hours (cooldown, whatever triggered it); `upstream.version.type` is `os` (those build on the package check); the type is `command` or `deb_repo` (arbitrary shell, or docker, which control will not run: they build on the package check too); or `require_assets` are not published yet. |
+| `error`     | The resolver or the dispatch failed. After 6 errors in a row for one branch Discord gets one alert; a success resets the streak. |
+
+**Package check**: every live branch whose manifest does not set `build.package_check: false`, once a week
+at an hour of the week fixed by the same hash, dispatches `reason: packages` unless a skip flag matches or a
+run is in progress. Both schedules are "due" when the slot has passed and no decision of that kind was
+recorded since, so a restart never double-fires and a missed slot runs at the next tick (every 60 s).
+
+Dispatch is always `POST /repos/{repo}/actions/workflows/build.yml/dispatches` with `ref: <branch>` and
+`inputs: {reason}`: `repository_dispatch` only ever runs the default branch, and one path is simpler. The run
+itself arrives by webhook; the scheduler page links a `dispatch` decision to the `workflow_dispatch` run that
+appeared on the branch within 15 minutes.
+
+**Skip flags** (`skips` table, `/api/skips.json`) replace the old `SKIP_EXTERNAL_TRIGGER` org variables. A
+scope is `image` (every branch), `image/branch`, or `image/branch/version` (only while upstream resolves to
+that sanitised version; the next version builds again). Members set and clear them on `/management`, the
+fleet board and image pages; each flag keeps who set it and why. The fleet board shows `upstream`,
+`released`, `drift` (`ahead`, `same`, `unknown`), `next_check` and the matching flags per branch.
+
+## Member sign-in and actions
+
+`/login` sends the browser to GitHub's OAuth authorisation with the App's `client_id`; `/login/callback`
+exchanges the code (with `client_secret`) for a user token, uses it for exactly one call (`GET /user`) and
+drops it. Membership is then read with **our** installation token: `GET /orgs/{org}/memberships/{login}`
+must answer `state: active`. The session cookie (`control_session`: login, avatar, member flag, when it was
+checked, a CSRF token) is HMAC-signed with `CONTROL_SESSION_SECRET`, `HttpOnly`, `Secure` when the public URL
+is https, `SameSite=Lax`, and lives 7 days; the member flag is re-checked hourly on `/management` and before
+every action. Sign-in needs no OAuth scopes and no "Request user authorization (OAuth) during installation".
+
+**The GitHub App needs the callback URL**: `${CONTROL_PUBLIC_URL}/login/callback` under *Identifying and
+authorizing users → Callback URL* in the app's settings. New apps get it from the manifest
+(`callback_urls`); an app created before this increment must have it added by hand, or GitHub answers
+`redirect_uri is not associated with this application`.
+
+Actions are POST forms carrying the session's CSRF token; anyone not signed in or not an active member gets
+`403`, a bad token `403`, more than 30 actions in an hour per member `429`. Every attempt that passes those
+checks is written to `actions` (actor, action, target, result, detail) and shown on `/management`:
+
+| Action      | Form fields              | What                                                                        |
+| ----------- | ------------------------ | --------------------------------------------------------------------------- |
+| `rerun`     | `run_id`                 | `POST …/actions/runs/{id}/rerun-failed-jobs`; on `/runs/{id}` for failed runs. |
+| `cancel`    | `run_id`                 | `POST …/actions/runs/{id}/cancel`; on `/runs/{id}` while a run is active.      |
+| `dispatch`  | `repo`, `branch`, `reason` (`manual`, `rebuild`, `packages`, `upstream`) | `workflow_dispatch` of `build.yml`; recorded as a `manual` scheduler decision (so the cooldown sees it). |
+| `packages`  | `repo`, `branch`         | A package check now; recorded as a `packages` decision, which resets that branch's weekly slot. |
+| `skip` / `unskip` | `scope`, `reason`  | Set or clear a skip flag.                                                   |
+| `reconcile` |                          | Run fleet discovery now, in the background; the outcome shows on `/status`. |
 
 ## Events contract
 
