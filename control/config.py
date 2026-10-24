@@ -31,6 +31,10 @@ class Settings(BaseModel):
     """Run one GitHub API backfill in the background after boot, once the app is configured and installed."""
     concurrency_limit: int = 20
     """GitHub's concurrent job limit for the org, which the queue page measures in-progress jobs against."""
+    scheduler: bool = True
+    """Run the fleet discovery and scheduler loop beside the server (once the app is configured and installed)."""
+    session_secret: str | None = None
+    """Signs the sign-in cookie. Unset means a random one per process: sign-ins do not survive a restart."""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -54,6 +58,10 @@ class Settings(BaseModel):
             fields["backfill_on_start"] = backfill.strip().lower() in ("1", "true", "yes", "on")
         if limit := env("CONTROL_CONCURRENCY_LIMIT"):
             fields["concurrency_limit"] = int(limit)
+        if scheduler := env("CONTROL_SCHEDULER"):
+            fields["scheduler"] = scheduler.strip().lower() in ("1", "true", "yes", "on")
+        if session_secret := env("CONTROL_SESSION_SECRET"):
+            fields["session_secret"] = session_secret
         return cls.model_validate(fields)
 
     @property

@@ -170,6 +170,46 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX scheduler_decisions_at ON scheduler_decisions (at DESC);
     """,
+    # 3: the scheduler increment. `manifests` is every live branch's image.yml (fleet discovery), `skips` the
+    # flags that hold the scheduler back, `actions` what signed-in members did, and decisions get a `kind`
+    # (upstream | packages | manual) so the two schedules keep separate histories.
+    """
+    CREATE TABLE manifests (
+        repo TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        sha TEXT NOT NULL,
+        fetched_at TEXT NOT NULL,
+        manifest_json TEXT NOT NULL,
+        release_tag TEXT,
+        version_source_json TEXT,
+        package_check INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (repo, branch)
+    );
+    CREATE TABLE skips (
+        scope TEXT PRIMARY KEY,
+        reason TEXT,
+        set_by TEXT NOT NULL,
+        set_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE TABLE actions (
+        id INTEGER PRIMARY KEY,
+        at TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target TEXT,
+        result TEXT NOT NULL,
+        detail TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX actions_actor_at ON actions (actor, at DESC);
+    ALTER TABLE scheduler_decisions ADD COLUMN kind TEXT NOT NULL DEFAULT 'upstream';
+    CREATE INDEX scheduler_decisions_branch ON scheduler_decisions (image, branch, kind, id DESC);
+    """,
 ]
 
 

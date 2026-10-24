@@ -417,7 +417,94 @@ class SchedulerDecision(BaseModel):
     at: str
     image: str
     branch: str
+    kind: str = "upstream"
+    """upstream | packages | manual: which schedule (or which member action) produced the decision."""
     outcome: str
+    """unchanged | skipped | dispatch | error."""
+    detail: str | None
+    created_at: str
+    updated_at: str
+
+    @property
+    def info(self) -> dict[str, Any]:
+        """The detail column parsed when it is JSON (the scheduler writes JSON; older rows were free text)."""
+        if not self.detail:
+            return {}
+        try:
+            loaded = json.loads(self.detail)
+        except ValueError:
+            return {"message": self.detail}
+        return loaded if isinstance(loaded, dict) else {"message": self.detail}
+
+
+class Manifest(BaseModel):
+    """One live branch's image.yml, as fleet discovery last read it."""
+
+    repo: str
+    branch: str
+    sha: str
+    """The blob sha of image.yml on that branch; a refresh that finds the same sha only touches fetched_at."""
+    fetched_at: str
+    manifest_json: str
+    release_tag: str | None
+    version_source_json: str | None
+    package_check: bool
+    created_at: str
+    updated_at: str
+
+    @property
+    def manifest(self) -> dict[str, Any]:
+        loaded = json.loads(self.manifest_json)
+        return loaded if isinstance(loaded, dict) else {}
+
+    @property
+    def version_source(self) -> dict[str, Any]:
+        if not self.version_source_json:
+            return {}
+        loaded = json.loads(self.version_source_json)
+        return loaded if isinstance(loaded, dict) else {}
+
+    @property
+    def image(self) -> str:
+        name = self.manifest.get("name")
+        return str(name) if name else (image_name_of(self.repo.rsplit("/", 1)[-1]) or self.repo)
+
+    @property
+    def source_type(self) -> str | None:
+        kind = self.version_source.get("type")
+        return str(kind) if kind else None
+
+
+class Skip(BaseModel):
+    """A flag that holds the scheduler back: scope is `image`, `image/branch` or `image/branch/version`."""
+
+    scope: str
+    reason: str | None
+    set_by: str
+    set_at: str
+    created_at: str
+    updated_at: str
+
+    def matches(self, image: str, branch: str, version: str | None = None) -> bool:
+        parts = self.scope.split("/")
+        if parts[0] != image:
+            return False
+        if len(parts) == 1:
+            return True
+        if parts[1] != branch:
+            return False
+        return len(parts) == 2 or (version is not None and "/".join(parts[2:]) == version)
+
+
+class Action(BaseModel):
+    """One management action by a signed-in member; shown publicly on /management."""
+
+    id: int
+    at: str
+    actor: str
+    action: str
+    target: str | None
+    result: str
     detail: str | None
     created_at: str
     updated_at: str
@@ -539,6 +626,29 @@ class Model:
         with self.db.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [Run(**dict(row)) for row in rows]
+
+    def active_run_for_branch(self, repo: str, branch: str) -> Run | None:
+        """A run of this branch that has not completed: the scheduler will not dispatch on top of it."""
+        with self.db.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM runs WHERE repo = ? AND branch = ? AND (status IS NULL OR status != 'completed') "
+                "ORDER BY created_at DESC LIMIT 1",
+                (repo, branch),
+            ).fetchone()
+        return Run(**dict(row)) if row else None
+
+    def run_after(self, repo: str, branch: str, event: str, after: str, within_seconds: int = 900) -> Run | None:
+        """The first run of `event` on a branch created after `after`: how a dispatch decision finds its run."""
+        limit = (datetime.datetime.fromisoformat(after) + datetime.timedelta(seconds=within_seconds)).isoformat(
+            timespec="seconds"
+        )
+        with self.db.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM runs WHERE repo = ? AND branch = ? AND event = ? AND created_at >= ? "
+                "AND created_at <= ? ORDER BY created_at LIMIT 1",
+                (repo, branch, event, after, limit),
+            ).fetchone()
+        return Run(**dict(row)) if row else None
 
     def latest_run_for_sha(self, repo: str, head_sha: str, event: str | None = None) -> Run | None:
         sql = "SELECT * FROM runs WHERE repo = ? AND head_sha = ?"
@@ -752,27 +862,197 @@ class Model:
             ).fetchone()
         return Build(**dict(row)) if row else None
 
+    def latest_build_for_branch(self, repo: str, branch: str) -> Build | None:
+        """The newest finished live build of a branch: the scheduler's hint for the released upstream version."""
+        with self.db.connect() as conn:
+            row = conn.execute(
+                f"SELECT {BUILD_COLUMNS} FROM builds WHERE repo = ? AND branch = ? AND mode = 'live' "
+                "AND result IS NOT NULL ORDER BY received_at DESC, rowid DESC LIMIT 1",
+                (repo, branch),
+            ).fetchone()
+        return Build(**dict(row)) if row else None
+
+    # -- manifests ------------------------------------------------------------------------------------------------
+
+    def upsert_manifest(self, manifest: Manifest) -> bool:
+        with self.db.connect() as conn:
+            return _upsert(conn, "manifests", manifest.model_dump(), ("repo", "branch"))
+
+    def touch_manifest(self, repo: str, branch: str, fetched_at: str | None = None) -> None:
+        with self.db.connect() as conn:
+            conn.execute(
+                "UPDATE manifests SET fetched_at = ? WHERE repo = ? AND branch = ?",
+                (fetched_at or utcnow(), repo, branch),
+            )
+
+    def manifest(self, repo: str, branch: str) -> Manifest | None:
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT * FROM manifests WHERE repo = ? AND branch = ?", (repo, branch)).fetchone()
+        return Manifest(**dict(row)) if row else None
+
+    def manifests(self, repo: str | None = None) -> list[Manifest]:
+        sql = "SELECT * FROM manifests"
+        params: list[Any] = []
+        if repo:
+            sql += " WHERE repo = ?"
+            params.append(repo)
+        sql += " ORDER BY repo, branch"
+        with self.db.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [Manifest(**dict(row)) for row in rows]
+
+    def prune_manifests(self, repo: str, keep: list[str]) -> int:
+        """Drop the branches of a repo that discovery no longer found live (branch deleted or tag dropped)."""
+        with self.db.connect() as conn:
+            if keep:
+                marks = ", ".join("?" * len(keep))
+                cursor = conn.execute(
+                    f"DELETE FROM manifests WHERE repo = ? AND branch NOT IN ({marks})", (repo, *keep)
+                )
+            else:
+                cursor = conn.execute("DELETE FROM manifests WHERE repo = ?", (repo,))
+        return int(cursor.rowcount)
+
+    def delete_manifests(self, repo: str) -> None:
+        self.prune_manifests(repo, [])
+
+    # -- skips ----------------------------------------------------------------------------------------------------
+
+    def set_skip(self, scope: str, reason: str | None, set_by: str) -> None:
+        now = utcnow()
+        skip = Skip(scope=scope, reason=reason, set_by=set_by, set_at=now, created_at=now, updated_at=now)
+        with self.db.connect() as conn:
+            _upsert(conn, "skips", skip.model_dump(), ("scope",))
+
+    def remove_skip(self, scope: str) -> bool:
+        with self.db.connect() as conn:
+            cursor = conn.execute("DELETE FROM skips WHERE scope = ?", (scope,))
+        return cursor.rowcount > 0
+
+    def skips(self) -> list[Skip]:
+        with self.db.connect() as conn:
+            rows = conn.execute("SELECT * FROM skips ORDER BY scope").fetchall()
+        return [Skip(**dict(row)) for row in rows]
+
+    def skips_for(self, image: str, branch: str, version: str | None = None) -> list[Skip]:
+        """Every flag that holds `image/branch` back; version-scoped flags only count once `version` is known."""
+        return [skip for skip in self.skips() if skip.matches(image, branch, version)]
+
     # -- scheduler ------------------------------------------------------------------------------------------------
 
-    def add_decision(self, image: str, branch: str, outcome: str, detail: str | None = None) -> int:
+    def add_decision(
+        self, image: str, branch: str, outcome: str, detail: str | None = None, kind: str = "upstream"
+    ) -> int:
         now = utcnow()
         with self.db.connect() as conn:
             cursor = conn.execute(
-                "INSERT INTO scheduler_decisions (at, image, branch, outcome, detail, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (now, image, branch, outcome, detail, now, now),
+                "INSERT INTO scheduler_decisions (at, image, branch, kind, outcome, detail, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (now, image, branch, kind, outcome, detail, now, now),
             )
         return int(cursor.lastrowid or 0)
 
-    def recent_decisions(self, limit: int = 100) -> list[SchedulerDecision]:
+    def decision(self, decision_id: int) -> SchedulerDecision | None:
         with self.db.connect() as conn:
-            rows = conn.execute("SELECT * FROM scheduler_decisions ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            row = conn.execute("SELECT * FROM scheduler_decisions WHERE id = ?", (decision_id,)).fetchone()
+        return SchedulerDecision(**dict(row)) if row else None
+
+    def recent_decisions(
+        self, limit: int = 100, image: str | None = None, outcome: str | None = None
+    ) -> list[SchedulerDecision]:
+        sql = "SELECT * FROM scheduler_decisions"
+        clauses: list[str] = []
+        params: list[Any] = []
+        if image:
+            clauses.append("image = ?")
+            params.append(image)
+        if outcome:
+            clauses.append("outcome = ?")
+            params.append(outcome)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with self.db.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
         return [SchedulerDecision(**dict(row)) for row in rows]
+
+    def last_decision(
+        self, image: str, branch: str, kind: str | None = None, outcome: str | None = None
+    ) -> SchedulerDecision | None:
+        sql = "SELECT * FROM scheduler_decisions WHERE image = ? AND branch = ?"
+        params: list[Any] = [image, branch]
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        if outcome:
+            sql += " AND outcome = ?"
+            params.append(outcome)
+        sql += " ORDER BY id DESC LIMIT 1"
+        with self.db.connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        return SchedulerDecision(**dict(row)) if row else None
+
+    def consecutive_errors(self, image: str, branch: str, kind: str = "upstream") -> int:
+        """How many of the newest decisions of a branch are errors, counting back to the last non-error."""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT outcome FROM scheduler_decisions WHERE image = ? AND branch = ? AND kind = ? "
+                "ORDER BY id DESC LIMIT 50",
+                (image, branch, kind),
+            ).fetchall()
+        count = 0
+        for row in rows:
+            if row["outcome"] != "error":
+                break
+            count += 1
+        return count
+
+    def decision_images(self) -> list[str]:
+        with self.db.connect() as conn:
+            rows = conn.execute("SELECT DISTINCT image FROM scheduler_decisions ORDER BY image").fetchall()
+        return [str(row["image"]) for row in rows]
+
+    # -- actions --------------------------------------------------------------------------------------------------
+
+    def add_action(self, actor: str, action: str, target: str | None, result: str, detail: str | None = None) -> int:
+        now = utcnow()
+        with self.db.connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO actions (at, actor, action, target, result, detail, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (now, actor, action, target, result, detail, now, now),
+            )
+        return int(cursor.lastrowid or 0)
+
+    def recent_actions(self, limit: int = 100) -> list[Action]:
+        with self.db.connect() as conn:
+            rows = conn.execute("SELECT * FROM actions ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [Action(**dict(row)) for row in rows]
+
+    def count_actions_since(self, actor: str, since: str) -> int:
+        with self.db.connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM actions WHERE actor = ? AND at >= ?", (actor, since)
+            ).fetchone()
+        return int(row["n"])
 
     # -- status ---------------------------------------------------------------------------------------------------
 
     def counts(self) -> dict[str, int]:
-        tables = ("repos", "runs", "jobs", "pull_requests", "issues", "releases", "builds", "scheduler_decisions")
+        tables = (
+            "repos",
+            "runs",
+            "jobs",
+            "pull_requests",
+            "issues",
+            "releases",
+            "builds",
+            "manifests",
+            "skips",
+            "actions",
+            "scheduler_decisions",
+        )
         with self.db.connect() as conn:
             return {t: int(conn.execute(f"SELECT COUNT(*) AS n FROM {t}").fetchone()["n"]) for t in tables}
 
