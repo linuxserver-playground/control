@@ -226,3 +226,9 @@ def test_live_success_summary_dispatches_the_hub(
     dispatches.clear()
     assert post_event(client, fixture("control.build.summary.failed")).status_code == 202
     assert dispatches == []
+    # Neither does a successful run that released nothing (a package check): no release_url.
+    unreleased = json.loads(json.dumps(payload))
+    unreleased.pop("release_url", None)
+    unreleased["run_id"] = payload["run_id"] + 1
+    assert post_event(client, unreleased).status_code == 202
+    assert dispatches == []

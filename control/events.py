@@ -116,7 +116,8 @@ async def notify_hub(state: State, build: Build) -> None:
     The hub's deploy workflow listens for repository_dispatch `image-released` with {repository, tag}.
     Best effort: the hub reconciles on its own anyway, so a failure here only costs freshness.
     """
-    if build.mode != "live" or build.result != "success" or not build.version_tag:
+    # Only a build that actually released (a package check reports success without releasing anything).
+    if build.mode != "live" or build.result != "success" or not build.version_tag or not build.release_url:
         return
     try:
         github = await installation_client(state)
