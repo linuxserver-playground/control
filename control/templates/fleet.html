@@ -9,11 +9,11 @@
   <tbody>
   {% for row in page.rows %}
     <tr>
-      <td><a href="https://github.com/{{ row.repo }}">{{ row.image }}</a></td>
-      <td><code>{{ row.branch }}</code>{% if row.default_branch %} <span class="muted">default</span>{% endif %}</td>
+      <td><a href="/images/{{ row.image }}">{{ row.image }}</a></td>
+      <td><a href="/images/{{ row.image }}/{{ 'latest' if row.default_branch else row.branch }}"><code>{{ row.branch }}</code></a>{% if row.default_branch %} <span class="muted">default</span>{% endif %}</td>
       <td>
         {% if row.result %}
-          <a href="/builds/{{ row.repo.split('/')[-1] }}/{{ row.run_id }}"><span class="pill {{ row.result | kind }}">{{ row.result }}</span></a>
+          <a href="/builds/{{ row.repo }}/{{ row.run_id }}"><span class="pill {{ row.result | kind }}">{{ row.result }}</span></a>
           {% if row.reason %}<span class="muted">{{ row.reason }}</span>{% endif %}
         {% else %}<span class="pill neutral">no build</span>{% endif %}
       </td>

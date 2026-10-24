@@ -10,7 +10,7 @@
     "prerelease": false,
     "created_at": "2026-10-24T12:10:00Z",
     "published_at": "2026-10-24T12:10:30Z",
-    "body": "**CI**\nhttps://ci.example.test:8443/builds/docker-sonarr/5001\n\n**LinuxServer changes**\n- Add krb5-libs\n\n**Upstream changes**\nSonarr 4.0.20.3014 fixes\u2026",
+    "body": "**CI**\nhttps://ci.example.test:8443/builds/example-org/docker-sonarr/5001\n\n**LinuxServer changes**\n- Add krb5-libs\n\n**Upstream changes**\nSonarr 4.0.20.3014 fixes\u2026",
     "assets": [],
     "author": {
       "login": "octocat",

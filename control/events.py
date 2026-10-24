@@ -45,6 +45,15 @@ def embed_color(build: Build) -> int:
     return GREY
 
 
+def platforms_field(build: Build) -> str:
+    """`amd64, arm64` when every arch succeeded, else each arch with its own outcome."""
+    if not build.platforms:
+        return "—"
+    if all(p.result in (None, "success") for p in build.platforms):
+        return ", ".join(build.archs)
+    return ", ".join(f"{p.arch} ({p.result or 'unknown'})" for p in build.platforms)
+
+
 def build_embed(build: Build, public_url: str) -> dict[str, Any]:
     """One embed per build; the same shape for the provisional and the final message so an edit reads well."""
     links = []
@@ -54,7 +63,7 @@ def build_embed(build: Build, public_url: str) -> dict[str, Any]:
         links.append(f"[release]({build.release_url})")
     if build.artifact_url:
         links.append(f"[artifact]({build.artifact_url})")
-    links.append(f"[control]({public_url}/builds/{build.repo.rsplit('/', 1)[-1]}/{build.run_id})")
+    links.append(f"[control]({public_url}/builds/{build.repo}/{build.run_id})")
     result = "running" if build.running else str(build.result)
     if build.failed_job:
         result += f" ({build.failed_job})"
@@ -67,7 +76,7 @@ def build_embed(build: Build, public_url: str) -> dict[str, Any]:
         {"name": "mode", "value": build.mode or "?", "inline": True},
         {"name": "reason", "value": build.reason or "?", "inline": True},
         {"name": "result", "value": result, "inline": True},
-        {"name": "platforms", "value": ", ".join(build.platforms) or "—", "inline": True},
+        {"name": "platforms", "value": platforms_field(build), "inline": True},
         {"name": "test", "value": test, "inline": True},
         {"name": "links", "value": " · ".join(links), "inline": False},
     ]

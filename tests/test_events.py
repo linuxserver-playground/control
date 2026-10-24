@@ -82,7 +82,7 @@ def test_started_posts_and_summary_edits_one_live_message(
         "links": fields["links"],
     }
     assert "[release](https://github.com/example-org/docker-sonarr/releases/tag/4.0.20.3014-ls1)" in fields["links"]
-    assert "[control](https://ci.example.test:8443/builds/docker-sonarr/5001)" in fields["links"]
+    assert "[control](https://ci.example.test:8443/builds/example-org/docker-sonarr/5001)" in fields["links"]
     build = state.model.build(REPO, 5001)
     assert build and build.result == "success" and build.discord_message_id == "msg-1"
 
@@ -138,6 +138,23 @@ def test_failure_is_red_in_any_mode(client: TestClient, state: State, monkeypatc
     assert embed["color"] == RED
     fields = {f["name"]: f["value"] for f in embed["fields"]}
     assert fields["result"] == "failure (build (arm64))" and fields["test"] == "not run" and fields["platforms"] == "—"
+
+
+def test_summary_with_a_failed_platform_has_no_digest(client: TestClient, state: State) -> None:
+    summary = fixture("control.build.summary")
+    summary["result"] = "failure"
+    summary["failed_job"] = "build (arm64)"
+    summary["bundle"]["platforms"][1] = {"arch": "arm64", "result": "failure", "runner": "ubuntu-24.04-arm"}
+    summary["bundle"]["test"]["success"] = False
+    assert validate_event(summary) == []
+    assert post_event(client, summary).status_code == 202
+    build = state.model.build(REPO, 5001)
+    assert build and [(p.arch, p.result) for p in build.platforms] == [("amd64", "success"), ("arm64", "failure")]
+    assert build.archs == ["amd64", "arm64"]
+    fields = {f["name"]: f["value"] for f in build_embed(build, "https://x")["fields"]}
+    assert fields["platforms"] == "amd64 (success), arm64 (failure)" and fields["test"] == "failed"
+    page = client.get(f"/builds/{REPO}/5001")
+    assert page.status_code == 200 and ">failure<" in page.text
 
 
 def test_discord_failure_does_not_fail_the_event(

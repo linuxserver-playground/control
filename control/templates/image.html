@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}{{ page.image }}{% if page.tag %}:{{ page.tag }}{% endif %} · control{% endblock %}
+{% block body %}
+<h1>
+  {% if page.tag %}<a href="/images/{{ page.image }}">{{ page.image }}</a>:{{ page.tag }}{% else %}{{ page.image }}{% endif %}
+  {% if page.latest %}<span class="pill {{ page.latest.result | kind }}">{{ page.latest.result }}</span>{% endif %}
+  <img src="/badge/{{ page.image }}/{{ page.tag or 'latest' }}.svg" alt="CI badge" height="20" style="vertical-align: middle">
+</h1>
+<dl>
+  <dt>Repository</dt><dd><a href="https://github.com/{{ page.repo.full_name }}">{{ page.repo.full_name }}</a>{% if page.repo.archived %} <span class="pill neutral">archived</span>{% endif %}</dd>
+  <dt>Default branch</dt><dd><code>{{ page.repo.default_branch }}</code></dd>
+  <dt>Open</dt><dd><a href="/pulls">{{ page.open_pulls }} pull request{{ "" if page.open_pulls == 1 else "s" }}</a>, <a href="/issues">{{ page.open_issues }} issue{{ "" if page.open_issues == 1 else "s" }}</a></dd>
+  {% if page.latest %}
+  <dt>Latest live build</dt>
+  <dd><a href="/builds/{{ page.latest.repo }}/{{ page.latest.run_id }}"><code>{{ page.latest.version_tag or page.latest.branch }}</code></a>
+    <span class="muted">{{ page.latest.reason }}, {{ page.latest.received_at | ago }}</span>{% if page.latest.upstream %}, upstream {{ page.latest.upstream }}{% endif %}</dd>
+  {% endif %}
+  <dt>Badge</dt><dd><code>![CI]({{ page.badge_url }})</code></dd>
+</dl>
+
+<h2>Live branches</h2>
+{% if page.rows %}
+<table>
+  <thead><tr><th>Branch</th><th>Tag</th><th>Last build</th><th>Age</th><th>Released</th><th>Upstream</th><th>Drift</th></tr></thead>
+  <tbody>
+  {% for row in page.rows %}
+    <tr>
+      <td><code>{{ row.branch }}</code>{% if row.default_branch %} <span class="muted">default</span>{% endif %}</td>
+      <td><a href="/images/{{ page.image }}/{{ 'latest' if row.default_branch else row.branch }}"><code>{{ 'latest' if row.default_branch else row.branch }}</code></a></td>
+      <td>{% if row.result %}<a href="/builds/{{ row.repo }}/{{ row.run_id }}"><span class="pill {{ row.result | kind }}">{{ row.result }}</span></a> <span class="muted">{{ row.reason }}</span>{% else %}<span class="pill neutral">no build</span>{% endif %}</td>
+      <td class="muted">{{ row.built_at | ago }}</td>
+      <td>{% if row.released %}<code>{{ row.released }}</code>{% else %}<span class="muted">none</span>{% endif %}</td>
+      <td>{{ row.upstream or "—" }}</td>
+      <td class="muted">{{ row.drift }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="muted">No live branch publishes <code>{{ page.tag }}</code>.</p>{% endif %}
+
+<h2>Builds</h2>
+{% if page.builds %}
+<table>
+  <thead><tr><th>Received</th><th>Branch</th><th>Mode</th><th>Tag</th><th>Result</th><th>Platforms</th><th>Reason</th><th>Test</th></tr></thead>
+  <tbody>
+  {% for b in page.builds %}
+    {% set result = 'running' if b.running else b.result %}
+    <tr>
+      <td class="muted"><a href="/builds/{{ b.repo }}/{{ b.run_id }}">{{ b.received_at | timestamp }}</a></td>
+      <td><code>{{ b.branch }}</code></td>
+      <td>{{ b.mode }}{% if b.pull_request %} #{{ b.pull_request }}{% endif %}</td>
+      <td>{% if b.version_tag %}<code>{{ b.version_tag }}</code>{% endif %}</td>
+      <td><span class="pill {{ result | kind }}">{{ result }}</span>{% if b.failed_job %} <span class="muted">{{ b.failed_job }}</span>{% endif %}</td>
+      <td>{% for p in b.platforms %}{{ p.arch }}{% if p.result and p.result != "success" %} <span class="pill {{ p.result | kind }}">{{ p.result }}</span>{% endif %}{{ ", " if not loop.last }}{% endfor %}</td>
+      <td>{{ b.reason or "" }}</td>
+      <td>{% if b.test_success is none %}<span class="muted">—</span>{% elif b.test_success %}<span class="ok">passed</span>{% else %}<span class="bad">failed</span>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="muted">No builds recorded.</p>{% endif %}
+
+<h2>Releases</h2>
+{% if page.releases %}
+<table>
+  <thead><tr><th>Published</th><th>Tag</th><th>Name</th></tr></thead>
+  <tbody>
+  {% for r in page.releases %}
+    <tr><td class="muted">{{ r.published_at | timestamp }}</td><td><a href="{{ r.html_url }}"><code>{{ r.tag }}</code></a>{% if r.prerelease %} <span class="pill neutral">pre-release</span>{% endif %}</td><td>{{ r.name or "" }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="muted">No releases.</p>{% endif %}
+{% endblock %}

@@ -4,7 +4,7 @@
 {% set result = 'running' if b.running else b.result %}
 {% block title %}{{ b.image }} {{ b.version_tag or b.branch }} · control{% endblock %}
 {% block body %}
-<h1>{{ b.image }} {{ b.version_tag or b.branch or "" }} <span class="pill {{ result | kind }}">{{ result }}</span></h1>
+<h1><a href="/images/{{ b.image }}">{{ b.image }}</a> {{ b.version_tag or b.branch or "" }} <span class="pill {{ result | kind }}">{{ result }}</span></h1>
 <dl>
   <dt>Repository</dt><dd><a href="https://github.com/{{ b.repo }}">{{ b.repo }}</a></dd>
   <dt>Mode</dt><dd>{{ b.mode or "?" }}{% if b.pull_request %} (pull request #{{ b.pull_request }}){% endif %}</dd>
@@ -12,7 +12,7 @@
   <dt>Reason</dt><dd>{{ b.reason or "?" }}</dd>
   {% if b.failed_job %}<dt>Failed job</dt><dd class="bad">{{ b.failed_job }}</dd>{% endif %}
   <dt>Version</dt><dd>{% if b.version_tag %}<code>{{ b.version_tag }}</code> (upstream {{ b.upstream }}{% if b.semver %}, semver {{ b.semver }}{% endif %}, ls{{ b.ls_build }}){% else %}—{% endif %}</dd>
-  <dt>Platforms</dt><dd>{{ b.platforms | join(", ") or "—" }}</dd>
+  <dt>Platforms</dt><dd>{% for p in b.platforms %}{{ p.arch }}{% if p.result and p.result != "success" %} <span class="pill {{ p.result | kind }}">{{ p.result }}</span>{% endif %}{{ ", " if not loop.last }}{% else %}—{% endfor %}</dd>
   <dt>Tests</dt><dd>{% if b.test_success is none %}<span class="muted">not run</span>{% elif b.test_success %}<span class="ok">passed</span>{% else %}<span class="bad">failed</span>{% endif %}</dd>
   {% if b.index_digest %}<dt>Index digest</dt><dd><code>{{ b.index_digest }}</code></dd>{% endif %}
   <dt>Links</dt>
@@ -34,15 +34,16 @@
 </dl>
 <h3>Platforms</h3>
 <table>
-  <thead><tr><th>Arch</th><th>Digest</th><th class="num">Size</th><th>Runner</th><th class="num">Build time</th><th>Test</th></tr></thead>
+  <thead><tr><th>Arch</th><th>Result</th><th>Digest</th><th class="num">Size</th><th>Runner</th><th class="num">Build time</th><th>Test</th></tr></thead>
   <tbody>
   {% for p in page.bundle.platforms %}
     <tr>
       <td>{{ p.arch }}</td>
-      <td><code>{{ p.digest }}</code></td>
-      <td class="num">{{ (p.size / 1048576) | round(1) }} MiB</td>
-      <td>{{ p.runner or "—" }}</td>
-      <td class="num">{{ p.build_seconds | duration if p.build_seconds is not none else "—" }}</td>
+      <td><span class="pill {{ (p.result or 'unknown') | kind }}">{{ p.result or "unknown" }}</span></td>
+      <td>{% if p.get("digest") %}<code>{{ p.digest }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td class="num">{% if p.get("size") is not none %}{{ (p.size / 1048576) | round(1) }} MiB{% else %}—{% endif %}</td>
+      <td>{{ p.get("runner") or "—" }}</td>
+      <td class="num">{{ p.build_seconds | duration if p.get("build_seconds") is not none else "—" }}</td>
       <td>{% set ok = page.bundle.test.per_arch[p.arch] if page.bundle.test.per_arch and p.arch in page.bundle.test.per_arch else none %}
         {% if ok is none %}<span class="muted">—</span>{% elif ok %}<span class="pill ok">passed</span>{% else %}<span class="pill bad">failed</span>{% endif %}</td>
     </tr>

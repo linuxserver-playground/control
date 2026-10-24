@@ -12,7 +12,7 @@
   <dt>GitHub</dt><dd>{% if page.run.html_url %}<a href="{{ page.run.html_url }}">{{ page.run.html_url }}</a>{% endif %}</dd>
   {% if page.builds %}
   <dt>Builds</dt>
-  <dd>{% for b in page.builds %}<a href="/builds/{{ b.repo.split('/')[-1] }}/{{ b.run_id }}">{{ b.image }} {{ b.version_tag or b.branch }}</a> <span class="pill {{ ('running' if b.running else b.result) | kind }}">{{ 'running' if b.running else b.result }}</span> {% endfor %}</dd>
+  <dd>{% for b in page.builds %}<a href="/builds/{{ b.repo }}/{{ b.run_id }}">{{ b.image }} {{ b.version_tag or b.branch }}</a> <span class="pill {{ ('running' if b.running else b.result) | kind }}">{{ 'running' if b.running else b.result }}</span> {% endfor %}</dd>
   {% endif %}
 </dl>
 

@@ -46,14 +46,16 @@
         "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
         "size": 120000000,
         "runner": "ubuntu-latest",
-        "build_seconds": 480.5
+        "build_seconds": 480.5,
+        "result": "success"
       },
       {
         "arch": "arm64",
         "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         "size": 118000000,
         "runner": "ubuntu-24.04-arm",
-        "build_seconds": 510.0
+        "build_seconds": 510.0,
+        "result": "success"
       }
     ],
     "index_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",

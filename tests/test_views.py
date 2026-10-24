@@ -20,7 +20,9 @@ PAGES: dict[str, type[BaseModel]] = {
     "/pulls": views.PullsPage,
     "/issues": views.IssuesPage,
     "/releases": views.ReleasesPage,
-    "/builds/docker-sonarr/5001": views.BuildPage,
+    "/builds/example-org/docker-sonarr/5001": views.BuildPage,
+    "/images/sonarr": views.ImagePage,
+    "/images/sonarr/latest": views.ImagePage,
     "/scheduler": views.SchedulerPage,
     "/status": views.StatusPage,
     "/management": views.ManagementPage,
@@ -47,7 +49,9 @@ def test_pages_render_empty(client: TestClient) -> None:
     for path in ("/", "/runs", "/queue", "/pulls", "/issues", "/releases", "/scheduler", "/status", "/management"):
         assert client.get(path).status_code == 200, path
     assert client.get("/runs/1").status_code == 404
-    assert client.get("/builds/docker-sonarr/1").status_code == 404
+    assert client.get("/builds/example-org/docker-sonarr/1").status_code == 404
+    assert client.get("/images/nothing").status_code == 404
+    assert client.get("/api/images/nothing/latest.json").status_code == 404
     assert client.get("/api/runs/1.json").status_code == 404
 
 
@@ -60,7 +64,8 @@ def test_fleet_board_rows(client: TestClient, state: State) -> None:
     assert sonarr.result == "success" and sonarr.version_tag == "4.0.20.3014-ls1" and sonarr.run_id == 5001
     assert sonarr.released == "4.0.20.3014-ls1" and sonarr.upstream == "4.0.20.3014" and sonarr.drift == "unknown"
     page = client.get("/")
-    assert "4.0.20.3014-ls1" in page.text and 'href="/builds/docker-sonarr/5001"' in page.text
+    assert "4.0.20.3014-ls1" in page.text and 'href="/builds/example-org/docker-sonarr/5001"' in page.text
+    assert 'href="/images/sonarr"' in page.text and 'href="/images/sonarr/latest"' in page.text
     assert "/api/stream" in page.text  # the live refresh script
 
 
@@ -147,12 +152,48 @@ def test_issues_and_releases_pages(client: TestClient, state: State) -> None:
 
 def test_build_page_shows_bundle(client: TestClient, state: State) -> None:
     seed(state, *FINISHED_SEED)
-    page = views.BuildPage.model_validate(client.get("/api/builds/docker-sonarr/5001.json").json())
+    page = views.BuildPage.model_validate(client.get(f"/api/builds/{REPO}/5001.json").json())
     assert page.build.bundle_json is None and page.bundle and page.bundle["version"]["tag"] == "4.0.20.3014-ls1"
     assert page.run and page.run.id == 5001 and len(page.jobs) == 1
-    html = client.get("/builds/docker-sonarr/5001").text
+    html = client.get(f"/builds/{REPO}/5001").text
     assert "ghcr.io/linuxserver/baseimage-alpine:3.22" in html and "arm64" in html and "passed" in html
-    assert client.get(f"/builds/{REPO}/5001").status_code == 200
+    assert client.get("/builds/docker-sonarr/5001").status_code == 404  # three segments, owner included
+
+
+def test_image_pages_drill_down_by_tag(client: TestClient, state: State) -> None:
+    seed(state, *FINISHED_SEED)
+    develop = fixture("control.build.summary")
+    develop.update(run_id=5002, branch="develop", sent="2026-10-24T13:00:00Z")
+    develop["bundle"].update(branch="develop")
+    develop["bundle"]["version"].update(tag="develop-5.0.1.1234-ls7", release_tag="develop", upstream="5.0.1.1234")
+    handlers.process(state.model, state.stream, "control:build.summary", develop)
+    release = fixture("release.published")
+    release["release"].update(tag_name="develop-5.0.1.1234-ls7", published_at="2026-10-24T13:00:00Z")
+    handlers.process(state.model, state.stream, "release", release)
+    dev = fixture("control.build.summary")
+    dev.update(run_id=5003, mode="dev", branch="feature", sent="2026-10-24T14:00:00Z")
+    handlers.process(state.model, state.stream, "control:build.summary", dev)
+
+    whole = views.ImagePage.model_validate(client.get("/api/images/sonarr.json").json())
+    assert whole.tag is None and whole.repo.full_name == REPO and whole.open_pulls == 1 and whole.open_issues == 1
+    assert [row.branch for row in whole.rows] == ["main", "develop"]
+    assert [b.run_id for b in whole.builds] == [5003, 5002, 5001]
+    assert len(whole.releases) == 2 and whole.latest and whole.latest.run_id == 5002
+
+    latest = views.ImagePage.model_validate(client.get("/api/images/sonarr/latest.json").json())
+    assert [row.branch for row in latest.rows] == ["main"]
+    assert [b.run_id for b in latest.builds] == [5001] and latest.latest and latest.latest.run_id == 5001
+    assert [r.tag for r in latest.releases] == ["4.0.20.3014-ls1"]
+    assert latest.badge_url == "https://ci.example.test:8443/badge/sonarr/latest.svg"
+
+    develop_page = views.ImagePage.model_validate(client.get("/api/images/sonarr/develop.json").json())
+    assert [row.branch for row in develop_page.rows] == ["develop"]
+    assert [b.run_id for b in develop_page.builds] == [5002]
+    assert [r.tag for r in develop_page.releases] == ["develop-5.0.1.1234-ls7"]
+
+    html = client.get("/images/sonarr/develop").text
+    assert "develop-5.0.1.1234-ls7" in html and "/badge/sonarr/develop.svg" in html
+    assert client.get("/images/sonarr/nothing").status_code == 200  # a tag nobody publishes: empty sections
 
 
 def test_status_and_management_pages(client: TestClient, state: State) -> None:

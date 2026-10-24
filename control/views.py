@@ -131,6 +131,20 @@ class BuildPage(BaseModel):
     jobs: list[JobView]
 
 
+class ImagePage(BaseModel):
+    repo: Repo
+    image: str
+    tag: str | None
+    """The release tag the page is narrowed to (`latest`, `develop`…), or None for the whole image."""
+    rows: list[FleetRow]
+    latest: Build | None
+    builds: list[Build]
+    releases: list[Release]
+    open_pulls: int
+    open_issues: int
+    badge_url: str
+
+
 class SchedulerPage(BaseModel):
     decisions: list[SchedulerDecision]
 
@@ -204,14 +218,6 @@ def pick_release(releases: list[Release], branch: str, default_branch: str, bran
     return next((r for r in releases if not any(r.tag.startswith(prefix) for prefix in others)), None)
 
 
-def resolve_repo(state: State, name: str) -> str:
-    """URLs use the short repo name (`docker-sonarr`); the tables use `org/docker-sonarr`."""
-    if "/" in name:
-        return name
-    repo = state.model.repo_by_name(name)
-    return repo.full_name if repo else f"{state.settings.github_org}/{name}"
-
-
 def current_member(request: Request) -> str | None:
     """Member sign-in is a later increment; until then nobody is a member and management stays read-only."""
     return None
@@ -220,9 +226,8 @@ def current_member(request: Request) -> str | None:
 # -- page builders -----------------------------------------------------------------------------------------------
 
 
-def fleet_page(state: State) -> FleetPage:
+def fleet_rows(state: State, repos: list[Repo]) -> list[FleetRow]:
     rows: list[FleetRow] = []
-    repos = state.model.repos(images_only=True)
     for repo in repos:
         latest = {b.branch: b for b in state.model.latest_builds_per_branch(repo.full_name, "live") if b.branch}
         branches = sorted(set(latest) | {repo.default_branch}, key=lambda b: (b != repo.default_branch, b))
@@ -248,7 +253,57 @@ def fleet_page(state: State) -> FleetPage:
                     skip=["archived"] if repo.archived else [],
                 )
             )
-    return FleetPage(rows=rows, images=len(repos), generated_at=now_utc().isoformat(timespec="seconds"))
+    return rows
+
+
+def fleet_page(state: State) -> FleetPage:
+    repos = state.model.repos(images_only=True)
+    return FleetPage(
+        rows=fleet_rows(state, repos), images=len(repos), generated_at=now_utc().isoformat(timespec="seconds")
+    )
+
+
+def image_page(state: State, name: str, tag: str | None = None) -> ImagePage:
+    repo = state.model.repo_by_name(f"docker-{name}")
+    if repo is None or not repo.is_image:
+        raise HTTPException(404, f"image {name} unknown")
+    rows = fleet_rows(state, [repo])
+    builds = state.model.builds_for_image(name, 100)
+    releases = state.model.releases_for_repo(repo.full_name, 100)
+    if tag is not None:
+        live_branches = [row.branch for row in rows]
+        rows = [row for row in rows if _row_publishes(state, row, tag)]
+        builds = [b for b in builds if b.mode == "live" and b.publishes(tag)]
+        if tag == "latest":
+            releases = [r for r in releases if _default_release(r, live_branches)]
+        else:
+            releases = [r for r in releases if r.tag.startswith(f"{tag}-")]
+    live = [b for b in builds if b.mode == "live" and not b.running]
+    return ImagePage(
+        repo=repo,
+        image=name,
+        tag=tag,
+        rows=rows,
+        latest=live[0] if live else None,
+        builds=builds,
+        releases=releases,
+        open_pulls=sum(1 for pr in state.model.open_pull_requests() if pr.repo == repo.full_name),
+        open_issues=sum(1 for issue in state.model.open_issues() if issue.repo == repo.full_name),
+        badge_url=f"{state.settings.public_url}/badge/{name}/{tag or 'latest'}.svg",
+    )
+
+
+def _row_publishes(state: State, row: FleetRow, tag: str) -> bool:
+    """A fleet row owns a release tag when its last build says so, else by the branch naming convention."""
+    if row.run_id is not None:
+        build = state.model.build(row.repo, row.run_id)
+        if build and build.release_tag:
+            return build.release_tag == tag
+    return (tag == "latest" and row.default_branch) or row.branch == tag
+
+
+def _default_release(release: Release, live_branches: list[str]) -> bool:
+    return not any(release.tag.startswith(f"{b}-") for b in live_branches if b != "latest")
 
 
 def runs_page(state: State) -> RunsPage:
@@ -319,8 +374,8 @@ def releases_page(state: State) -> ReleasesPage:
     )
 
 
-def build_page(state: State, repo: str, run_id: int) -> BuildPage:
-    full_name = resolve_repo(state, repo)
+def build_page(state: State, owner: str, repo: str, run_id: int) -> BuildPage:
+    full_name = f"{owner}/{repo}"
     build = state.model.build(full_name, run_id)
     if build is None:
         raise HTTPException(404, f"no build for {full_name} run {run_id}")
@@ -402,9 +457,19 @@ def releases(request: Request) -> HTMLResponse:
     return html(request, "releases.html", releases_page(state_of(request)))
 
 
-@router.get("/builds/{repo:path}/{run_id:int}", response_class=HTMLResponse)
-def build(request: Request, repo: str, run_id: int) -> HTMLResponse:
-    return html(request, "build.html", build_page(state_of(request), repo, run_id))
+@router.get("/builds/{owner}/{repo}/{run_id}", response_class=HTMLResponse)
+def build(request: Request, owner: str, repo: str, run_id: int) -> HTMLResponse:
+    return html(request, "build.html", build_page(state_of(request), owner, repo, run_id))
+
+
+@router.get("/images/{name}", response_class=HTMLResponse)
+def image(request: Request, name: str) -> HTMLResponse:
+    return html(request, "image.html", image_page(state_of(request), name), live=True)
+
+
+@router.get("/images/{name}/{tag}", response_class=HTMLResponse)
+def image_tag(request: Request, name: str, tag: str) -> HTMLResponse:
+    return html(request, "image.html", image_page(state_of(request), name, tag), live=True)
 
 
 @router.get("/scheduler", response_class=HTMLResponse)
@@ -460,9 +525,19 @@ def releases_json(request: Request) -> ReleasesPage:
     return releases_page(state_of(request))
 
 
-@router.get("/api/builds/{repo:path}/{run_id:int}.json")
-def build_json(request: Request, repo: str, run_id: int) -> BuildPage:
-    return build_page(state_of(request), repo, run_id)
+@router.get("/api/builds/{owner}/{repo}/{run_id}.json")
+def build_json(request: Request, owner: str, repo: str, run_id: int) -> BuildPage:
+    return build_page(state_of(request), owner, repo, run_id)
+
+
+@router.get("/api/images/{name}.json")
+def image_json(request: Request, name: str) -> ImagePage:
+    return image_page(state_of(request), name)
+
+
+@router.get("/api/images/{name}/{tag}.json")
+def image_tag_json(request: Request, name: str, tag: str) -> ImagePage:
+    return image_page(state_of(request), name, tag)
 
 
 @router.get("/api/scheduler.json")

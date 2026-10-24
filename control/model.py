@@ -305,6 +305,12 @@ class Release(BaseModel):
         )
 
 
+class Platform(BaseModel):
+    arch: str
+    result: str | None = None
+    """success | failure | cancelled | skipped; digest and size exist in the bundle only on success."""
+
+
 class Build(BaseModel):
     repo: str
     run_id: int
@@ -327,7 +333,7 @@ class Build(BaseModel):
     release_url: str | None
     artifact_url: str | None
     index_digest: str | None
-    platforms: list[str]
+    platforms: list[Platform]
     received_at: str
     bundle_json: str | None = None
     discord_message_id: str | None = None
@@ -336,8 +342,8 @@ class Build(BaseModel):
 
     @field_validator("platforms", mode="before")
     @classmethod
-    def _platforms(cls, value: Any) -> list[str]:
-        return [str(v) for v in _json_list(value)]
+    def _platforms(cls, value: Any) -> list[Any]:
+        return [{"arch": v} if isinstance(v, str) else v for v in _json_list(value)]
 
     @classmethod
     def from_event(cls, event: dict[str, Any], received_at: str | None = None) -> "Build":
@@ -370,7 +376,11 @@ class Build(BaseModel):
             release_url=event.get("release_url"),
             artifact_url=event.get("artifact_url"),
             index_digest=(bundle or {}).get("index_digest"),
-            platforms=[str(p.get("arch")) for p in (bundle or {}).get("platforms", []) if isinstance(p, dict)],
+            platforms=[
+                Platform(arch=str(p.get("arch")), result=p.get("result"))
+                for p in (bundle or {}).get("platforms", [])
+                if isinstance(p, dict) and p.get("arch")
+            ],
             received_at=now,
             bundle_json=json.dumps(bundle, separators=(",", ":")) if bundle else None,
             created_at=norm_ts(event.get("sent")) or now,
@@ -380,6 +390,19 @@ class Build(BaseModel):
     @property
     def running(self) -> bool:
         return self.result is None
+
+    @property
+    def archs(self) -> list[str]:
+        return [p.arch for p in self.platforms]
+
+    def publishes(self, release_tag: str) -> bool:
+        """Does this live build publish `release_tag` (`latest`, `develop`…)? Bundles before the field existed
+        are matched by the tag prefix convention (§3)."""
+        if self.release_tag is not None:
+            return self.release_tag == release_tag
+        if release_tag == "latest":
+            return True
+        return bool(self.version_tag and self.version_tag.startswith(f"{release_tag}-"))
 
     @property
     def bundle(self) -> dict[str, Any] | None:
@@ -679,6 +702,14 @@ class Model:
     def builds_for_run(self, run_id: int) -> list[Build]:
         with self.db.connect() as conn:
             rows = conn.execute(f"SELECT {BUILD_COLUMNS} FROM builds WHERE run_id = ?", (run_id,)).fetchall()
+        return [Build(**dict(row)) for row in rows]
+
+    def builds_for_image(self, image: str, limit: int = 100) -> list[Build]:
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                f"SELECT {BUILD_COLUMNS} FROM builds WHERE image = ? ORDER BY received_at DESC, rowid DESC LIMIT ?",
+                (image, limit),
+            ).fetchall()
         return [Build(**dict(row)) for row in rows]
 
     def recent_builds(self, limit: int = 100) -> list[Build]:

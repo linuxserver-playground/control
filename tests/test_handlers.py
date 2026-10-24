@@ -152,7 +152,7 @@ def test_control_events_become_builds(state: State) -> None:
         "4.0.20",
         1,
     )
-    assert build.platforms == ["amd64", "arm64"] and build.test_success is True
+    assert build.archs == ["amd64", "arm64"] and build.test_success is True
     assert build.bundle and build.bundle["schema"] == 1
 
     seed(state, "control.build.started")  # a late start never erases a summary
