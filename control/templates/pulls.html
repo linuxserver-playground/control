@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Pull requests · control{% endblock %}
+{% block body %}
+<h1>Open pull requests</h1>
+{% if page.pulls %}
+<table>
+  <thead><tr><th>Repository</th><th>PR</th><th>Author</th><th>Build</th><th>Quarantined image</th><th>Review</th><th>Age</th></tr></thead>
+  <tbody>
+  {% for v in page.pulls %}
+    <tr>
+      <td>{{ v.pull.repo.split('/')[-1] }}</td>
+      <td><a href="{{ v.pull.html_url }}">#{{ v.pull.number }}</a> {{ v.pull.title }}
+        {% if v.pull.draft %}<span class="pill neutral">draft</span>{% endif %}
+        {% if v.pull.head_fork %}<span class="pill neutral">fork</span>{% endif %}</td>
+      <td>{{ v.pull.author or "?" }}</td>
+      <td>{% if v.run %}<a href="/runs/{{ v.run.id }}"><span class="pill {{ kind(v.run.status, v.run.conclusion) }}">{{ v.run.conclusion or v.run.status }}</span></a>{% else %}<span class="pill neutral">no run</span>{% endif %}</td>
+      <td>{% if v.quarantine_tag %}<code>{{ v.quarantine_tag }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td>{% if v.pull.review_state %}<span class="pill {{ v.pull.review_state | kind }}">{{ v.pull.review_state | replace("_", " ") }}</span>{% else %}<span class="muted">none</span>{% endif %}</td>
+      <td class="muted">{{ v.pull.created_at | ago }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="note">No open pull requests.</p>{% endif %}
+{% endblock %}

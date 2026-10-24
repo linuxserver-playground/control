@@ -65,7 +65,7 @@ def test_installation_event_stores_installation_id(
 
 def test_status_page_lists_deliveries(client: TestClient, configured: AppCredentials) -> None:
     deliver(client, configured.webhook_secret, "push", {"repository": {"full_name": "example-org/docker-y"}})
-    page = client.get("/")
+    page = client.get("/status")
     assert page.status_code == 200
     assert "example-org/docker-y" in page.text
     assert configured.slug in page.text

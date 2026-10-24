@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% from "_jobs.html" import job_rows %}
+{% block title %}Queue · control{% endblock %}
+{% block body %}
+<h1>Queue and capacity</h1>
+{% set level = "bad" if page.utilisation >= 1 else ("warn" if page.utilisation >= 0.75 else "ok") %}
+<div class="cards">
+  <div class="card"><div class="label">Jobs in progress</div><div class="value">{{ page.in_use }} <span class="muted">/ {{ page.limit }}</span></div>
+    <div class="bar {{ level }}"><span style="width: {{ (page.utilisation * 100) | round | int if page.utilisation < 1 else 100 }}%"></span></div></div>
+  <div class="card"><div class="label">Jobs queued</div><div class="value">{{ page.queued | length }}</div></div>
+  <div class="card"><div class="label">Concurrency in use</div><div class="value">{{ (page.utilisation * 100) | round | int }}%</div></div>
+</div>
+
+<h2>Queued</h2>
+{% if page.queued %}
+<table>
+  <thead><tr><th>Run</th><th>Job</th><th>State</th><th class="num">Waiting</th><th>Runner</th></tr></thead>
+  <tbody>{{ job_rows(page.queued, show_run=True) }}</tbody>
+</table>
+{% else %}<p class="muted">Nothing waiting.</p>{% endif %}
+
+<h2>In progress</h2>
+{% if page.in_progress %}
+<table>
+  <thead><tr><th>Run</th><th>Job</th><th>State</th><th class="num">Elapsed / p95</th><th>Runner</th></tr></thead>
+  <tbody>{{ job_rows(page.in_progress, show_run=True) }}</tbody>
+</table>
+{% else %}<p class="muted">Nothing running.</p>{% endif %}
+{% endblock %}

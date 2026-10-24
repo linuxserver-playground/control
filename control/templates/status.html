@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Status · control{% endblock %}
+{% block body %}
+<h1>Status</h1>
+<dl>
+  <dt>Organisation</dt><dd><a href="https://github.com/{{ page.org }}">{{ page.org }}</a></dd>
+  <dt>GitHub App</dt>
+  <dd>
+    {% if page.app_slug %}
+      <span class="ok">configured</span> as <a href="{{ page.app_url }}">{{ page.app_slug }}</a> (id {{ page.app_id }})
+    {% else %}
+      <span class="warn">not configured</span>, <a href="/setup">set it up</a>
+    {% endif %}
+  </dd>
+  <dt>Installation</dt>
+  <dd>
+    {% if page.installation_id %}
+      <span class="ok">installed</span> (installation {{ page.installation_id }})
+    {% elif page.app_slug %}
+      <span class="warn">not installed</span>, <a href="{{ page.install_url }}">install on {{ page.org }}</a>
+    {% else %}
+      <span class="muted">waiting for the app</span>
+    {% endif %}
+  </dd>
+  <dt>Discord</dt><dd>{% if page.discord %}<span class="ok">configured</span>{% else %}<span class="muted">not configured</span>{% endif %}</dd>
+  <dt>/events</dt><dd>{% if page.events_secret %}<span class="ok">enabled</span>{% else %}<span class="warn">disabled</span>, set <code>CONTROL_EVENTS_SECRET</code>{% endif %}</dd>
+  <dt>Webhook deliveries</dt><dd>{{ page.deliveries_count }}</dd>
+  <dt>Rows</dt><dd>{% for table, n in page.counts.items() %}{{ table }} {{ n }}{{ ", " if not loop.last }}{% endfor %}</dd>
+  <dt>Last backfill</dt>
+  <dd>
+    {% if page.last_backfill %}
+      started {{ page.last_backfill.started | timestamp }}{% if page.last_backfill.finished %}, finished {{ page.last_backfill.finished | timestamp }}{% else %}, <span class="warn">running</span>{% endif %}
+      {% if page.last_backfill.error %}<span class="bad">{{ page.last_backfill.error }}</span>{% endif %}
+      {% if page.last_backfill.counts %}<span class="muted">{% for k, n in page.last_backfill.counts.items() %}{{ k }} {{ n }}{{ ", " if not loop.last }}{% endfor %}</span>{% endif %}
+    {% else %}
+      <span class="muted">never</span>{% if page.backfill_on_start %} (runs on start){% else %}; run <code>python -m control backfill</code>{% endif %}
+    {% endif %}
+  </dd>
+</dl>
+
+<h2>Last {{ page.deliveries | length }} deliveries</h2>
+{% if page.deliveries %}
+<table>
+  <thead><tr><th>Received</th><th>Event</th><th>Action</th><th>Repository</th></tr></thead>
+  <tbody>
+  {% for d in page.deliveries %}
+    <tr><td>{{ d.received_at | timestamp }}</td><td><code>{{ d.event }}</code></td><td>{{ d.action or "" }}</td><td>{{ d.repo or "" }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="muted">None yet.</p>{% endif %}
+{% endblock %}

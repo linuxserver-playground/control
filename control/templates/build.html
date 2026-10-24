@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% from "_jobs.html" import job_rows %}
+{% set b = page.build %}
+{% set result = 'running' if b.running else b.result %}
+{% block title %}{{ b.image }} {{ b.version_tag or b.branch }} · control{% endblock %}
+{% block body %}
+<h1>{{ b.image }} {{ b.version_tag or b.branch or "" }} <span class="pill {{ result | kind }}">{{ result }}</span></h1>
+<dl>
+  <dt>Repository</dt><dd><a href="https://github.com/{{ b.repo }}">{{ b.repo }}</a></dd>
+  <dt>Mode</dt><dd>{{ b.mode or "?" }}{% if b.pull_request %} (pull request #{{ b.pull_request }}){% endif %}</dd>
+  <dt>Branch</dt><dd><code>{{ b.branch or "?" }}</code></dd>
+  <dt>Reason</dt><dd>{{ b.reason or "?" }}</dd>
+  {% if b.failed_job %}<dt>Failed job</dt><dd class="bad">{{ b.failed_job }}</dd>{% endif %}
+  <dt>Version</dt><dd>{% if b.version_tag %}<code>{{ b.version_tag }}</code> (upstream {{ b.upstream }}{% if b.semver %}, semver {{ b.semver }}{% endif %}, ls{{ b.ls_build }}){% else %}—{% endif %}</dd>
+  <dt>Platforms</dt><dd>{{ b.platforms | join(", ") or "—" }}</dd>
+  <dt>Tests</dt><dd>{% if b.test_success is none %}<span class="muted">not run</span>{% elif b.test_success %}<span class="ok">passed</span>{% else %}<span class="bad">failed</span>{% endif %}</dd>
+  {% if b.index_digest %}<dt>Index digest</dt><dd><code>{{ b.index_digest }}</code></dd>{% endif %}
+  <dt>Links</dt>
+  <dd>{% if b.run_url %}<a href="{{ b.run_url }}">workflow run</a>{% endif %}
+    {% if page.run %} · <a href="/runs/{{ page.run.id }}">jobs</a>{% endif %}
+    {% if b.release_url %} · <a href="{{ b.release_url }}">release</a>{% endif %}
+    {% if b.artifact_url %} · <a href="{{ b.artifact_url }}">artifact</a>{% endif %}</dd>
+  <dt>Received</dt><dd>{{ b.received_at | timestamp }}</dd>
+</dl>
+
+{% if page.bundle %}
+<h2>Bundle</h2>
+<dl>
+  <dt>Base</dt><dd><code>{{ page.bundle.base.image }}</code>{% if page.bundle.base.digest %} <span class="muted">{{ page.bundle.base.digest[:19] }}…</span>{% endif %}</dd>
+  <dt>Commit</dt><dd><code>{{ page.bundle.commit | sha }}</code></dd>
+  <dt>Workflows ref</dt><dd><code>{{ page.bundle.workflow.workflows_ref }}</code></dd>
+  {% if page.bundle.version.source_url %}<dt>Upstream source</dt><dd><a href="{{ page.bundle.version.source_url }}">{{ page.bundle.version.source or "link" }}</a></dd>{% endif %}
+  {% if page.bundle.version.tags %}<dt>Tags</dt><dd>{% for t in page.bundle.version.tags %}<code>{{ t }}</code> {% endfor %}</dd>{% endif %}
+</dl>
+<h3>Platforms</h3>
+<table>
+  <thead><tr><th>Arch</th><th>Digest</th><th class="num">Size</th><th>Runner</th><th class="num">Build time</th><th>Test</th></tr></thead>
+  <tbody>
+  {% for p in page.bundle.platforms %}
+    <tr>
+      <td>{{ p.arch }}</td>
+      <td><code>{{ p.digest }}</code></td>
+      <td class="num">{{ (p.size / 1048576) | round(1) }} MiB</td>
+      <td>{{ p.runner or "—" }}</td>
+      <td class="num">{{ p.build_seconds | duration if p.build_seconds is not none else "—" }}</td>
+      <td>{% set ok = page.bundle.test.per_arch[p.arch] if page.bundle.test.per_arch and p.arch in page.bundle.test.per_arch else none %}
+        {% if ok is none %}<span class="muted">—</span>{% elif ok %}<span class="pill ok">passed</span>{% else %}<span class="pill bad">failed</span>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if page.bundle.assets %}
+<h3>Assets</h3>
+<table>
+  <thead><tr><th>Name</th><th class="num">Size</th><th>sha256</th></tr></thead>
+  <tbody>
+  {% for a in page.bundle.assets %}
+    <tr><td>{% if a.url %}<a href="{{ a.url }}">{{ a.name }}</a>{% else %}{{ a.name }}{% endif %}</td><td class="num">{{ a.size }}</td><td><code>{{ a.sha256[:16] }}…</code></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endif %}
+
+{% if page.jobs %}
+<h2>Jobs</h2>
+<table>
+  <thead><tr><th>Job</th><th>State</th><th class="num">Elapsed</th><th>Runner</th></tr></thead>
+  <tbody>{{ job_rows(page.jobs) }}</tbody>
+</table>
+{% endif %}
+{% endblock %}

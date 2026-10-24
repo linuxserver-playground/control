@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Fleet · control{% endblock %}
+{% block body %}
+<h1>Fleet board</h1>
+<p class="muted">{{ page.images }} image{{ "" if page.images == 1 else "s" }}, {{ page.rows | length }} live branch{{ "" if page.rows | length == 1 else "es" }}. Drift and next check come with the scheduler.</p>
+{% if page.rows %}
+<table>
+  <thead><tr><th>Image</th><th>Branch</th><th>Last build</th><th>Age</th><th>Released</th><th>Upstream</th><th>Drift</th><th>Next check</th><th>Skip</th></tr></thead>
+  <tbody>
+  {% for row in page.rows %}
+    <tr>
+      <td><a href="https://github.com/{{ row.repo }}">{{ row.image }}</a></td>
+      <td><code>{{ row.branch }}</code>{% if row.default_branch %} <span class="muted">default</span>{% endif %}</td>
+      <td>
+        {% if row.result %}
+          <a href="/builds/{{ row.repo.split('/')[-1] }}/{{ row.run_id }}"><span class="pill {{ row.result | kind }}">{{ row.result }}</span></a>
+          {% if row.reason %}<span class="muted">{{ row.reason }}</span>{% endif %}
+        {% else %}<span class="pill neutral">no build</span>{% endif %}
+      </td>
+      <td class="muted">{{ row.built_at | ago }}</td>
+      <td>{% if row.released %}<code>{{ row.released }}</code> <span class="muted">{{ row.released_at | ago }}</span>{% else %}<span class="muted">none</span>{% endif %}</td>
+      <td>{{ row.upstream or "—" }}</td>
+      <td class="muted">{{ row.drift }}</td>
+      <td class="muted">{{ row.next_check or "—" }}</td>
+      <td>{% for flag in row.skip %}<span class="pill neutral">{{ flag }}</span> {% endfor %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="note">No image repositories known yet. They appear as webhooks arrive, or after <code>python -m control backfill</code>.</p>
+{% endif %}
+{% endblock %}

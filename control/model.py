@@ -688,6 +688,16 @@ class Model:
             ).fetchall()
         return [Build(**dict(row)) for row in rows]
 
+    def build_for_tag(self, repo: str, tag: str) -> Build | None:
+        """The live build that produced a release tag (the releases feed shows its reason and upstream)."""
+        with self.db.connect() as conn:
+            row = conn.execute(
+                f"SELECT {BUILD_COLUMNS} FROM builds WHERE repo = ? AND version_tag = ? AND mode = 'live' "
+                "ORDER BY received_at DESC LIMIT 1",
+                (repo, tag),
+            ).fetchone()
+        return Build(**dict(row)) if row else None
+
     def latest_builds_per_branch(self, repo: str, mode: str = "live") -> list[Build]:
         """The newest build of each branch of a repo in one mode: the fleet board's live branches."""
         with self.db.connect() as conn:

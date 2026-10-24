@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Scheduler · control{% endblock %}
+{% block body %}
+<h1>Scheduler log</h1>
+<p class="note">The scheduler is not deployed yet. When it is, every decision it takes (build, skip, defer, and why) lands here.</p>
+{% if page.decisions %}
+<table>
+  <thead><tr><th>When</th><th>Image</th><th>Branch</th><th>Outcome</th><th>Detail</th></tr></thead>
+  <tbody>
+  {% for d in page.decisions %}
+    <tr><td class="muted">{{ d.at | timestamp }}</td><td>{{ d.image }}</td><td><code>{{ d.branch }}</code></td><td><span class="pill {{ d.outcome | kind }}">{{ d.outcome }}</span></td><td>{{ d.detail or "" }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="muted">No decisions recorded.</p>{% endif %}
+{% endblock %}

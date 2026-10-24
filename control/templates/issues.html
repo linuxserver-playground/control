@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Issues · control{% endblock %}
+{% block body %}
+<h1>Open issues</h1>
+{% if page.issues %}
+<table>
+  <thead><tr><th>Repository</th><th>Issue</th><th>Author</th><th>Labels</th><th>Age</th><th>Updated</th></tr></thead>
+  <tbody>
+  {% for issue in page.issues %}
+    <tr>
+      <td>{{ issue.repo.split('/')[-1] }}</td>
+      <td><a href="{{ issue.html_url }}">#{{ issue.number }}</a> {{ issue.title }}</td>
+      <td>{{ issue.author or "?" }}</td>
+      <td>{% for label in issue.labels %}<span class="pill neutral">{{ label }}</span> {% endfor %}</td>
+      <td class="muted">{{ issue.created_at | ago }}</td>
+      <td class="muted">{{ issue.updated_at | ago }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="note">No open issues.</p>{% endif %}
+{% endblock %}

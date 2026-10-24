@@ -1,0 +1,29 @@
+{% macro job_rows(jobs, show_run=False) %}
+  {% for v in jobs %}
+    <tr>
+      {% if show_run %}<td><a href="/runs/{{ v.job.run_id }}">{{ v.job.repo.split('/')[-1] }} #{{ v.job.run_id }}</a></td>{% endif %}
+      <td>{% if v.job.html_url %}<a href="{{ v.job.html_url }}">{{ v.job.name }}</a>{% else %}{{ v.job.name }}{% endif %}</td>
+      <td>
+        <span class="pill {{ kind(v.job.status, v.job.conclusion) }}">{{ v.job.conclusion or v.job.status or "unknown" }}</span>
+        {% if v.stuck %}<span class="pill bad">stuck</span>{% endif %}
+      </td>
+      <td class="num">{{ v.elapsed_seconds | duration }}{% if v.threshold_seconds %} <span class="muted">/ {{ v.threshold_seconds | duration }}</span>{% endif %}</td>
+      <td class="muted">{{ v.job.runner_name or "—" }}{% if v.job.labels %} <code>{{ v.job.labels | join(", ") }}</code>{% endif %}</td>
+    </tr>
+  {% endfor %}
+{% endmacro %}
+
+{% macro steps(job) %}
+  {% if job.steps %}
+  <ul class="steps">
+    {% for step in job.steps %}
+      <li>
+        <span class="pill {{ kind(step.status, step.conclusion) }}">{{ step.conclusion or step.status or "pending" }}</span>
+        <span class="name">{{ step.name }}</span>
+        <span class="muted">{{ step.started_at | timestamp if step.started_at else "" }}</span>
+        <span class="muted">{{ span(step.started_at, step.completed_at) | duration if step.started_at else "" }}</span>
+      </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+{% endmacro %}

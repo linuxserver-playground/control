@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% from "_jobs.html" import job_rows %}
+{% block title %}Runs · control{% endblock %}
+{% block body %}
+<h1>Live runs</h1>
+{% if page.active %}
+  {% for v in page.active %}
+    <h3>
+      <a href="/runs/{{ v.run.id }}">{{ v.run.repo.split('/')[-1] }} · {{ v.run.workflow_name or "workflow" }} #{{ v.run.run_number }}</a>
+      <span class="pill {{ kind(v.run.status, v.run.conclusion) }}">{{ v.run.status }}</span>
+      {% if v.stuck %}<span class="pill bad">stuck</span>{% endif %}
+      <span class="muted">{{ v.run.event }} on <code>{{ v.run.branch }}</code>, {{ v.elapsed_seconds | duration }}</span>
+    </h3>
+    {% if v.jobs %}
+    <table>
+      <thead><tr><th>Job</th><th>State</th><th class="num">Elapsed / p95</th><th>Runner</th></tr></thead>
+      <tbody>{{ job_rows(v.jobs) }}</tbody>
+    </table>
+    {% else %}<p class="muted">No jobs reported yet.</p>{% endif %}
+  {% endfor %}
+{% else %}
+<p class="note">Nothing running.</p>
+{% endif %}
+
+<h2>Recent runs</h2>
+{% if page.recent %}
+<table>
+  <thead><tr><th>Repository</th><th>Workflow</th><th>Result</th><th>Branch</th><th>Event</th><th>Title</th><th>Finished</th></tr></thead>
+  <tbody>
+  {% for run in page.recent %}
+    <tr>
+      <td>{{ run.repo.split('/')[-1] }}</td>
+      <td><a href="/runs/{{ run.id }}">{{ run.workflow_name or "workflow" }} #{{ run.run_number }}</a></td>
+      <td><span class="pill {{ kind(run.status, run.conclusion) }}">{{ run.conclusion or run.status }}</span></td>
+      <td><code>{{ run.branch }}</code></td>
+      <td>{{ run.event }}</td>
+      <td>{{ run.display_title or "" }}</td>
+      <td class="muted">{{ run.updated_at | ago }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="muted">None yet.</p>{% endif %}
+{% endblock %}

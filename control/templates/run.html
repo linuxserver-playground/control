@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% from "_jobs.html" import steps %}
+{% block title %}Run {{ page.run.id }} · control{% endblock %}
+{% block body %}
+<h1>{{ page.run.repo.split('/')[-1] }} · {{ page.run.workflow_name or "workflow" }} #{{ page.run.run_number }}
+  <span class="pill {{ kind(page.run.status, page.run.conclusion) }}">{{ page.run.conclusion or page.run.status }}</span></h1>
+<dl>
+  <dt>Repository</dt><dd><a href="https://github.com/{{ page.run.repo }}">{{ page.run.repo }}</a></dd>
+  <dt>Title</dt><dd>{{ page.run.display_title or "" }}</dd>
+  <dt>Trigger</dt><dd>{{ page.run.event }} on <code>{{ page.run.branch }}</code> at <code>{{ page.run.head_sha | sha }}</code> by {{ page.run.actor or "?" }}{% if page.run.attempt > 1 %}, attempt {{ page.run.attempt }}{% endif %}</dd>
+  <dt>Started</dt><dd>{{ (page.run.started_at or page.run.created_at) | timestamp }} ({{ page.elapsed_seconds | duration }})</dd>
+  <dt>GitHub</dt><dd>{% if page.run.html_url %}<a href="{{ page.run.html_url }}">{{ page.run.html_url }}</a>{% endif %}</dd>
+  {% if page.builds %}
+  <dt>Builds</dt>
+  <dd>{% for b in page.builds %}<a href="/builds/{{ b.repo.split('/')[-1] }}/{{ b.run_id }}">{{ b.image }} {{ b.version_tag or b.branch }}</a> <span class="pill {{ ('running' if b.running else b.result) | kind }}">{{ 'running' if b.running else b.result }}</span> {% endfor %}</dd>
+  {% endif %}
+</dl>
+
+<h2>Jobs</h2>
+{% if page.jobs %}
+  {% for v in page.jobs %}
+    <h3>
+      {% if v.job.html_url %}<a href="{{ v.job.html_url }}">{{ v.job.name }}</a>{% else %}{{ v.job.name }}{% endif %}
+      <span class="pill {{ kind(v.job.status, v.job.conclusion) }}">{{ v.job.conclusion or v.job.status }}</span>
+      {% if v.stuck %}<span class="pill bad">stuck</span>{% endif %}
+      <span class="muted">{{ v.elapsed_seconds | duration }}{% if v.threshold_seconds %} of p95 {{ v.threshold_seconds | duration }}{% endif %}
+        {% if v.job.runner_name %}on {{ v.job.runner_name }}{% endif %}</span>
+    </h3>
+    {{ steps(v.job) }}
+  {% endfor %}
+{% else %}<p class="muted">No jobs reported yet.</p>{% endif %}
+{% endblock %}

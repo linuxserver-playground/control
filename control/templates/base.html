@@ -5,26 +5,80 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}control{% endblock %}</title>
 <style>
-  :root { color-scheme: dark light; --bg: #0f1216; --fg: #e6e8eb; --muted: #8b949e; --line: #2a3139; --ok: #3fb950; --warn: #d29922; --accent: #58a6ff; }
-  @media (prefers-color-scheme: light) { :root { --bg: #ffffff; --fg: #1f2328; --muted: #656d76; --line: #d0d7de; } }
-  body { margin: 0; padding: 1.5rem; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; max-width: 72rem; margin-inline: auto; }
+  :root { color-scheme: dark light; --bg: #0f1216; --panel: #161b22; --fg: #e6e8eb; --muted: #8b949e; --line: #2a3139; --ok: #3fb950; --bad: #f85149; --warn: #d29922; --neutral: #8b949e; --accent: #58a6ff; }
+  @media (prefers-color-scheme: light) { :root { --bg: #ffffff; --panel: #f6f8fa; --fg: #1f2328; --muted: #656d76; --line: #d0d7de; --ok: #1a7f37; --bad: #cf222e; --warn: #9a6700; --neutral: #656d76; --accent: #0969da; } }
+  body { margin: 0; padding: 1.5rem; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; max-width: 96rem; margin-inline: auto; }
   h1 { font-size: 1.4rem; margin: 0 0 1rem; }
   h2 { font-size: 1.05rem; margin: 2rem 0 .5rem; color: var(--muted); font-weight: 600; }
-  a { color: var(--accent); }
+  h3 { font-size: 1rem; margin: 1.2rem 0 .4rem; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  nav { display: flex; flex-wrap: wrap; gap: .2rem 1rem; margin-bottom: 1.5rem; padding-bottom: .6rem; border-bottom: 1px solid var(--line); }
+  nav a { color: var(--muted); } nav a.current { color: var(--fg); font-weight: 600; }
+  nav .brand { color: var(--fg); font-weight: 700; margin-right: .5rem; }
   table { border-collapse: collapse; width: 100%; }
   th, td { text-align: left; padding: .35rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { color: var(--muted); font-weight: 600; }
+  th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+  td.num, th.num { text-align: right; white-space: nowrap; }
   code { font-family: ui-monospace, monospace; font-size: .9em; }
+  pre { background: var(--panel); padding: .8rem; border-radius: 6px; overflow: auto; font-size: .85em; }
   dl { display: grid; grid-template-columns: max-content 1fr; gap: .3rem 1.2rem; margin: 0; }
-  dt { color: var(--muted); }
-  dd { margin: 0; }
-  .ok { color: var(--ok); } .warn { color: var(--warn); } .muted { color: var(--muted); }
+  dt { color: var(--muted); } dd { margin: 0; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); } .muted { color: var(--muted); }
+  .pill { display: inline-block; padding: 0 .55rem; border-radius: 999px; font-size: .8em; font-weight: 600; line-height: 1.6; color: #0f1216; background: var(--neutral); white-space: nowrap; }
+  .pill.ok { background: var(--ok); } .pill.bad { background: var(--bad); } .pill.warn { background: var(--warn); } .pill.neutral { background: var(--neutral); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: .8rem; margin: 0 0 1.5rem; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: .8rem 1rem; }
+  .card .label { color: var(--muted); font-size: .85em; } .card .value { font-size: 1.5rem; font-weight: 600; }
+  .bar { height: .6rem; background: var(--line); border-radius: 999px; overflow: hidden; margin-top: .4rem; }
+  .bar span { display: block; height: 100%; background: var(--ok); }
+  .bar.warn span { background: var(--warn); } .bar.bad span { background: var(--bad); }
+  .steps { margin: .3rem 0 .8rem 1.2rem; padding: 0; list-style: none; font-size: .9em; }
+  .steps li { display: flex; gap: .8rem; padding: .1rem 0; border-left: 2px solid var(--line); padding-left: .6rem; }
+  .steps .name { flex: 1; }
+  .note { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: .8rem 1rem; color: var(--muted); }
   button { font: inherit; padding: .5rem 1rem; border-radius: 6px; border: 1px solid var(--line); background: var(--accent); color: #0f1216; cursor: pointer; }
-  footer { margin-top: 3rem; color: var(--muted); font-size: .85em; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .actions { display: flex; flex-wrap: wrap; gap: .6rem; margin: 1rem 0; }
+  footer { margin-top: 3rem; color: var(--muted); font-size: .85em; display: flex; gap: 1rem; }
+  @media (max-width: 40rem) { body { padding: 1rem; } table { font-size: .9em; } th, td { padding: .3rem .4rem; } }
 </style>
 </head>
 <body>
+<nav>
+  <a class="brand" href="/">control</a>
+  {% set nav = [("/", "Fleet"), ("/runs", "Runs"), ("/queue", "Queue"), ("/pulls", "Pull requests"), ("/issues", "Issues"), ("/releases", "Releases"), ("/scheduler", "Scheduler"), ("/management", "Management"), ("/status", "Status")] %}
+  {% set path = path | default("") %}
+  {% for href, label in nav %}
+    <a href="{{ href }}" {% if path == href or (href != "/" and path.startswith(href)) %}class="current"{% endif %}>{{ label }}</a>
+  {% endfor %}
+</nav>
+<main id="main">
 {% block body %}{% endblock %}
-<footer>lsio-control {{ version | default("") }}</footer>
+</main>
+<footer>
+  <span>lsio-control {{ version | default("") }}</span>
+  {% if settings %}<span><a href="https://github.com/{{ settings.github_org }}">{{ settings.github_org }}</a></span>{% endif %}
+  {% if live %}<span id="live" class="muted">live</span>{% endif %}
+</footer>
+{% if live %}
+<script>
+  // Refresh the page body when a handler changes a row; debounced so a burst of job events is one fetch.
+  (function () {
+    if (!window.EventSource) return;
+    var timer = null, source = new EventSource("/api/stream"), live = document.getElementById("live");
+    source.onopen = function () { live.textContent = "live"; };
+    source.onerror = function () { live.textContent = "reconnecting"; };
+    source.onmessage = function () {
+      clearTimeout(timer);
+      timer = setTimeout(function () {
+        fetch(location.href, { headers: { Accept: "text/html" } }).then(function (r) { return r.text(); }).then(function (text) {
+          var doc = new DOMParser().parseFromString(text, "text/html"), next = doc.getElementById("main");
+          if (next) document.getElementById("main").replaceWith(next);
+        });
+      }, 500);
+    };
+  })();
+</script>
+{% endif %}
 </body>
 </html>

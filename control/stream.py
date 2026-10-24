@@ -51,14 +51,21 @@ class Broadcaster:
             except asyncio.QueueFull:
                 log.debug("dropping event for a slow stream subscriber")
 
-    async def subscribe(self) -> AsyncIterator[dict[str, Any]]:
+    async def subscribe(self, keepalive: float | None = None) -> AsyncIterator[dict[str, Any] | None]:
+        """Events as they come; with `keepalive`, None every that many idle seconds so the response stays warm."""
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(QUEUE_SIZE)
         with self._lock:
             self._loop = asyncio.get_running_loop()
             self._queues.add(queue)
         try:
             while True:
-                yield await queue.get()
+                if keepalive is None:
+                    yield await queue.get()
+                    continue
+                try:
+                    yield await asyncio.wait_for(queue.get(), keepalive)
+                except TimeoutError:
+                    yield None
         finally:
             with self._lock:
                 self._queues.discard(queue)

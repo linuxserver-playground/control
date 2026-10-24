@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Releases · control{% endblock %}
+{% block body %}
+<h1>Releases</h1>
+{% if page.releases %}
+<table>
+  <thead><tr><th>Published</th><th>Image</th><th>Tag</th><th>Upstream</th><th>Reason</th><th>Build</th></tr></thead>
+  <tbody>
+  {% for v in page.releases %}
+    <tr>
+      <td class="muted">{{ v.release.published_at | timestamp }}</td>
+      <td>{{ v.release.repo.split('/')[-1] }}</td>
+      <td><a href="{{ v.release.html_url }}"><code>{{ v.release.tag }}</code></a>{% if v.release.prerelease %} <span class="pill neutral">pre-release</span>{% endif %}</td>
+      <td>{{ v.build.upstream if v.build else "—" }}</td>
+      <td>{{ v.build.reason if v.build else "—" }}</td>
+      <td>{% if v.build %}<a href="/builds/{{ v.build.repo.split('/')[-1] }}/{{ v.build.run_id }}"><span class="pill {{ v.build.result | kind }}">{{ v.build.result }}</span></a>{% else %}<span class="muted">unknown</span>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="note">No releases yet.</p>{% endif %}
+{% endblock %}
