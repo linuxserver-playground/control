@@ -15,7 +15,7 @@ fleet, and lets org members act (re-run, cancel, dispatch, skip). Python 3.12+, 
   `control/stream.py` the in-process broadcaster; `control/github_app.py` manifest, conversion, credentials
   file, JWT and installation tokens; `control/github.py` the authenticated REST client the scheduler, fleet
   and actions share; `control/fleet.py` live-branch discovery from `image.yml` into `manifests`;
-  `control/scheduler.py` the hourly upstream and weekly package schedules, decisions and dispatch;
+  `control/scheduler.py` the hourly upstream and release checks, the weekly package schedule, decisions and dispatch;
   `control/vendor/resolve_version.py` the workflows repo's resolver, copied verbatim (header names the
   commit; `tests/test_vendor.py` fails on drift); `control/auth.py` GitHub OAuth sign-in, the signed session
   cookie and the membership check; `control/manage.py` the member POST actions; `control/webhooks.py`

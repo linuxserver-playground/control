@@ -6,9 +6,11 @@ Usage: python -m control            serve
        python -m control replay     reprocess every stored delivery through the handlers
        python -m control backfill   fill the state tables from the GitHub API, once
        python -m control discover   read every live branch's image.yml from GitHub, once
-       python -m control schedule --once [--image x] [--branch y] [--dry-run]
-                                    run the upstream check now for every (or one) live branch;
-                                    --dry-run resolves and prints but records and dispatches nothing
+       python -m control schedule --once [--image x] [--branch y] [--kind upstream|release|packages] [--dry-run]
+                                    run one check now for every (or one) live branch: the upstream check
+                                    by default, the release check, or a package check (--image required,
+                                    so a typo cannot rebuild the fleet); --dry-run resolves and prints but
+                                    records and dispatches nothing
 """
 
 import argparse
@@ -66,14 +68,22 @@ def main(argv: list[str]) -> int:
 
 def _schedule(settings: Settings, db: Database, argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="python -m control schedule")
-    parser.add_argument("--once", action="store_true", required=True, help="run the upstream check now and exit")
+    parser.add_argument("--once", action="store_true", required=True, help="run the check now and exit")
     parser.add_argument("--image", help="only this image (name or repo)")
     parser.add_argument("--branch", help="only this branch")
+    parser.add_argument(
+        "--kind",
+        choices=(scheduler.KIND_UPSTREAM, scheduler.KIND_RELEASE, scheduler.KIND_PACKAGES),
+        default=scheduler.KIND_UPSTREAM,
+        help="which check: upstream (default), release, or packages (forces one and resets the weekly slot)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="resolve and print; record and dispatch nothing")
     args = parser.parse_args(argv)
+    if args.kind == scheduler.KIND_PACKAGES and not args.image:
+        parser.error("--kind packages needs --image: it dispatches a build for every branch matched")
 
     async def once(state: State) -> list[scheduler.Decision]:
-        return await scheduler.run_once(state, args.image, args.branch, args.dry_run)
+        return await scheduler.run_once(state, args.image, args.branch, args.dry_run, args.kind)
 
     decisions = asyncio.run(_with_state(settings, db, once))
     for decision in decisions:

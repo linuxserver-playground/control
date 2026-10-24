@@ -227,6 +227,11 @@ def test_scheduler_page_reads_decisions(client: TestClient, state: State) -> Non
     assert [v.decision.image for v in by_outcome.decisions] == ["radarr"]
     rows = client.get("/scheduler?image=sonarr&outcome=dispatch").text.split("<tbody>")[-1]
     assert "sonarr" in rows and "radarr" not in rows
+    state.model.add_decision("sonarr", "main", "unchanged", '{"head": "b" * 40, "released": "a" * 40}', "release")
+    by_kind = views.SchedulerPage.model_validate(client.get("/api/scheduler.json?kind=release").json())
+    assert [v.decision.kind for v in by_kind.decisions] == ["release"] and by_kind.kind == "release"
+    assert by_kind.kinds == ["upstream", "release", "packages", "manual"]
+    assert 'name="kind"' in client.get("/scheduler?kind=release").text
 
 
 def test_badge_passing_failing_unknown(client: TestClient, state: State) -> None:

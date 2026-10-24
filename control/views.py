@@ -205,8 +205,10 @@ class SchedulerPage(BaseModel):
     decisions: list[DecisionView]
     image: str | None
     outcome: str | None
+    kind: str | None
     images: list[str]
     outcomes: list[str]
+    kinds: list[str]
     upcoming: list[Upcoming]
     live_branches: int
     generated_at: str
@@ -506,16 +508,21 @@ def decision_view(state: State, decision: SchedulerDecision) -> DecisionView:
     return DecisionView(decision=decision, info=decision.info, run=run)
 
 
-def scheduler_page(state: State, image: str | None = None, outcome: str | None = None) -> SchedulerPage:
+def scheduler_page(
+    state: State, image: str | None = None, outcome: str | None = None, kind: str | None = None
+) -> SchedulerPage:
     now = now_utc()
     manifests = state.model.manifests()
+    recent = state.model.recent_decisions(200, image or None, outcome or None, kind or None)
     return SchedulerPage(
         enabled=state.settings.scheduler,
-        decisions=[decision_view(state, d) for d in state.model.recent_decisions(200, image or None, outcome or None)],
+        decisions=[decision_view(state, d) for d in recent],
         image=image or None,
         outcome=outcome or None,
+        kind=kind or None,
         images=state.model.decision_images(),
         outcomes=OUTCOMES,
+        kinds=list(sched.KINDS),
         upcoming=[Upcoming(**row) for row in sched.upcoming(manifests, now)],
         live_branches=len(manifests),
         generated_at=now.isoformat(timespec="seconds"),
@@ -617,8 +624,10 @@ def image_tag(request: Request, name: str, tag: str) -> HTMLResponse:
 
 
 @router.get("/scheduler", response_class=HTMLResponse)
-def scheduler(request: Request, image: str | None = None, outcome: str | None = None) -> HTMLResponse:
-    return html(request, "scheduler.html", scheduler_page(state_of(request), image, outcome), live=True)
+def scheduler(
+    request: Request, image: str | None = None, outcome: str | None = None, kind: str | None = None
+) -> HTMLResponse:
+    return html(request, "scheduler.html", scheduler_page(state_of(request), image, outcome, kind), live=True)
 
 
 @router.get("/status", response_class=HTMLResponse)
@@ -694,8 +703,10 @@ def image_tag_json(request: Request, name: str, tag: str) -> ImagePage:
 
 
 @router.get("/api/scheduler.json")
-def scheduler_json(request: Request, image: str | None = None, outcome: str | None = None) -> SchedulerPage:
-    return scheduler_page(state_of(request), image, outcome)
+def scheduler_json(
+    request: Request, image: str | None = None, outcome: str | None = None, kind: str | None = None
+) -> SchedulerPage:
+    return scheduler_page(state_of(request), image, outcome, kind)
 
 
 @router.get("/api/skips.json")

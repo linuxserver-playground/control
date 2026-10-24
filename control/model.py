@@ -418,7 +418,7 @@ class SchedulerDecision(BaseModel):
     image: str
     branch: str
     kind: str = "upstream"
-    """upstream | packages | manual: which schedule (or which member action) produced the decision."""
+    """upstream | release | packages | manual: which schedule (or which member action) produced the decision."""
     outcome: str
     """unchanged | skipped | dispatch | error."""
     detail: str | None
@@ -633,6 +633,15 @@ class Model:
             row = conn.execute(
                 "SELECT * FROM runs WHERE repo = ? AND branch = ? AND (status IS NULL OR status != 'completed') "
                 "ORDER BY created_at DESC LIMIT 1",
+                (repo, branch),
+            ).fetchone()
+        return Run(**dict(row)) if row else None
+
+    def latest_run_for_branch(self, repo: str, branch: str) -> Run | None:
+        """The newest run of a branch, whatever its state: the release check waits for a young one to settle."""
+        with self.db.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM runs WHERE repo = ? AND branch = ? ORDER BY created_at DESC, id DESC LIMIT 1",
                 (repo, branch),
             ).fetchone()
         return Run(**dict(row)) if row else None
@@ -964,7 +973,7 @@ class Model:
         return SchedulerDecision(**dict(row)) if row else None
 
     def recent_decisions(
-        self, limit: int = 100, image: str | None = None, outcome: str | None = None
+        self, limit: int = 100, image: str | None = None, outcome: str | None = None, kind: str | None = None
     ) -> list[SchedulerDecision]:
         sql = "SELECT * FROM scheduler_decisions"
         clauses: list[str] = []
@@ -975,6 +984,9 @@ class Model:
         if outcome:
             clauses.append("outcome = ?")
             params.append(outcome)
+        if kind:
+            clauses.append("kind = ?")
+            params.append(kind)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY id DESC LIMIT ?"

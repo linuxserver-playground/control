@@ -42,6 +42,52 @@ class FakeDispatch:
         return httpx.Response(self.status, json={} if self.status != 204 else None)
 
 
+HEAD = "b" * 40
+RELEASED = "a" * 40
+
+
+class FakeGitHub(FakeDispatch):
+    """FakeDispatch plus the reads of the release check: the branch head, the Release tag's object (a commit,
+    or an annotated tag one hop away) and the compare between the two."""
+
+    def __init__(
+        self,
+        head: str = RELEASED,
+        message: str = "Update package versions",
+        released: str = RELEASED,
+        annotated: bool = False,
+        files: list[str] | None = None,
+        status: int = 204,
+        fail: str | None = None,
+    ) -> None:
+        super().__init__(status)
+        self.head, self.message, self.released, self.annotated = head, message, released, annotated
+        self.files = files or []
+        self.fail = fail
+        self.gets: list[str] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.method != "GET":
+            return super().__call__(request)
+        path = request.url.path
+        self.gets.append(path)
+        assert request.headers["Authorization"] == "Bearer ghs_token"
+        if self.fail and self.fail in path:
+            return httpx.Response(500, json={"message": "boom"})
+        if "/branches/" in path:
+            commit = {"sha": self.head, "commit": {"message": self.message}}
+            return httpx.Response(200, json={"name": path.rsplit("/", 1)[-1], "commit": commit})
+        if "/git/ref/tags/" in path:
+            kind, sha = ("tag", "c" * 40) if self.annotated else ("commit", self.released)
+            return httpx.Response(200, json={"ref": path.split("/git/ref/")[-1], "object": {"type": kind, "sha": sha}})
+        if "/git/tags/" in path:
+            return httpx.Response(200, json={"tag": "x", "object": {"type": "commit", "sha": self.released}})
+        if "/compare/" in path:
+            assert path.endswith(f"/compare/{self.released}...{self.head}")
+            return httpx.Response(200, json={"status": "ahead", "files": [{"filename": f} for f in self.files]})
+        return httpx.Response(404, json={"message": f"unexpected {path}"})
+
+
 class FakeResolver:
     def __init__(self, upstream: str | None = "4.0.20.3014", error: Exception | None = None) -> None:
         self.upstream = upstream
@@ -55,15 +101,21 @@ class FakeResolver:
         return {"upstream": self.upstream, "upstream_clean": rv.sanitize(self.upstream or ""), "source_url": "x"}
 
 
-def live(state: State, branch: str = "main", data: dict[str, Any] | None = None, repo: str = REPO) -> Any:
-    """A repo row and a manifests row, as discovery would leave them."""
+def live(
+    state: State,
+    branch: str = "main",
+    data: dict[str, Any] | None = None,
+    repo: str = REPO,
+    seen: datetime.datetime | None = None,
+) -> Any:
+    """A repo row and a manifests row, as discovery would leave them; `seen` is when discovery first stored it."""
     state.model.upsert_repo(
         Repo.from_github({**fixture("api.repos")[0], "full_name": repo, "name": repo.split("/")[-1]})
     )
     manifest = data or MANIFEST
     if branch != "main":
         manifest = {**manifest, "release": {"branch": branch, "tag": branch, "channel": "prerelease"}}
-    row = manifest_row(repo, branch, f"sha-{branch}", manifest)
+    row = manifest_row(repo, branch, f"sha-{branch}", manifest, seen.isoformat(timespec="seconds") if seen else None)
     state.model.upsert_manifest(row)
     return row
 
@@ -76,6 +128,15 @@ async def run_check(
         state.discord.client = http
         sched = scheduler.Scheduler(state, GitHub(http, "ghs_token"), resolver=resolver, **kwargs)
         return await sched.check_upstream(manifest), github
+
+
+async def run_release(
+    state: State, manifest: Any, github: FakeGitHub | None = None, **kwargs: Any
+) -> tuple[scheduler.Decision, FakeGitHub]:
+    github = github or FakeGitHub()
+    async with mock_client(github) as http:
+        sched = scheduler.Scheduler(state, GitHub(http, "ghs_token"), **kwargs)
+        return await sched.check_release(manifest), github
 
 
 def decisions(state: State) -> list[SchedulerDecision]:
@@ -304,6 +365,108 @@ async def test_dispatch_failure_is_an_error_decision(state: State) -> None:
     assert decision.detail["upstream"] == "1.0"
 
 
+# -- release check ------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_release_check_rebuilds_an_unreleased_head(state: State) -> None:
+    seed(state, "release.published")  # 4.0.20.3014-ls1
+    manifest = live(state)
+    decision, github = await run_release(state, manifest, FakeGitHub(head=HEAD), clock=lambda: NOW)
+    assert decision.outcome == "dispatch" and decision.kind == "release"
+    assert decision.detail["head"] == HEAD and decision.detail["released"] == RELEASED
+    assert decision.detail["released_tag"] == "4.0.20.3014-ls1" and decision.detail["reason"] == "head not released"
+    assert github.posts == [
+        (f"/repos/{REPO}/actions/workflows/build.yml/dispatches", {"ref": "main", "inputs": {"reason": "rebuild"}})
+    ]
+    assert github.gets == [f"/repos/{REPO}/branches/main", f"/repos/{REPO}/git/ref/tags/4.0.20.3014-ls1"]
+    # A plain commit is owed a release even when it only touched generated files: no compare is made.
+    assert not any("/compare/" in g for g in github.gets)
+    # The dispatch puts the branch in cooldown, for this check and the upstream one alike.
+    again, github = await run_release(state, manifest, FakeGitHub(head=HEAD), clock=lambda: NOW)
+    assert again.outcome == "skipped" and again.detail["reason"] == "cooldown" and github.posts == []
+    upstream, _ = await run_check(state, manifest, FakeResolver("9.9"), clock=lambda: NOW)
+    assert upstream.outcome == "skipped" and upstream.detail["reason"] == "cooldown"
+
+
+@pytest.mark.anyio
+async def test_release_check_unchanged_when_head_is_released(state: State) -> None:
+    seed(state, "release.published")
+    manifest = live(state)
+    decision, github = await run_release(state, manifest, FakeGitHub(annotated=True), clock=lambda: NOW)
+    assert decision.outcome == "unchanged" and github.posts == []
+    assert decision.detail == {"head": RELEASED, "released": RELEASED, "released_tag": "4.0.20.3014-ls1"}
+    # An annotated tag is one object further than the ref.
+    assert github.gets[-1] == f"/repos/{REPO}/git/tags/{'c' * 40}"
+    assert [(d.kind, d.outcome) for d in decisions(state)] == [("release", "unchanged")]
+
+
+@pytest.mark.anyio
+async def test_release_check_ignores_generated_files_behind_skip_ci(state: State) -> None:
+    seed(state, "release.published")
+    manifest = live(state)
+    generated = ["README.md", "AGENTS.md", "LICENSE", ".github/workflows/build.yml"]
+    github = FakeGitHub(head=HEAD, message="Update README [skip ci]\n\nregenerated", files=generated)
+    decision, github = await run_release(state, manifest, github, clock=lambda: NOW)
+    assert decision.outcome == "unchanged" and decision.detail["reason"] == "generated files only"
+    assert decision.detail["head"] == HEAD and decision.detail["released"] == RELEASED and github.posts == []
+    assert github.gets[-1] == f"/repos/{REPO}/compare/{RELEASED}...{HEAD}"
+    # One real file among them and the release is owed, [skip ci] or not.
+    github = FakeGitHub(
+        head=HEAD, message="Update package versions [skip ci]", files=[*generated, "package_versions.txt"]
+    )
+    decision, github = await run_release(state, manifest, github, clock=lambda: NOW)
+    assert decision.outcome == "dispatch" and len(github.posts) == 1
+    assert decision.detail["dispatch_reason"] == "rebuild"
+    # Only the subject counts: a body mentioning [skip ci] is a normal commit.
+    assert scheduler.skips_ci("Fix build [skip ci]") and scheduler.skips_ci("Fix build [skip ci]  \nbody")
+    assert not scheduler.skips_ci("Fix build\n\n[skip ci]") and not scheduler.skips_ci("[skip ci] Fix build")
+
+
+@pytest.mark.anyio
+async def test_release_check_waits_and_skips(state: State) -> None:
+    manifest = live(state)
+    # Without a Release the upstream check builds the first one; this check has nothing to compare.
+    decision, github = await run_release(state, manifest, FakeGitHub(head=HEAD), clock=lambda: NOW)
+    assert decision.outcome == "skipped" and decision.detail == {"reason": "no release yet"} and github.gets == []
+    seed(state, "release.published")
+
+    # A queued or running build of the branch; then one that finished less than 15 minutes ago.
+    seed(state, "workflow_run.requested")  # run 5001 on main, created 12:00
+    decision, _ = await run_release(state, manifest, FakeGitHub(head=HEAD), clock=lambda: NOW)
+    assert decision.outcome == "skipped" and decision.detail["reason"] == "run in progress"
+    seed(state, "workflow_run.completed")
+    young = NOW.replace(hour=12, minute=10)
+    decision, github = await run_release(state, manifest, FakeGitHub(head=HEAD), clock=lambda: young)
+    assert (
+        decision.outcome == "skipped"
+        and decision.detail["reason"] == "recent run"
+        and decision.detail["run_id"] == 5001
+    )
+    assert github.gets == []
+    settled = NOW.replace(hour=12, minute=15)
+    decision, _ = await run_release(state, manifest, FakeGitHub(head=HEAD), clock=lambda: settled, dry_run=True)
+    assert decision.outcome == "dispatch" and decision.detail["dry_run"] is True
+
+    # Skip flags hold it back like every dispatch.
+    state.model.set_skip("sonarr/main", "hold", "octocat")
+    decision, _ = await run_release(state, manifest, FakeGitHub(head=HEAD), clock=lambda: NOW)
+    assert decision.outcome == "skipped" and decision.detail["scope"] == "sonarr/main"
+    state.model.remove_skip("sonarr/main")
+
+    # A failing read is an error decision, never an exception out of the tick.
+    decision, _ = await run_release(state, manifest, FakeGitHub(head=HEAD, fail="/git/ref/"), clock=lambda: NOW)
+    assert decision.outcome == "error" and "500" in decision.detail["message"]
+    assert decision.detail["released_tag"] == "4.0.20.3014-ls1"
+    # Without the App there is nothing to read with.
+    bare = scheduler.Scheduler(state, None, clock=lambda: NOW)
+    decision = await bare.check_release(manifest)
+    assert decision.outcome == "error" and "not configured" in decision.detail["reason"]
+
+
+# -- package check ------------------------------------------------------------------------------------------------
+
+
 @pytest.mark.anyio
 async def test_package_check(state: State) -> None:
     manifest = live(state)
@@ -327,35 +490,72 @@ async def test_package_check(state: State) -> None:
 
 @pytest.mark.anyio
 async def test_tick_runs_each_check_once_per_slot(state: State) -> None:
-    manifest = live(state)
+    manifest = live(state, seen=NOW - datetime.timedelta(weeks=2))  # long enough known for the weekly slot
     seed(state, "release.published")
     state.db.set("last_discovery", json.dumps({"started": NOW.isoformat()}))  # discovery not due
-    github = FakeDispatch()
+    github = FakeGitHub()  # head is the released commit
     resolver = FakeResolver("4.0.20.3014")
     now = NOW
     async with mock_client(github) as http:
         sched = scheduler.Scheduler(state, GitHub(http, "ghs_token"), resolver=resolver, clock=lambda: now)
         first = await sched.tick()
-        kinds = sorted(d.kind for d in first)
-        assert kinds == ["packages", "upstream"]  # nothing recorded before: both schedules are due
+        kinds = [d.kind for d in first]
+        assert kinds == ["upstream", "release", "packages"]  # nothing recorded before: every schedule is due
+        assert [d.outcome for d in first] == ["unchanged", "unchanged", "dispatch"]
         now = NOW + datetime.timedelta(minutes=1)
         assert await sched.tick() == []  # same slot, already done
         now = NOW + datetime.timedelta(hours=1, minutes=1)
         second = await sched.tick()
-        assert [d.kind for d in second] == ["upstream"]  # a new hour, same week
-        assert second[0].outcome == "skipped" and second[0].detail["reason"] == "cooldown"  # the package dispatch
-        # A manifest that opts out of the package check only gets the upstream schedule.
+        assert [d.kind for d in second] == ["upstream", "release"]  # a new hour, same week
+        assert {(d.outcome, d.detail["reason"]) for d in second} == {("skipped", "cooldown")}  # the package dispatch
+        # A manifest that opts out of the package check only gets the hourly schedules.
         state.model.upsert_manifest(manifest.model_copy(update={"package_check": False}))
         state.model.upsert_manifest(live(state, "develop").model_copy(update={"package_check": False}))
         now = NOW + datetime.timedelta(weeks=1, hours=2)
         third = await sched.tick()
-        assert sorted((d.branch, d.kind) for d in third) == [("develop", "upstream"), ("main", "upstream")]
+        assert sorted((d.branch, d.kind) for d in third) == [
+            ("develop", "release"),
+            ("develop", "upstream"),
+            ("main", "release"),
+            ("main", "upstream"),
+        ]
     # One package dispatch for main, one upstream dispatch for develop (which has no release yet); main unchanged.
     assert len(resolver.calls) == 3
     assert [(p[1]["ref"], p[1]["inputs"]["reason"]) for p in github.posts] == [
         ("main", "packages"),
         ("develop", "upstream"),
     ]
+
+
+@pytest.mark.anyio
+async def test_first_package_check_waits_for_the_branch_slot(state: State) -> None:
+    """A branch nobody checked yet is due at its weekly slot, counted from when discovery stored it, not at
+    the first tick: on a fresh start the fleet's package checks spread over the week like every later one."""
+    seen = NOW - datetime.timedelta(minutes=5)
+    manifest = live(state, seen=seen)
+    state.db.set("last_discovery", json.dumps({"started": NOW.isoformat()}))
+    github = FakeGitHub()
+    resolver = FakeResolver("1.0")
+    now = NOW
+    async with mock_client(github) as http:
+        sched = scheduler.Scheduler(state, GitHub(http, "ghs_token"), resolver=resolver, clock=lambda: now)
+        first = await sched.tick()
+        assert [d.kind for d in first] == ["upstream", "release"]  # the hourly checks, no package check
+        nxt = scheduler.next_package_check(REPO, "main", seen)
+        assert seen < nxt <= seen + datetime.timedelta(weeks=1)
+        now = nxt - datetime.timedelta(seconds=1)
+        assert all(d.kind != "packages" for d in await sched.tick())
+        now = nxt
+        fired = [d for d in await sched.tick() if d.kind == "packages"]
+        assert len(fired) == 1 and fired[0].outcome == "dispatch" and fired[0].branch == "main"
+        now = nxt + datetime.timedelta(minutes=1)
+        assert all(d.kind != "packages" for d in await sched.tick())  # recorded: not again this week
+        # The upcoming list named that same slot all along.
+        row = next(
+            r for r in scheduler.upcoming([manifest], seen, datetime.timedelta(weeks=1)) if r["kind"] == "packages"
+        )
+        assert row["at"] == nxt.isoformat(timespec="seconds")
+    assert [p[1]["inputs"]["reason"] for p in github.posts if p[1]["inputs"]["reason"] == "packages"] == ["packages"]
 
 
 @pytest.mark.anyio
@@ -383,6 +583,12 @@ async def test_run_once_filters_and_works_without_installation(state: State, mon
     assert {d.outcome for d in found} == {"error"} and all(d.kind == "manual" for d in found)
     assert "not configured" in found[0].detail["message"]
     assert len(state.model.recent_decisions()) == 2
+    # A forced package check is recorded as one, so it resets the branch's weekly slot.
+    forced = await scheduler.run_once(state, image="sonarr", branch="main", dry_run=True, kind="packages")
+    assert [(d.kind, d.outcome) for d in forced] == [("packages", "dispatch")]
+    assert forced[0].detail["dispatch_reason"] == "packages"
+    released = await scheduler.run_once(state, branch="main", kind="release")
+    assert [(d.kind, d.outcome) for d in released] == [("release", "skipped")]  # no Release yet
 
 
 def test_cli_schedule_once_dry_run(
@@ -397,8 +603,16 @@ def test_cli_schedule_once_dry_run(
     assert state.model.recent_decisions() == []
     assert main(["schedule", "--once", "--image", "nothing"]) == 0
     assert "no live branches matched" in capsys.readouterr().out
+    assert (
+        main(["schedule", "--once", "--image", "docker-sonarr", "--branch", "main", "--kind", "packages", "--dry-run"])
+        == 0
+    )
+    assert capsys.readouterr().out.startswith("would sonarr/main [packages] dispatch: reason=weekly package check")
+    assert state.model.recent_decisions() == []
     with pytest.raises(SystemExit):
         main(["schedule"])  # --once is required
+    with pytest.raises(SystemExit):
+        main(["schedule", "--once", "--kind", "packages"])  # a package check for the whole fleet needs --image
 
 
 def test_upcoming_lists_next_checks(state: State) -> None:

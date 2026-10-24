@@ -1,12 +1,16 @@
 """
-The central scheduler that replaces every per-repo cron. Two schedules walk the live branches that fleet
+The central scheduler that replaces every per-repo cron. Three schedules walk the live branches that fleet
 discovery found:
 
 - upstream check, once an hour per branch, spread across the hour by a hash of `repo/branch`: resolve the
   upstream version with the resolver the build uses (vendored, so both agree), read what the branch last
   released from its Release tags (`[T-]<upstream>-ls<N>`, CONVENTIONS §3), and dispatch a build when they
   differ;
-- package check, once a week per branch with `build.package_check` on, spread across the week's hours.
+- release check, in the same hourly pass: the branch head must be the commit its newest Release points at,
+  or a `rebuild` is dispatched. A package check commits `Update package versions` and then dispatches the
+  build itself; when that dispatch fails the head would stay unreleased forever, since no version drifts;
+- package check, once a week per branch with `build.package_check` on, spread across the week's hours. A
+  branch that was never checked waits for its slot too, so a fresh start does not fire the whole fleet.
 
 Every decision lands in `scheduler_decisions` (`unchanged`, `skipped`, `dispatch`, `error`) with a JSON
 detail, and the page and the fleet board read from there. Dispatching is always `workflow_dispatch` on
@@ -35,10 +39,18 @@ from .vendor import resolve_version as rv
 log = logging.getLogger(__name__)
 
 KIND_UPSTREAM = "upstream"
+KIND_RELEASE = "release"
 KIND_PACKAGES = "packages"
 KIND_MANUAL = "manual"
+KINDS = (KIND_UPSTREAM, KIND_RELEASE, KIND_PACKAGES, KIND_MANUAL)
 COOLDOWN = datetime.timedelta(hours=2)
 """No second dispatch for a branch within this long of the last one, whatever triggered it."""
+SETTLE = datetime.timedelta(minutes=15)
+"""The release check leaves a branch alone while its last run is younger than this: the Release webhook or
+the build's own follow-up commit may still be on the way."""
+GENERATED_FILES = frozenset({"README.md", "AGENTS.md", "LICENSE", ".github/workflows/build.yml"})
+"""Files the build regenerates and commits with `[skip ci]`; a head that differs from the released commit
+only in these needs no release."""
 ERROR_ALERT_AFTER = 6
 """Consecutive resolver failures for one branch before Discord hears about it (once per streak)."""
 TICK_SECONDS = 60.0
@@ -143,6 +155,25 @@ def release_tag_of(manifest: Manifest, default_branch: str) -> str:
     if manifest.release_tag:
         return manifest.release_tag
     return "latest" if manifest.branch == default_branch else manifest.branch
+
+
+def skips_ci(message: str) -> bool:
+    """Whether a commit's subject line ends with `[skip ci]`, as the build's own commits do."""
+    return message.split("\n", 1)[0].rstrip().endswith("[skip ci]")
+
+
+def generated_only(files: list[Any]) -> bool:
+    return all(isinstance(f, dict) and f.get("filename") in GENERATED_FILES for f in files)
+
+
+async def tag_commit(github: GitHub, repo: str, tag: str) -> str:
+    """The commit a tag points at; an annotated tag is one object further."""
+    ref = await github.get_json(f"/repos/{repo}/git/ref/tags/{tag}")
+    target = ref.get("object", {}) if isinstance(ref, dict) else {}
+    if target.get("type") == "tag":
+        annotated = await github.get_json(f"/repos/{repo}/git/tags/{target.get('sha')}")
+        target = annotated.get("object", {}) if isinstance(annotated, dict) else {}
+    return str(target.get("sha") or "")
 
 
 # -- resolving ----------------------------------------------------------------------------------------------------
@@ -265,6 +296,52 @@ class Scheduler:
         detail["reason"] = "no release yet" if released is None else "upstream changed"
         return await self.dispatch(manifest.repo, branch, image, kind, "upstream", detail)
 
+    async def check_release(self, manifest: Manifest, kind: str = KIND_RELEASE) -> Decision:
+        """Dispatch a `rebuild` when the branch head is not the commit its newest Release tag points at."""
+        image = manifest.image
+        branch = manifest.branch
+        repo = manifest.repo
+        now = self.clock()
+        if blocked := self.blocked(manifest, image):
+            return self.record(image, branch, kind, "skipped", blocked)
+        last_run = self.model.latest_run_for_branch(repo, branch)
+        if last_run and now - datetime.datetime.fromisoformat(last_run.created_at) < SETTLE:
+            why = {"reason": "recent run", "run_url": last_run.html_url, "run_id": last_run.id}
+            return self.record(image, branch, kind, "skipped", why)
+        if dispatched_at := self.in_cooldown(image, branch, now):
+            return self.record(image, branch, kind, "skipped", {"reason": "cooldown", "dispatched_at": dispatched_at})
+        _, tag = self.released_tag(manifest)
+        if tag is None:
+            return self.record(image, branch, kind, "skipped", {"reason": "no release yet"})
+        if self.github is None:
+            why = {"reason": "GitHub App not configured or not installed", "released_tag": tag}
+            return self.record(image, branch, kind, "error", why)
+
+        try:
+            head = await self.github.get_json(f"/repos/{repo}/branches/{branch}")
+            released = await tag_commit(self.github, repo, tag)
+        except httpx.HTTPError as exc:
+            why = {"released_tag": tag, "message": f"{type(exc).__name__}: {exc}"}
+            return self.record(image, branch, kind, "error", why)
+        commit = head.get("commit") if isinstance(head, dict) else None
+        head_sha = str(commit.get("sha")) if isinstance(commit, dict) else ""
+        detail: dict[str, Any] = {"head": head_sha, "released": released, "released_tag": tag}
+        if head_sha == released:
+            return self.record(image, branch, kind, "unchanged", detail)
+        message = commit.get("commit", {}).get("message", "") if isinstance(commit, dict) else ""
+        if skips_ci(str(message)):
+            try:
+                compared = await self.github.get_json(f"/repos/{repo}/compare/{released}...{head_sha}")
+            except httpx.HTTPError as exc:
+                detail["message"] = f"{type(exc).__name__}: {exc}"
+                return self.record(image, branch, kind, "error", detail)
+            files = compared.get("files") if isinstance(compared, dict) else None
+            if generated_only(files if isinstance(files, list) else []):
+                detail["reason"] = "generated files only"
+                return self.record(image, branch, kind, "unchanged", detail)
+        detail["reason"] = "head not released"
+        return await self.dispatch(repo, branch, image, kind, "rebuild", detail)
+
     async def check_packages(self, manifest: Manifest, kind: str = KIND_PACKAGES) -> Decision:
         image = manifest.image
         if blocked := self.blocked(manifest, image):
@@ -292,16 +369,18 @@ class Scheduler:
             return self.record(image, branch, kind, "error", detail)
         return self.record(image, branch, kind, "dispatch", detail)
 
-    def released(self, manifest: Manifest) -> tuple[str | None, str | None]:
-        """What the branch last shipped: its newest Release tag, else the last build summary as a hint."""
+    def released_tag(self, manifest: Manifest) -> tuple[str | None, str | None]:
+        """(upstream, tag) of the branch's newest Release, or (None, None) without one."""
         repo = self.model.repo(manifest.repo)
         default_branch = repo.default_branch if repo else manifest.branch
         release_tag = release_tag_of(manifest, default_branch)
         siblings = [m for m in self.model.manifests(manifest.repo) if m.branch != manifest.branch]
         others = [release_tag_of(m, default_branch) for m in siblings]
-        upstream, tag = released_version(
-            self.model.releases_for_repo(manifest.repo, 100), manifest.branch, release_tag, others
-        )
+        return released_version(self.model.releases_for_repo(manifest.repo, 100), manifest.branch, release_tag, others)
+
+    def released(self, manifest: Manifest) -> tuple[str | None, str | None]:
+        """What the branch last shipped: its newest Release tag, else the last build summary as a hint."""
+        upstream, tag = self.released_tag(manifest)
         if upstream is not None:
             return upstream, tag
         build = self.model.latest_build_for_branch(manifest.repo, manifest.branch)
@@ -320,20 +399,27 @@ class Scheduler:
     # -- the loop -------------------------------------------------------------------------------------------------
 
     async def tick(self) -> list[Decision]:
-        """One pass: refresh the fleet when due, then every check whose slot has passed since its last record."""
+        """One pass: refresh the fleet when due, then every check whose slot has passed since its last record.
+        The hourly checks run straight away on a branch never checked; the weekly one counts from when
+        discovery first saw the branch, so a fresh start spreads the fleet's package checks over the week."""
         at = self.clock()
         if discovery_due(self.state, at):
             await discover_once(self.state)
         decisions: list[Decision] = []
         for manifest in self.model.manifests():
             image = manifest.image
+            hourly = last_upstream_slot(manifest.repo, manifest.branch, at)
             last = self.model.last_decision(image, manifest.branch, KIND_UPSTREAM)
-            if due(last_upstream_slot(manifest.repo, manifest.branch, at), last.at if last else None):
+            if due(hourly, last.at if last else None):
                 decisions.append(await self.check_upstream(manifest))
+            last = self.model.last_decision(image, manifest.branch, KIND_RELEASE)
+            if due(hourly, last.at if last else None):
+                decisions.append(await self.check_release(manifest))
             if not manifest.package_check:
                 continue
             last = self.model.last_decision(image, manifest.branch, KIND_PACKAGES)
-            if due(last_package_slot(manifest.repo, manifest.branch, at), last.at if last else None):
+            since = last.at if last else manifest.created_at
+            if due(last_package_slot(manifest.repo, manifest.branch, at), since):
                 decisions.append(await self.check_packages(manifest))
         return decisions
 
@@ -359,9 +445,15 @@ async def run(state: State) -> None:
 
 
 async def run_once(
-    state: State, image: str | None = None, branch: str | None = None, dry_run: bool = False
+    state: State,
+    image: str | None = None,
+    branch: str | None = None,
+    dry_run: bool = False,
+    kind: str = KIND_UPSTREAM,
 ) -> list[Decision]:
-    """`python -m control schedule --once`: the upstream check for every (or one) live branch, slots ignored."""
+    """`python -m control schedule --once`: one check for every (or one) live branch, slots ignored. The
+    upstream check is recorded as `manual` so the hourly slot stays untouched; a forced package or release
+    check is recorded under its own kind, which is how it resets the branch's slot."""
     github = await installation_client(state)
     scheduler = Scheduler(state, github, dry_run=dry_run)
     if github is not None and (discovery_due(state) or not state.model.manifests()):
@@ -372,7 +464,12 @@ async def run_once(
             continue
         if branch and manifest.branch != branch:
             continue
-        decisions.append(await scheduler.check_upstream(manifest, KIND_MANUAL))
+        if kind == KIND_PACKAGES:
+            decisions.append(await scheduler.check_packages(manifest))
+        elif kind == KIND_RELEASE:
+            decisions.append(await scheduler.check_release(manifest))
+        else:
+            decisions.append(await scheduler.check_upstream(manifest, KIND_MANUAL))
     return decisions
 
 

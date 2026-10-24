@@ -20,9 +20,11 @@ ruff check . && ruff format --check . && mypy control tests && pytest
 `python -m control replay` reprocesses every stored webhook delivery and control event through the handlers
 (after a migration, or to rebuild the model); `python -m control backfill` fills the model from the GitHub API
 once (see Backfill); `python -m control discover` reads every live branch's `image.yml` once (see Scheduler);
-`python -m control schedule --once [--image x] [--branch y] [--dry-run]` runs the upstream check now and prints
-one line per branch (`--dry-run` resolves but records and dispatches nothing). All read the same environment
-as the server.
+`python -m control schedule --once [--image x] [--branch y] [--kind upstream|release|packages] [--dry-run]`
+runs one check now and prints one line per branch: the upstream check by default (recorded as `manual`, so
+the hourly slot is untouched), the release check, or `--kind packages`, which forces a package check and is
+recorded as one, so it resets that branch's weekly slot (`--image` is required for it). `--dry-run` resolves
+but records and dispatches nothing. All read the same environment as the server.
 
 The Alpine base image ships Python 3.12, so the package allows 3.12 and up; develop on 3.12 or 3.13. The
 `contracts` package (schema validation) is installed from the public
@@ -70,7 +72,7 @@ Every page is server-rendered and also available as JSON (pydantic models in `co
 | `GET /builds/{owner}/{repo}/{run_id}` | `/api/builds/{owner}/{repo}/{run_id}.json` | One build: envelope, bundle (version, per-platform result, tests, assets), jobs. The bundle's `test.report_url` and release notes link here (CONVENTIONS §10). |
 | `GET /images/{name}`             | `/api/images/{name}.json`         | One image: live branches, every build, releases, badge snippet.                        |
 | `GET /images/{name}/{tag}`       | `/api/images/{name}/{tag}.json`   | One release tag of an image (`latest`, `develop`…); README badges link here.           |
-| `GET /scheduler`                 | `/api/scheduler.json`             | The decision log (filters `?image=` and `?outcome=`) and the next 24 hours of checks. Live-refreshing. |
+| `GET /scheduler`                 | `/api/scheduler.json`             | The decision log (filters `?image=`, `?kind=` and `?outcome=`) and the next 24 hours of checks. Live-refreshing. |
 | `GET /management`                | `/api/management.json`            | The public action log and skip flags; the action forms for signed-in members.          |
 |                                  | `/api/skips.json`                 | Active skip flags.                                                                     |
 | `GET /status`                    | `/api/status.json`                | App configured/installed, Discord, `/events`, scheduler, row counts, last backfill and discovery, last 20 deliveries. |
@@ -127,10 +129,29 @@ of the branch is the hint. Both sides are compared as sanitised strings (§3). O
 | `skipped`   | A skip flag matches; a run of the branch is in progress; a dispatch for the branch happened in the last 2 hours (cooldown, whatever triggered it); `upstream.version.type` is `os` (those build on the package check); the type is `command` or `deb_repo` (arbitrary shell, or docker, which control will not run: they build on the package check too); or `require_assets` are not published yet. |
 | `error`     | The resolver or the dispatch failed. After 6 errors in a row for one branch Discord gets one alert; a success resets the streak. |
 
+**Release check**: in the same hourly pass, after the upstream check, every live branch is checked for a
+head that was never released. A package-check run commits `Update package versions` and then dispatches the
+release build itself; when that dispatch fails, the branch head stays unreleased for good, because the
+upstream check sees no version drift. The check reads the head sha (`GET /repos/{r}/branches/{b}`) and the
+commit the branch's newest Release tag points at (`GET /repos/{r}/git/ref/tags/{tag}`; an annotated tag is
+followed to its commit) and dispatches `reason: rebuild` when they differ, recording both shas. A head
+whose subject ends with `[skip ci]` is compared with the released commit
+(`GET /repos/{r}/compare/{released}...{head}`): when every changed file is one the build generates
+(`README.md`, `AGENTS.md`, `LICENSE`, `.github/workflows/build.yml`) the outcome is `unchanged` with
+"generated files only"; any other file means a release is owed. Nothing is dispatched while a skip flag
+matches, a run of the branch is queued or in progress, the branch's last run is younger than 15 minutes
+(the Release webhook or the build's follow-up commit may still be on the way), the 2-hour cooldown holds, or
+the branch has no Release yet (the upstream check builds the first one). Dev branches are never considered:
+only the live branches in `manifests` are walked.
+
 **Package check**: every live branch whose manifest does not set `build.package_check: false`, once a week
 at an hour of the week fixed by the same hash, dispatches `reason: packages` unless a skip flag matches or a
-run is in progress. Both schedules are "due" when the slot has passed and no decision of that kind was
-recorded since, so a restart never double-fires and a missed slot runs at the next tick (every 60 s).
+run is in progress. Every schedule is "due" when the slot has passed and no decision of that kind was
+recorded since, so a restart never double-fires and a missed slot runs at the next tick (every 60 s). The
+hourly checks run at the first tick for a branch that was never checked; the weekly one counts from the
+moment discovery first stored the branch, so a fresh start (or a new branch) waits for its own slot instead
+of firing the whole fleet's package checks at once. `python -m control schedule --once --image X --branch Y
+--kind packages` forces one when waiting is not wanted.
 
 Dispatch is always `POST /repos/{repo}/actions/workflows/build.yml/dispatches` with `ref: <branch>` and
 `inputs: {reason}`: `repository_dispatch` only ever runs the default branch, and one path is simpler. The run
@@ -167,7 +188,7 @@ checks is written to `actions` (actor, action, target, result, detail) and shown
 | `rerun`     | `run_id`                 | `POST …/actions/runs/{id}/rerun-failed-jobs`; on `/runs/{id}` for failed runs. |
 | `cancel`    | `run_id`                 | `POST …/actions/runs/{id}/cancel`; on `/runs/{id}` while a run is active.      |
 | `dispatch`  | `repo`, `branch`, `reason` (`manual`, `rebuild`, `packages`, `upstream`) | `workflow_dispatch` of `build.yml`; recorded as a `manual` scheduler decision (so the cooldown sees it). |
-| `packages`  | `repo`, `branch`         | A package check now; recorded as a `packages` decision, which resets that branch's weekly slot. |
+| `packages`  | `repo`, `branch`         | A package check now; recorded as a `packages` decision, which resets that branch's weekly slot (so does `python -m control schedule --once --kind packages`). |
 | `skip` / `unskip` | `scope`, `reason`  | Set or clear a skip flag.                                                   |
 | `reconcile` |                          | Run fleet discovery now, in the background; the outcome shows on `/status`. |
 
