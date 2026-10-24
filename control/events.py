@@ -16,6 +16,7 @@ from contracts import format_error
 from fastapi import APIRouter, Header, HTTPException, Request
 
 from . import handlers
+from .github import installation_client
 from .model import Build
 from .state import State, state_of
 from .webhooks import signature_valid
@@ -109,6 +110,33 @@ async def announce(state: State, build: Build, event_type: str) -> None:
         state.model.set_build_message(build.repo, build.run_id, message_id)
 
 
+async def notify_hub(state: State, build: Build) -> None:
+    """Tell the hub a live release exists so it ingests the bundle now instead of at its hourly reconcile.
+
+    The hub's deploy workflow listens for repository_dispatch `image-released` with {repository, tag}.
+    Best effort: the hub reconciles on its own anyway, so a failure here only costs freshness.
+    """
+    if build.mode != "live" or build.result != "success" or not build.version_tag:
+        return
+    try:
+        github = await installation_client(state)
+        if github is None:
+            return
+        response = await github.post(
+            f"/repos/{state.settings.github_org}/{state.settings.hub_repo}/dispatches",
+            json={
+                "event_type": "image-released",
+                "client_payload": {"repository": build.repo, "tag": build.version_tag},
+            },
+        )
+        if response.status_code != 204:
+            log.warning("hub dispatch for %s %s returned %s", build.repo, build.version_tag, response.status_code)
+        else:
+            log.info("hub dispatch sent for %s %s", build.repo, build.version_tag)
+    except Exception:  # never let a hub hiccup fail the event intake
+        log.exception("hub dispatch failed for %s %s", build.repo, build.version_tag)
+
+
 @router.post("/events", status_code=202)
 async def control_event(
     request: Request,
@@ -140,5 +168,7 @@ async def control_event(
     build = state.model.build(str(payload["repository"]), int(payload["run_id"]))
     if applied and build is not None:
         await announce(state, build, event_type)
+        if event_type == "build.summary":
+            await notify_hub(state, build)
     log.info("%s for %s run %s (%s)", event_type, payload["repository"], payload["run_id"], payload.get("result", ""))
     return {"status": "accepted", "type": event_type, "applied": applied}

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from control.app import create_app
 from control.config import Settings
 from control.events import AMBER, GREEN, GREY, RED, build_embed, embed_color, validate_event
+from control.github_app import AppCredentials
 from control.model import Build
 from control.state import State
 
@@ -194,3 +195,34 @@ def test_embed_links_hub_results_for_live_builds() -> None:
     assert "https://hub.example" not in json.dumps(build_embed(build, "https://x"))
     dev = build.model_copy(update={"mode": "dev"})
     assert "https://hub.example" not in json.dumps(build_embed(dev, "https://x", "https://hub.example/hub"))
+
+
+def test_live_success_summary_dispatches_the_hub(
+    client: TestClient, state: State, monkeypatch: pytest.MonkeyPatch, credentials: AppCredentials
+) -> None:
+    from .conftest import install, mock_github, token_response
+
+    install(state, credentials)
+    dispatches: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if (token := token_response(request)) is not None:
+            return token
+        if request.url.path == f"/repos/{state.settings.github_org}/{state.settings.hub_repo}/dispatches":
+            dispatches.append(json.loads(request.content))
+            return httpx.Response(204)
+        return httpx.Response(404)
+
+    mock_github(state, monkeypatch, handler)
+    payload = fixture("control.build.summary")
+    assert post_event(client, payload).status_code == 202
+    assert dispatches == [
+        {
+            "event_type": "image-released",
+            "client_payload": {"repository": payload["repository"], "tag": payload["bundle"]["version"]["tag"]},
+        }
+    ]
+    # A failed summary never dispatches.
+    dispatches.clear()
+    assert post_event(client, fixture("control.build.summary.failed")).status_code == 202
+    assert dispatches == []

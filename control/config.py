@@ -27,6 +27,8 @@ class Settings(BaseModel):
     """The GitHub App's display name; GitHub derives the slug from it."""
     hub_url: str | None = None
     """Public URL of the hub on GitHub Pages; live builds link their rendered results page there."""
+    hub_repo: str = "hub"
+    """Repository (in github_org) that receives a repository_dispatch `image-released` after a live release."""
     events_secret: str | None = None
     """Shared with the workflows repo; signs the build events POSTed to /events. Unset means /events is off."""
     backfill_on_start: bool = False
@@ -56,6 +58,8 @@ class Settings(BaseModel):
             fields["app_name"] = name
         if hub := env("HUB_URL"):
             fields["hub_url"] = hub.rstrip("/")
+        if hub_repo := env("HUB_REPO"):
+            fields["hub_repo"] = hub_repo
         if secret := env("CONTROL_EVENTS_SECRET"):
             fields["events_secret"] = secret
         if backfill := env("CONTROL_BACKFILL_ON_START"):
