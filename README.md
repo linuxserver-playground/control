@@ -15,6 +15,8 @@ CONTROL_DATA_DIR=./config CONTROL_PUBLIC_URL=http://localhost:8080 python -m con
 ruff check . && ruff format --check . && mypy control tests && pytest
 ```
 
+The Alpine base image ships Python 3.12, so the package allows 3.12 and up; develop on 3.12 or 3.13.
+
 As a container (the image is a standard LinuxServer image: `/config` volume, PUID/PGID, port 8080):
 
 ```bash
