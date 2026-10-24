@@ -48,6 +48,7 @@ docker run --rm -p 8080:8080 -e PUID=1000 -e PGID=1000 -e CONTROL_PUBLIC_URL=htt
 | `HUB_URL`             | unset                       | Public URL of the hub on GitHub Pages; live build embeds and pages link their rendered results there. |
 | `HUB_REPO`            | `hub`                       | Repository in the org that gets a `repository_dispatch` `image-released` after every successful live build, so the hub ingests the release right away. |
 | `SITE_REPO`           | `site`                      | Repository in the org that gets a `repository_dispatch` `hub-updated` whenever the hub's Deploy workflow succeeds, so the website refreshes from the hub. |
+| `HUB_CONSUMERS`       | `site,docs`                 | Every repository that rebuilds from hub data; each gets `hub-updated` after a successful hub Deploy (the site repo is always included). |
 | `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET` | unset | A classic OAuth App (callback `${CONTROL_PUBLIC_URL}/login/callback`) used only for sign-in: its consent screen lists `read:user` and `read:org`, and membership is read with the user's token. Without it the GitHub App's OAuth client is used, which needs the App's Members permission. |
 | `CONTROL_SETUP_TOKEN` | unset                         | When set, `/setup` requires `?token=<value>`. Set it on any public deployment.       |
 | `DISCORD_WEBHOOK_URL` | unset                         | Discord webhook for notifications; without it they are logged and dropped.           |

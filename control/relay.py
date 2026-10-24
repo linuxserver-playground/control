@@ -28,28 +28,42 @@ def is_hub_deploy_success(state: State, payload: dict[str, Any]) -> bool:
     )
 
 
+def consumers(state: State) -> tuple[str, ...]:
+    """The repos that rebuild from hub data: the configured list, always including the site repo."""
+    names = list(state.settings.hub_consumers)
+    if state.settings.site_repo not in names:
+        names.insert(0, state.settings.site_repo)
+    return tuple(names)
+
+
 async def dispatch_site_refresh(state: State, payload: dict[str, Any]) -> bool:
-    """POST repository_dispatch hub-updated to the site repo. Returns whether GitHub accepted it."""
+    """POST repository_dispatch hub-updated to every hub consumer (site, docs). True when all were accepted."""
     run = payload.get("workflow_run") or {}
+    body = {
+        "event_type": "hub-updated",
+        "client_payload": {"hub_run_id": run.get("id"), "head_sha": run.get("head_sha")},
+    }
     try:
         github = await installation_client(state)
         if github is None:
             return False
-        response = await github.post(
-            f"/repos/{state.settings.github_org}/{state.settings.site_repo}/dispatches",
-            json={
-                "event_type": "hub-updated",
-                "client_payload": {"hub_run_id": run.get("id"), "head_sha": run.get("head_sha")},
-            },
-        )
-    except Exception:  # best effort; the site's cron is the fallback
-        log.exception("site refresh dispatch failed")
+    except Exception:  # best effort; the consumers' crons are the fallback
+        log.exception("hub-updated dispatch failed")
         return False
-    if response.status_code != 204:
-        log.warning("site refresh dispatch returned %s", response.status_code)
-        return False
-    log.info("site refresh dispatched after hub run %s", run.get("id"))
-    return True
+    ok = True
+    for repo in consumers(state):
+        try:
+            response = await github.post(f"/repos/{state.settings.github_org}/{repo}/dispatches", json=body)
+        except Exception:
+            log.exception("hub-updated dispatch to %s failed", repo)
+            ok = False
+            continue
+        if response.status_code != 204:
+            log.warning("hub-updated dispatch to %s returned %s", repo, response.status_code)
+            ok = False
+        else:
+            log.info("hub-updated dispatched to %s after hub run %s", repo, run.get("id"))
+    return ok
 
 
 def schedule_site_refresh(state: State, payload: dict[str, Any]) -> asyncio.Task[Any] | None:

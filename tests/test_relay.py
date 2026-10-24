@@ -37,7 +37,7 @@ def test_only_a_successful_hub_deploy_qualifies(state: State) -> None:
     assert not relay.is_hub_deploy_success(state, hub_run(state, repo=f"{state.settings.github_org}/docker-sonarr"))
 
 
-def test_dispatch_goes_to_the_site_repo(
+def test_dispatch_goes_to_every_hub_consumer(
     state: State, credentials: AppCredentials, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     install(state, credentials)
@@ -51,12 +51,8 @@ def test_dispatch_goes_to_the_site_repo(
 
     mock_github(state, monkeypatch, handler)
     assert asyncio.run(relay.dispatch_site_refresh(state, hub_run(state))) is True
-    assert seen == [
-        (
-            f"/repos/{state.settings.github_org}/{state.settings.site_repo}/dispatches",
-            {"event_type": "hub-updated", "client_payload": {"hub_run_id": 42, "head_sha": "a" * 40}},
-        )
-    ]
+    body = {"event_type": "hub-updated", "client_payload": {"hub_run_id": 42, "head_sha": "a" * 40}}
+    assert seen == [(f"/repos/{state.settings.github_org}/{repo}/dispatches", body) for repo in ("site", "docs")]
 
 
 def test_dispatch_without_installation_is_a_quiet_no(state: State) -> None:
