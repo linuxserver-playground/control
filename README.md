@@ -216,3 +216,5 @@ GitHub signs every delivery with the webhook secret it generated at creation: `X
 missing header is `401`, and deliveries before the app exists are `503` so GitHub retries them. Each
 delivery is stored whole, keyed by `X-GitHub-Delivery` so redeliveries are ignored, and `installation`
 events keep the stored installation id current.
+
+> Sign-in needs the organisation permission **Members: read** on the App (it is in the manifest for new apps). On an app created before it was added, grant it under the App's *Permissions & events* and then accept the updated permissions on the installation; until then every user is treated as a non-member.

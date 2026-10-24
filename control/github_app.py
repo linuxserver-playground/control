@@ -27,6 +27,8 @@ PERMISSIONS: dict[str, str] = {
     "checks": "read",
     "contents": "write",
     "issues": "read",
+    # Organisation permission: sign-in checks org membership with GET /orgs/{org}/memberships/{login}.
+    "members": "read",
     "metadata": "read",
     "packages": "write",
     "pull_requests": "write",
