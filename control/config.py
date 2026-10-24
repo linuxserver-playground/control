@@ -29,6 +29,11 @@ class Settings(BaseModel):
     """Public URL of the hub on GitHub Pages; live builds link their rendered results page there."""
     hub_repo: str = "hub"
     """Repository (in github_org) that receives a repository_dispatch `image-released` after a live release."""
+    oauth_client_id: str | None = None
+    oauth_client_secret: str | None = None
+    """A classic OAuth App used only for sign-in. Its consent screen lists plain scopes (read:user, read:org)
+    instead of the GitHub App's "act on your behalf" text; membership is then read with the user's own token.
+    Without it, sign-in falls back to the GitHub App's OAuth client and the installation token."""
     events_secret: str | None = None
     """Shared with the workflows repo; signs the build events POSTed to /events. Unset means /events is off."""
     backfill_on_start: bool = False
@@ -60,6 +65,10 @@ class Settings(BaseModel):
             fields["hub_url"] = hub.rstrip("/")
         if hub_repo := env("HUB_REPO"):
             fields["hub_repo"] = hub_repo
+        if oauth_id := env("OAUTH_CLIENT_ID"):
+            fields["oauth_client_id"] = oauth_id
+        if oauth_secret := env("OAUTH_CLIENT_SECRET"):
+            fields["oauth_client_secret"] = oauth_secret
         if secret := env("CONTROL_EVENTS_SECRET"):
             fields["events_secret"] = secret
         if backfill := env("CONTROL_BACKFILL_ON_START"):

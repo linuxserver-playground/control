@@ -36,6 +36,12 @@ class FakeOAuth:
         if path == "/user":
             assert request.headers["Authorization"] == "Bearer gho_user"
             return httpx.Response(200, json={"login": self.login, "avatar_url": "https://avatars.example/o"})
+        if path == "/user/memberships/orgs/example-org":
+            assert request.headers["Authorization"] == "Bearer gho_user"  # the user's own token
+            self.memberships.append("self")
+            if self.member:
+                return httpx.Response(200, json={"state": "active", "role": "admin"})
+            return httpx.Response(404, json={"message": "Not Found"})
         if path.startswith("/orgs/example-org/memberships/"):
             assert request.headers["Authorization"] == "Bearer ghs_token"  # the installation token, not the user's
             self.memberships.append(path.rsplit("/", 1)[-1])
@@ -210,3 +216,43 @@ def test_current_user_ignores_bad_cookies(client: TestClient, state: State) -> N
     client.cookies.set(auth.SESSION_COOKIE, auth.sign(state.session_secret, {"issued_at": "2026-10-24T00:00:00+00:00"}))
     assert "Sign in" in client.get("/").text  # signed but not a User
     assert json.loads(client.get("/api/management.json").text)["signed_in"] is None
+
+
+def test_classic_oauth_app_sign_in_uses_scopes_and_the_user_token(
+    https_client: TestClient, https_state: State, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With OAUTH_CLIENT_ID/SECRET set, GitHub shows the familiar scope consent and no App permission is needed."""
+    monkeypatch.setattr(
+        https_state,
+        "settings",
+        https_state.settings.model_copy(update={"oauth_client_id": "Ov23li", "oauth_client_secret": "s3"}),
+    )
+    github = FakeOAuth(member=True)
+    mock_github(https_state, monkeypatch, github)
+    start = https_client.get("/login", follow_redirects=False)
+    query = parse_qs(urlparse(start.headers["location"]).query)
+    assert query["client_id"] == ["Ov23li"] and query["scope"] == ["read:user read:org"]
+    done = https_client.get("/login/callback", params={"code": "c", "state": query["state"][0]}, follow_redirects=False)
+    assert done.status_code == 303
+    assert github.exchanges[0]["client_id"] == ["Ov23li"] and github.exchanges[0]["client_secret"] == ["s3"]
+    assert github.memberships == ["self"]  # read with the user's token, never the installation's
+    cookie = https_client.cookies.get(auth.SESSION_COOKIE)
+    user = auth.User.model_validate(auth.unsign(https_state.session_secret, cookie, auth.SESSION_TTL) or {})
+    assert user.login == "octocat" and user.member
+
+
+def test_stale_verdict_is_kept_when_the_installation_cannot_answer(
+    https_state: State, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if (token := token_response(request)) is not None:
+            return token
+        return httpx.Response(403, json={"message": "Resource not accessible by integration"})
+
+    mock_github(https_state, monkeypatch, handler)
+    old = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=2)).isoformat(timespec="seconds")
+    user = auth.new_user("octocat", None, True).model_copy(update={"checked_at": old})
+    refreshed, changed = asyncio.run(auth.refresh_if_stale(https_state, user))
+    assert changed and refreshed.member is True and not refreshed.stale()

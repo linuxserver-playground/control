@@ -1,7 +1,9 @@
 """
-Member sign-in with the GitHub App's OAuth client. The user's access token is used for exactly one call
-(`GET /user`, to learn who they are) and then dropped: membership of the org is checked with our own
-installation token (`GET /orgs/{org}/memberships/{login}`), so nothing of the user's is stored. What we
+Member sign-in. Preferably with a classic OAuth App (OAUTH_CLIENT_ID/SECRET, scopes read:user read:org):
+its consent screen lists those two scopes, and the user's token is used for two calls, `GET /user` and
+`GET /user/memberships/orgs/{org}`, then dropped. Without an OAuth App the GitHub App's own OAuth client is
+used and membership is read with the installation token (`GET /orgs/{org}/memberships/{login}`, which needs
+the App's organisation permission Members: read). Either way nothing of the user's is stored. What we
 keep is a signed cookie: login, avatar, the member verdict and when it was reached (re-checked hourly),
 and a CSRF token every management form carries. The secret comes from CONTROL_SESSION_SECRET or is random
 per process, in which case everyone is signed out by a restart.
@@ -135,32 +137,86 @@ def new_user(login: str, avatar_url: str | None, member: bool) -> User:
     )
 
 
-async def is_member(state: State, login: str) -> bool:
-    """Active membership of the org, read with the installation token. Not configured, not installed, or any
-    GitHub error all mean "no": a member can sign in again once the app works."""
-    try:
-        github = await installation_client(state)
-        if github is None:
-            log.warning("cannot check membership of %s: GitHub App not configured or not installed", login)
-            return False
-        response = await github.http.get(
-            f"{API}/orgs/{state.settings.github_org}/memberships/{login}", headers=github.headers
+class OAuthClient(BaseModel):
+    client_id: str
+    client_secret: str
+    scopes: str | None
+    """Scopes to request. A classic OAuth App needs them; a GitHub App ignores them."""
+    user_membership: bool
+    """True when membership is read with the user's token (classic OAuth App), False for the installation token."""
+
+
+def oauth_client(state: State) -> OAuthClient | None:
+    settings = state.settings
+    if settings.oauth_client_id and settings.oauth_client_secret:
+        return OAuthClient(
+            client_id=settings.oauth_client_id,
+            client_secret=settings.oauth_client_secret,
+            scopes="read:user read:org",
+            user_membership=True,
         )
-    except httpx.HTTPError:
-        log.exception("membership check for %s failed", login)
-        return False
+    credentials = state.credentials.load()
+    if credentials is None:
+        return None
+    return OAuthClient(
+        client_id=credentials.client_id, client_secret=credentials.client_secret, scopes=None, user_membership=False
+    )
+
+
+def _active(response: httpx.Response) -> bool:
     if response.status_code != 200:
         return False
     body = response.json()
     return isinstance(body, dict) and body.get("state") == "active"
 
 
+async def is_member_via_user(state: State, access_token: str) -> bool:
+    """Active membership read with the signed-in user's token (scope read:org). Any failure means "no"."""
+    try:
+        response = await state.http.get(
+            f"{API}/user/memberships/orgs/{state.settings.github_org}",
+            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/vnd.github+json"},
+        )
+    except httpx.HTTPError:
+        log.exception("user membership check failed")
+        return False
+    return _active(response)
+
+
+async def installation_membership(state: State, login: str) -> bool | None:
+    """Active membership read with the installation token; None when the check is unavailable (app not
+    configured or installed, no Members permission, network error) rather than a definite no."""
+    try:
+        github = await installation_client(state)
+        if github is None:
+            log.warning("cannot check membership of %s: GitHub App not configured or not installed", login)
+            return None
+        response = await github.http.get(
+            f"{API}/orgs/{state.settings.github_org}/memberships/{login}", headers=github.headers
+        )
+    except httpx.HTTPError:
+        log.exception("membership check for %s failed", login)
+        return None
+    if response.status_code == 403:
+        log.warning("membership check unavailable: the App lacks the organisation permission Members: read")
+        return None
+    return _active(response)
+
+
+async def is_member(state: State, login: str) -> bool:
+    """Active membership of the org, read with the installation token; unavailable counts as no."""
+    return bool(await installation_membership(state, login))
+
+
 async def refresh_if_stale(state: State, user: User) -> tuple[User, bool]:
-    """(user, changed): the membership verdict re-taken once it is an hour old."""
+    """(user, changed): the membership verdict re-taken once it is an hour old. When the installation token
+    cannot answer (classic OAuth App sign-in without the Members permission) the verdict taken at sign-in is
+    kept for the life of the session, which is capped by SESSION_TTL."""
     if not user.stale():
         return user, False
-    member = await is_member(state, user.login)
+    verdict = await installation_membership(state, user.login)
     now = datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
+    member = user.member if verdict is None else verdict
     return user.model_copy(update={"member": member, "checked_at": now}), True
 
 
@@ -177,18 +233,19 @@ def safe_next(value: str | None) -> str:
 @router.get("/login")
 def login(request: Request, next: str | None = None) -> RedirectResponse:
     state = state_of(request)
-    credentials = state.credentials.load()
-    if credentials is None:
-        raise HTTPException(503, "GitHub App not configured yet; sign-in needs its OAuth client")
+    oauth = oauth_client(state)
+    if oauth is None:
+        raise HTTPException(503, "sign-in not configured: set OAUTH_CLIENT_ID/SECRET or bootstrap the GitHub App")
     token = secrets.token_urlsafe(24)
     issued = datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
-    query = urlencode(
-        {
-            "client_id": credentials.client_id,
-            "redirect_uri": f"{state.settings.public_url}/login/callback",
-            "state": token,
-        }
-    )
+    params = {
+        "client_id": oauth.client_id,
+        "redirect_uri": f"{state.settings.public_url}/login/callback",
+        "state": token,
+    }
+    if oauth.scopes:
+        params["scope"] = oauth.scopes
+    query = urlencode(params)
     response = RedirectResponse(f"{GITHUB}/login/oauth/authorize?{query}", status_code=303)
     response.set_cookie(
         OAUTH_COOKIE,
@@ -205,9 +262,9 @@ def login(request: Request, next: str | None = None) -> RedirectResponse:
 @router.get("/login/callback")
 async def login_callback(request: Request, code: str, state: str) -> RedirectResponse:
     app_state = state_of(request)
-    credentials = app_state.credentials.load()
-    if credentials is None:
-        raise HTTPException(503, "GitHub App not configured yet")
+    oauth = oauth_client(app_state)
+    if oauth is None:
+        raise HTTPException(503, "sign-in not configured")
     pending = unsign(app_state.session_secret, request.cookies.get(OAUTH_COOKIE), OAUTH_TTL)
     if pending is None or not secrets.compare_digest(str(pending.get("state", "")), state):
         raise HTTPException(400, "unknown or expired sign-in state; start again at /login")
@@ -215,8 +272,8 @@ async def login_callback(request: Request, code: str, state: str) -> RedirectRes
         exchange = await app_state.http.post(
             f"{GITHUB}/login/oauth/access_token",
             data={
-                "client_id": credentials.client_id,
-                "client_secret": credentials.client_secret,
+                "client_id": oauth.client_id,
+                "client_secret": oauth.client_secret,
                 "code": code,
                 "redirect_uri": f"{app_state.settings.public_url}/login/callback",
             },
@@ -236,7 +293,11 @@ async def login_callback(request: Request, code: str, state: str) -> RedirectRes
         raise HTTPException(502, f"GitHub rejected the sign-in: {exc}") from exc
     profile = who.json()
     login = str(profile["login"])
-    user = new_user(login, profile.get("avatar_url"), await is_member(app_state, login))
+    if oauth.user_membership:
+        member = await is_member_via_user(app_state, access_token)
+    else:
+        member = await is_member(app_state, login)
+    user = new_user(login, profile.get("avatar_url"), member)
     log.info("%s signed in (member: %s)", login, user.member)
     response = RedirectResponse(safe_next(str(pending.get("next") or "/")), status_code=303)
     set_session(response, app_state, user)
