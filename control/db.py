@@ -2,7 +2,7 @@
 Plain sqlite3, one short-lived connection per call. FastAPI runs sync handlers in a threadpool and sqlite
 connections are not shareable across threads, so opening per call is both the simple and the correct
 choice at this size. Schema changes are numbered migrations applied in order; `schema_version` in `kv`
-remembers how far we got.
+remembers how far we got, which is why `kv` itself is created outside the migrations.
 """
 
 import datetime
@@ -16,7 +16,7 @@ from typing import Any
 from pydantic import BaseModel
 
 MIGRATIONS: list[str] = [
-    # 1: webhook deliveries as received, and a key/value table for small state (installation id, setup state).
+    # 1: webhook deliveries, stored whole so handlers added later can replay them.
     """
     CREATE TABLE deliveries (
         id INTEGER PRIMARY KEY,
@@ -29,10 +29,6 @@ MIGRATIONS: list[str] = [
         payload TEXT NOT NULL
     );
     CREATE INDEX deliveries_received_at ON deliveries (received_at DESC);
-    CREATE TABLE kv (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-    );
     """,
 ]
 
@@ -70,6 +66,7 @@ class Database:
     def migrate(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
+            # small state: installation id, setup state token, schema version
             conn.execute("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             row = conn.execute("SELECT value FROM kv WHERE key = 'schema_version'").fetchone()
             current = int(row["value"]) if row else 0
