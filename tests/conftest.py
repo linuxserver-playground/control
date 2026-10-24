@@ -12,18 +12,54 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
+from control import handlers
 from control.app import create_app
 from control.config import Settings
 from control.github_app import AppCredentials
 from control.state import State
 
 PUBLIC_URL = "https://ci.example.test:8443"
+EVENTS_SECRET = "events-secret"
+FIXTURES = Path(__file__).parent / "fixtures"
+REPO = "example-org/docker-sonarr"
+
+
+def fixture(name: str) -> Any:
+    """A JSON fixture by stem: `fixture("workflow_run.completed")`."""
+    return json.loads((FIXTURES / f"{name}.json").read_text())
+
+
+def seed(state: State, *names: str) -> None:
+    """Run fixtures through the handlers directly (no signatures); `control.*` fixtures are /events bodies."""
+    for name in names:
+        payload = fixture(name)
+        event = f"control:{payload['type']}" if name.startswith("control.") else name.split(".")[0]
+        handlers.process(state.model, state.stream, event, payload)
+
+
+ACTIVE_SEED = (
+    "repository.created",
+    "workflow_run.requested",
+    "workflow_job.queued",
+    "workflow_run.in_progress",
+    "workflow_job.in_progress",
+    "pull_request.opened",
+    "pull_request_review.submitted",
+    "issues.opened",
+    "release.published",
+    "control.build.started",
+)
+"""A run in flight with one open PR, issue and release: what the live pages show."""
+
+FINISHED_SEED = (*ACTIVE_SEED, "workflow_job.completed", "workflow_run.completed", "control.build.summary")
 
 
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     """Each test gets its own data dir, so the db and credentials never leak between tests."""
-    return Settings(public_url=PUBLIC_URL, data_dir=tmp_path / "data", github_org="example-org")
+    return Settings(
+        public_url=PUBLIC_URL, data_dir=tmp_path / "data", github_org="example-org", events_secret=EVENTS_SECRET
+    )
 
 
 @pytest.fixture(scope="session")
@@ -91,3 +127,21 @@ def deliver(
 
 def mock_client(handler: Any) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def mock_discord(state: State, monkeypatch: pytest.MonkeyPatch, handler: Any) -> None:
+    """Point the app's shared HTTP client (GitHub and Discord alike) at a mock transport and enable Discord."""
+    mock = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(state, "http", mock)
+    monkeypatch.setattr(state.discord, "client", mock)
+    monkeypatch.setattr(state.discord, "webhook_url", "https://discord.com/api/webhooks/1/t")
+    monkeypatch.setattr(state.tokens, "client", mock)
+
+
+def post_event(client: TestClient, payload: dict[str, Any], secret: str | None = EVENTS_SECRET) -> httpx2.Response:
+    """POST a control-event the way the shared workflow does; `secret=None` leaves the signature off."""
+    body = json.dumps(payload).encode()
+    headers = {"Content-Type": "application/json"}
+    if secret is not None:
+        headers["X-Control-Signature"] = sign(secret, body)
+    return client.post("/events", content=body, headers=headers)

@@ -4,8 +4,9 @@ and also served as JSON under `/api/<page>.json` so other tools (and tests) read
 see. `/api/stream` is the server-sent events feed the live pages refresh on.
 """
 
+import contextlib
 import datetime
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -17,7 +18,7 @@ from .backfill import last_backfill
 from .db import Delivery
 from .model import Build, Issue, Job, PullRequest, Release, Repo, Run, SchedulerDecision, stuck_threshold
 from .state import State, state_of
-from .stream import sse
+from .stream import Broadcaster, sse
 from .templating import package_version, render
 
 router = APIRouter()
@@ -482,16 +483,18 @@ def management_json(request: Request) -> ManagementPage:
 # -- routes: stream and badge -------------------------------------------------------------------------------------
 
 
-async def event_stream(state: State) -> AsyncIterator[str]:
+async def event_stream(broadcaster: Broadcaster, keepalive: float = KEEPALIVE_SECONDS) -> AsyncGenerator[str]:
     yield ": connected\n\n"
-    async for event in state.stream.subscribe(keepalive=KEEPALIVE_SECONDS):
-        yield sse(event) if event is not None else ": keepalive\n\n"
+    # aclosing: when the client goes away the subscription is dropped now, not at garbage collection.
+    async with contextlib.aclosing(broadcaster.subscribe(keepalive=keepalive)) as events:
+        async for event in events:
+            yield sse(event) if event is not None else ": keepalive\n\n"
 
 
 @router.get("/api/stream")
 async def stream(request: Request) -> StreamingResponse:
     return StreamingResponse(
-        event_stream(state_of(request)),
+        event_stream(state_of(request).stream),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

@@ -8,7 +8,7 @@ import asyncio
 import json
 import logging
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ class Broadcaster:
             except asyncio.QueueFull:
                 log.debug("dropping event for a slow stream subscriber")
 
-    async def subscribe(self, keepalive: float | None = None) -> AsyncIterator[dict[str, Any] | None]:
+    async def subscribe(self, keepalive: float | None = None) -> AsyncGenerator[dict[str, Any] | None]:
         """Events as they come; with `keepalive`, None every that many idle seconds so the response stays warm."""
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(QUEUE_SIZE)
         with self._lock:

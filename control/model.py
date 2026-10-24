@@ -684,7 +684,7 @@ class Model:
     def recent_builds(self, limit: int = 100) -> list[Build]:
         with self.db.connect() as conn:
             rows = conn.execute(
-                f"SELECT {BUILD_COLUMNS} FROM builds ORDER BY received_at DESC LIMIT ?", (limit,)
+                f"SELECT {BUILD_COLUMNS} FROM builds ORDER BY received_at DESC, rowid DESC LIMIT ?", (limit,)
             ).fetchall()
         return [Build(**dict(row)) for row in rows]
 
@@ -693,7 +693,7 @@ class Model:
         with self.db.connect() as conn:
             row = conn.execute(
                 f"SELECT {BUILD_COLUMNS} FROM builds WHERE repo = ? AND version_tag = ? AND mode = 'live' "
-                "ORDER BY received_at DESC LIMIT 1",
+                "ORDER BY received_at DESC, rowid DESC LIMIT 1",
                 (repo, tag),
             ).fetchone()
         return Build(**dict(row)) if row else None
@@ -704,7 +704,7 @@ class Model:
             rows = conn.execute(
                 f"SELECT {BUILD_COLUMNS} FROM builds WHERE repo = ? AND mode = ? AND rowid IN ("
                 "  SELECT rowid FROM builds b2 WHERE b2.repo = builds.repo AND b2.mode = builds.mode "
-                "  AND b2.branch IS builds.branch ORDER BY received_at DESC LIMIT 1) ORDER BY branch",
+                "  AND b2.branch IS builds.branch ORDER BY received_at DESC, rowid DESC LIMIT 1) ORDER BY branch",
                 (repo, mode),
             ).fetchall()
         return [Build(**dict(row)) for row in rows]
@@ -716,7 +716,7 @@ class Model:
             row = conn.execute(
                 f"SELECT {BUILD_COLUMNS} FROM builds WHERE image = ? AND mode = 'live' AND result IS NOT NULL AND ("
                 "  release_tag = ? OR (release_tag IS NULL AND (? = 'latest' OR version_tag LIKE ? || '-%')))"
-                " ORDER BY received_at DESC LIMIT 1",
+                " ORDER BY received_at DESC, rowid DESC LIMIT 1",
                 (image, release_tag, release_tag, release_tag),
             ).fetchone()
         return Build(**dict(row)) if row else None
