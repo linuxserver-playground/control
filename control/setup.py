@@ -105,10 +105,10 @@ async def setup_installed(
     request: Request, installation_id: int | None = None, setup_action: str | None = None
 ) -> RedirectResponse:
     state = state_of(request)
-    if installation_id is not None:
+    credentials = state.credentials.load()
+    # Only GitHub sends us here, but the URL is public: without an app there is nothing to install.
+    if credentials and installation_id is not None:
         state.db.set(INSTALLATION_ID, str(installation_id))
         log.info("installation %s (%s)", installation_id, setup_action)
-        credentials = state.credentials.load()
-        slug = credentials.slug if credentials else "app"
-        await state.discord.post(f"GitHub App **{slug}** installed on **{state.settings.github_org}**")
+        await state.discord.post(f"GitHub App **{credentials.slug}** installed on **{state.settings.github_org}**")
     return RedirectResponse("/", status_code=303)

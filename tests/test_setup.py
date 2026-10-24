@@ -94,3 +94,9 @@ def test_setup_page_when_configured_links_install(client: TestClient, configured
     assert configured.install_url in page.text
     assert "not installed yet" in page.text
     assert parse_qs(urlparse(configured.install_url).query) == {}
+
+
+def test_installed_ignored_before_app_exists(client: TestClient, state: State) -> None:
+    response = client.get("/setup/installed", params={"installation_id": 1}, follow_redirects=False)
+    assert response.status_code == 303
+    assert state.installation_id is None

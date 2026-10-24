@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "The LinuxServer.io v2 playground CI control plane: GitHub App, webhook intake, Discord notifications."
 readme = "README.md"
 license = "GPL-3.0-only"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
   "cryptography==50.0.2",
   "fastapi==0.162.0",
