@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "type": "build.started",
+  "sent": "2026-10-24T12:00:08Z",
+  "repository": "example-org/docker-sonarr",
+  "run_id": 5001,
+  "run_url": "https://github.com/example-org/docker-sonarr/actions/runs/5001",
+  "image": "sonarr",
+  "branch": "main",
+  "mode": "live",
+  "reason": "upstream"
+}

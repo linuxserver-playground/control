@@ -30,6 +30,146 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX deliveries_received_at ON deliveries (received_at DESC);
     """,
+    # 2: the state model handlers build from deliveries, builds from /events, and the scheduler's log.
+    # Every table has created_at/updated_at; GitHub's own timestamps are used when the payload has them.
+    """
+    CREATE TABLE repos (
+        full_name TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        default_branch TEXT NOT NULL DEFAULT 'main',
+        archived INTEGER NOT NULL DEFAULT 0,
+        is_image INTEGER NOT NULL DEFAULT 0,
+        image_name TEXT,
+        last_seen TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE TABLE runs (
+        id INTEGER PRIMARY KEY,
+        repo TEXT NOT NULL,
+        workflow_name TEXT,
+        event TEXT,
+        branch TEXT,
+        head_sha TEXT,
+        run_number INTEGER,
+        status TEXT,
+        conclusion TEXT,
+        started_at TEXT,
+        html_url TEXT,
+        actor TEXT,
+        display_title TEXT,
+        attempt INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX runs_repo ON runs (repo, created_at DESC);
+    CREATE INDEX runs_status ON runs (status);
+    CREATE INDEX runs_head_sha ON runs (head_sha);
+    CREATE TABLE jobs (
+        id INTEGER PRIMARY KEY,
+        run_id INTEGER NOT NULL,
+        repo TEXT NOT NULL,
+        name TEXT NOT NULL,
+        status TEXT,
+        conclusion TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        runner_name TEXT,
+        runner_group TEXT,
+        labels TEXT NOT NULL DEFAULT '[]',
+        steps_json TEXT NOT NULL DEFAULT '[]',
+        html_url TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX jobs_run ON jobs (run_id);
+    CREATE INDEX jobs_status ON jobs (status);
+    CREATE INDEX jobs_repo_name ON jobs (repo, name);
+    CREATE TABLE pull_requests (
+        repo TEXT NOT NULL,
+        number INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        author TEXT,
+        state TEXT NOT NULL,
+        draft INTEGER NOT NULL DEFAULT 0,
+        head_sha TEXT,
+        head_fork INTEGER NOT NULL DEFAULT 0,
+        merged_at TEXT,
+        review_state TEXT,
+        html_url TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (repo, number)
+    );
+    CREATE INDEX pull_requests_state ON pull_requests (state);
+    CREATE TABLE issues (
+        repo TEXT NOT NULL,
+        number INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        author TEXT,
+        state TEXT NOT NULL,
+        labels TEXT NOT NULL DEFAULT '[]',
+        html_url TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (repo, number)
+    );
+    CREATE INDEX issues_state ON issues (state);
+    CREATE TABLE releases (
+        repo TEXT NOT NULL,
+        tag TEXT NOT NULL,
+        name TEXT,
+        prerelease INTEGER NOT NULL DEFAULT 0,
+        published_at TEXT,
+        html_url TEXT,
+        body TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (repo, tag)
+    );
+    CREATE INDEX releases_published ON releases (published_at DESC);
+    CREATE TABLE builds (
+        repo TEXT NOT NULL,
+        run_id INTEGER NOT NULL,
+        run_url TEXT,
+        image TEXT NOT NULL,
+        branch TEXT,
+        mode TEXT,
+        pull_request INTEGER,
+        reason TEXT,
+        result TEXT,
+        failed_job TEXT,
+        version_tag TEXT,
+        release_tag TEXT,
+        upstream TEXT,
+        upstream_clean TEXT,
+        semver TEXT,
+        ls_build INTEGER,
+        test_success INTEGER,
+        release_url TEXT,
+        artifact_url TEXT,
+        index_digest TEXT,
+        platforms TEXT NOT NULL DEFAULT '[]',
+        received_at TEXT NOT NULL,
+        bundle_json TEXT,
+        discord_message_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (repo, run_id)
+    );
+    CREATE INDEX builds_image ON builds (image, mode, received_at DESC);
+    CREATE TABLE scheduler_decisions (
+        id INTEGER PRIMARY KEY,
+        at TEXT NOT NULL,
+        image TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        detail TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX scheduler_decisions_at ON scheduler_decisions (at DESC);
+    """,
 ]
 
 
@@ -128,7 +268,7 @@ class Database:
                     delivery_id,
                     event,
                     payload.get("action"),
-                    repo.get("full_name") if isinstance(repo, dict) else None,
+                    repo.get("full_name") if isinstance(repo, dict) else repo if isinstance(repo, str) else None,
                     installation.get("id") if isinstance(installation, dict) else None,
                     received_at or utcnow(),
                     json.dumps(payload, separators=(",", ":")),
@@ -149,6 +289,21 @@ class Database:
                 (limit,),
             ).fetchall()
         return [Delivery(**dict(row)) for row in rows]
+
+    def iter_deliveries(self, batch: int = 500) -> Iterator[tuple[int, str, dict[str, Any]]]:
+        """Every delivery in arrival order, as (id, event, payload), for replaying through the handlers."""
+        last = 0
+        while True:
+            with self.connect() as conn:
+                rows = conn.execute(
+                    "SELECT id, event, payload FROM deliveries WHERE id > ? ORDER BY id LIMIT ?", (last, batch)
+                ).fetchall()
+            if not rows:
+                return
+            for row in rows:
+                last = int(row["id"])
+                payload = json.loads(row["payload"])
+                yield last, str(row["event"]), payload if isinstance(payload, dict) else {}
 
 
 def _statements(sql: str) -> list[str]:

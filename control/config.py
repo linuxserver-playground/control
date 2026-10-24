@@ -25,6 +25,12 @@ class Settings(BaseModel):
     """Optional; when set, /setup only answers to ?token=<this>, so strangers cannot start the app flow."""
     app_name: str = "LinuxServer CI (playground)"
     """The GitHub App's display name; GitHub derives the slug from it."""
+    events_secret: str | None = None
+    """Shared with the workflows repo; signs the build events POSTed to /events. Unset means /events is off."""
+    backfill_on_start: bool = False
+    """Run one GitHub API backfill in the background after boot, once the app is configured and installed."""
+    concurrency_limit: int = 20
+    """GitHub's concurrent job limit for the org, which the queue page measures in-progress jobs against."""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -42,6 +48,12 @@ class Settings(BaseModel):
             fields["setup_token"] = token
         if name := env("CONTROL_APP_NAME"):
             fields["app_name"] = name
+        if secret := env("CONTROL_EVENTS_SECRET"):
+            fields["events_secret"] = secret
+        if backfill := env("CONTROL_BACKFILL_ON_START"):
+            fields["backfill_on_start"] = backfill.strip().lower() in ("1", "true", "yes", "on")
+        if limit := env("CONTROL_CONCURRENCY_LIMIT"):
+            fields["concurrency_limit"] = int(limit)
         return cls.model_validate(fields)
 
     @property

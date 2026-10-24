@@ -1,0 +1,20 @@
+[
+  {
+    "url": "https://api.github.com/repos/example-org/docker-sonarr/releases/88",
+    "html_url": "https://github.com/example-org/docker-sonarr/releases/tag/4.0.20.3014-ls1",
+    "id": 88,
+    "tag_name": "4.0.20.3014-ls1",
+    "target_commitish": "main",
+    "name": "4.0.20.3014-ls1",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-10-24T12:10:00Z",
+    "published_at": "2026-10-24T12:10:30Z",
+    "body": "**CI**\nhttps://ci.example.test:8443/builds/docker-sonarr/5001\n\n**LinuxServer changes**\n- Add krb5-libs\n\n**Upstream changes**\nSonarr 4.0.20.3014 fixes\u2026",
+    "assets": [],
+    "author": {
+      "login": "octocat",
+      "id": 2
+    }
+  }
+]

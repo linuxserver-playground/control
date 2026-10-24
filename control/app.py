@@ -16,8 +16,10 @@ from . import setup, webhooks
 from .config import Settings
 from .db import Database
 from .github_app import CredentialStore, InstallationTokens
+from .model import Model
 from .notify import Discord
 from .state import State, state_of
+from .stream import Broadcaster
 from .templating import render
 
 log = logging.getLogger(__name__)
@@ -45,6 +47,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 discord=Discord(settings.discord_webhook_url, http),
                 http=http,
                 tokens=InstallationTokens(http),
+                model=Model(db),
+                stream=Broadcaster(),
             )
             log.info(
                 "control %s ready, public url %s, data in %s", package_version(), settings.public_url, settings.data_dir

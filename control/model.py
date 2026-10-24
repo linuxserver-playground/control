@@ -1,0 +1,763 @@
+"""
+The state model: typed rows for every table migration 2 created, converters from the GitHub objects that
+webhooks and the REST API share (a `workflow_run` is the same JSON in both), and the idempotent upserts
+and queries the handlers, backfill and dashboard use. Upserts are keyed by GitHub's ids and guarded so a
+late or replayed delivery never moves a row backwards.
+"""
+
+import datetime
+import json
+import sqlite3
+from typing import Any
+
+from pydantic import BaseModel, field_validator
+
+from .db import Database, utcnow
+
+STATUS_RANK = "CASE {0} WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1 ELSE 0 END"
+
+
+def norm_ts(value: Any) -> str | None:
+    """GitHub sends `2026-10-24T12:00:00Z`; we store everything as `+00:00` ISO so strings compare in order."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        when = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.UTC)
+    return when.astimezone(datetime.UTC).isoformat(timespec="seconds")
+
+
+def _json_list(value: Any) -> list[Any]:
+    if isinstance(value, str):
+        loaded = json.loads(value)
+        return loaded if isinstance(loaded, list) else []
+    return list(value) if isinstance(value, list) else []
+
+
+def _login(value: Any) -> str | None:
+    return str(value["login"]) if isinstance(value, dict) and value.get("login") else None
+
+
+def image_name_of(repo_name: str) -> str | None:
+    return repo_name[len("docker-") :] if repo_name.startswith("docker-") else None
+
+
+# -- rows ---------------------------------------------------------------------------------------------------------
+
+
+class Repo(BaseModel):
+    full_name: str
+    name: str
+    default_branch: str
+    archived: bool
+    is_image: bool
+    image_name: str | None
+    last_seen: str
+    created_at: str
+    updated_at: str
+
+    @classmethod
+    def from_github(cls, data: dict[str, Any], seen_at: str | None = None) -> "Repo":
+        name = str(data["name"])
+        now = seen_at or utcnow()
+        return cls(
+            full_name=str(data["full_name"]),
+            name=name,
+            default_branch=str(data.get("default_branch") or "main"),
+            archived=bool(data.get("archived", False)),
+            is_image=name.startswith("docker-"),
+            image_name=image_name_of(name),
+            last_seen=now,
+            created_at=norm_ts(data.get("created_at")) or now,
+            updated_at=norm_ts(data.get("updated_at")) or now,
+        )
+
+
+class Run(BaseModel):
+    id: int
+    repo: str
+    workflow_name: str | None
+    event: str | None
+    branch: str | None
+    head_sha: str | None
+    run_number: int | None
+    status: str | None
+    conclusion: str | None
+    started_at: str | None
+    html_url: str | None
+    actor: str | None
+    display_title: str | None
+    attempt: int
+    created_at: str
+    updated_at: str
+
+    @classmethod
+    def from_github(cls, repo: str, data: dict[str, Any]) -> "Run":
+        now = utcnow()
+        return cls(
+            id=int(data["id"]),
+            repo=repo,
+            workflow_name=data.get("name"),
+            event=data.get("event"),
+            branch=data.get("head_branch"),
+            head_sha=data.get("head_sha"),
+            run_number=data.get("run_number"),
+            status=data.get("status"),
+            conclusion=data.get("conclusion"),
+            started_at=norm_ts(data.get("run_started_at")),
+            html_url=data.get("html_url"),
+            actor=_login(data.get("actor")) or _login(data.get("triggering_actor")),
+            display_title=data.get("display_title"),
+            attempt=int(data.get("run_attempt") or 1),
+            created_at=norm_ts(data.get("created_at")) or now,
+            updated_at=norm_ts(data.get("updated_at")) or now,
+        )
+
+    @property
+    def active(self) -> bool:
+        return self.status != "completed"
+
+
+class Step(BaseModel):
+    name: str
+    status: str | None = None
+    conclusion: str | None = None
+    number: int | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+
+
+class Job(BaseModel):
+    id: int
+    run_id: int
+    repo: str
+    name: str
+    status: str | None
+    conclusion: str | None
+    started_at: str | None
+    completed_at: str | None
+    runner_name: str | None
+    runner_group: str | None
+    labels: list[str]
+    steps: list[Step]
+    html_url: str | None
+    created_at: str
+    updated_at: str
+
+    @field_validator("labels", mode="before")
+    @classmethod
+    def _labels(cls, value: Any) -> list[str]:
+        return [str(v) for v in _json_list(value)]
+
+    @field_validator("steps", mode="before")
+    @classmethod
+    def _steps(cls, value: Any) -> list[Any]:
+        return _json_list(value)
+
+    @classmethod
+    def from_github(cls, repo: str, data: dict[str, Any]) -> "Job":
+        now = utcnow()
+        steps = [
+            Step(
+                name=str(step.get("name", "")),
+                status=step.get("status"),
+                conclusion=step.get("conclusion"),
+                number=step.get("number"),
+                started_at=norm_ts(step.get("started_at")),
+                completed_at=norm_ts(step.get("completed_at")),
+            )
+            for step in data.get("steps") or []
+            if isinstance(step, dict)
+        ]
+        return cls(
+            id=int(data["id"]),
+            run_id=int(data["run_id"]),
+            repo=repo,
+            name=str(data.get("name") or ""),
+            status=data.get("status"),
+            conclusion=data.get("conclusion"),
+            started_at=norm_ts(data.get("started_at")),
+            completed_at=norm_ts(data.get("completed_at")),
+            runner_name=data.get("runner_name"),
+            runner_group=data.get("runner_group_name"),
+            labels=[str(label) for label in data.get("labels") or []],
+            steps=steps,
+            html_url=data.get("html_url"),
+            created_at=norm_ts(data.get("created_at")) or norm_ts(data.get("started_at")) or now,
+            updated_at=norm_ts(data.get("completed_at")) or norm_ts(data.get("started_at")) or now,
+        )
+
+    def duration_seconds(self, now: datetime.datetime | None = None) -> float | None:
+        """Wall time so far (in progress) or total (completed); None before the job started."""
+        if not self.started_at:
+            return None
+        start = datetime.datetime.fromisoformat(self.started_at)
+        end = (
+            datetime.datetime.fromisoformat(self.completed_at)
+            if self.completed_at
+            else (now or datetime.datetime.now(datetime.UTC))
+        )
+        return max(0.0, (end - start).total_seconds())
+
+
+class PullRequest(BaseModel):
+    repo: str
+    number: int
+    title: str
+    author: str | None
+    state: str
+    draft: bool
+    head_sha: str | None
+    head_fork: bool
+    merged_at: str | None
+    review_state: str | None
+    html_url: str | None
+    created_at: str
+    updated_at: str
+
+    @classmethod
+    def from_github(cls, repo: str, data: dict[str, Any]) -> "PullRequest":
+        now = utcnow()
+        head = data.get("head") or {}
+        head_repo = head.get("repo") if isinstance(head, dict) else None
+        return cls(
+            repo=repo,
+            number=int(data["number"]),
+            title=str(data.get("title") or ""),
+            author=_login(data.get("user")),
+            state=str(data.get("state") or "open"),
+            draft=bool(data.get("draft", False)),
+            head_sha=head.get("sha") if isinstance(head, dict) else None,
+            # A deleted fork leaves head.repo null; treat that as a fork too since it certainly is not us.
+            head_fork=not isinstance(head_repo, dict) or head_repo.get("full_name") != repo,
+            merged_at=norm_ts(data.get("merged_at")),
+            review_state=None,
+            html_url=data.get("html_url"),
+            created_at=norm_ts(data.get("created_at")) or now,
+            updated_at=norm_ts(data.get("updated_at")) or now,
+        )
+
+
+class Issue(BaseModel):
+    repo: str
+    number: int
+    title: str
+    author: str | None
+    state: str
+    labels: list[str]
+    html_url: str | None
+    created_at: str
+    updated_at: str
+
+    @field_validator("labels", mode="before")
+    @classmethod
+    def _labels(cls, value: Any) -> list[str]:
+        return [str(v) for v in _json_list(value)]
+
+    @classmethod
+    def from_github(cls, repo: str, data: dict[str, Any]) -> "Issue":
+        now = utcnow()
+        labels = [
+            str(label["name"]) if isinstance(label, dict) else str(label)
+            for label in data.get("labels") or []
+            if not isinstance(label, dict) or label.get("name")
+        ]
+        return cls(
+            repo=repo,
+            number=int(data["number"]),
+            title=str(data.get("title") or ""),
+            author=_login(data.get("user")),
+            state=str(data.get("state") or "open"),
+            labels=labels,
+            html_url=data.get("html_url"),
+            created_at=norm_ts(data.get("created_at")) or now,
+            updated_at=norm_ts(data.get("updated_at")) or now,
+        )
+
+
+class Release(BaseModel):
+    repo: str
+    tag: str
+    name: str | None
+    prerelease: bool
+    published_at: str | None
+    html_url: str | None
+    body: str | None
+    created_at: str
+    updated_at: str
+
+    @classmethod
+    def from_github(cls, repo: str, data: dict[str, Any]) -> "Release":
+        now = utcnow()
+        return cls(
+            repo=repo,
+            tag=str(data["tag_name"]),
+            name=data.get("name"),
+            prerelease=bool(data.get("prerelease", False)),
+            published_at=norm_ts(data.get("published_at")),
+            html_url=data.get("html_url"),
+            body=data.get("body"),
+            created_at=norm_ts(data.get("created_at")) or now,
+            updated_at=norm_ts(data.get("published_at")) or norm_ts(data.get("created_at")) or now,
+        )
+
+
+class Build(BaseModel):
+    repo: str
+    run_id: int
+    run_url: str | None
+    image: str
+    branch: str | None
+    mode: str | None
+    pull_request: int | None
+    reason: str | None
+    result: str | None
+    """None while the build is running (a `build.started` without its summary yet)."""
+    failed_job: str | None
+    version_tag: str | None
+    release_tag: str | None
+    upstream: str | None
+    upstream_clean: str | None
+    semver: str | None
+    ls_build: int | None
+    test_success: bool | None
+    release_url: str | None
+    artifact_url: str | None
+    index_digest: str | None
+    platforms: list[str]
+    received_at: str
+    bundle_json: str | None = None
+    discord_message_id: str | None = None
+    created_at: str
+    updated_at: str
+
+    @field_validator("platforms", mode="before")
+    @classmethod
+    def _platforms(cls, value: Any) -> list[str]:
+        return [str(v) for v in _json_list(value)]
+
+    @classmethod
+    def from_event(cls, event: dict[str, Any], received_at: str | None = None) -> "Build":
+        """A builds row from a control-event (either type); the bundle fills in what the envelope lacks."""
+        now = received_at or utcnow()
+        repo = str(event["repository"])
+        bundle = event.get("bundle") if isinstance(event.get("bundle"), dict) else None
+        version = bundle.get("version", {}) if bundle else {}
+        test = bundle.get("test", {}) if bundle else {}
+        image = event.get("image") or (bundle or {}).get("image") or image_name_of(repo.rsplit("/", 1)[-1])
+        summary = event.get("type") == "build.summary"
+        return cls(
+            repo=repo,
+            run_id=int(event["run_id"]),
+            run_url=event.get("run_url") or (bundle or {}).get("workflow", {}).get("run_url"),
+            image=str(image or repo.rsplit("/", 1)[-1]),
+            branch=event.get("branch") or (bundle or {}).get("branch"),
+            mode=event.get("mode") or (bundle or {}).get("mode"),
+            pull_request=event.get("pull_request") or (bundle or {}).get("pull_request"),
+            reason=event.get("reason") or (bundle or {}).get("reason"),
+            result=event.get("result") if summary else None,
+            failed_job=event.get("failed_job"),
+            version_tag=version.get("tag"),
+            release_tag=version.get("release_tag"),
+            upstream=version.get("upstream"),
+            upstream_clean=version.get("upstream_clean"),
+            semver=version.get("semver"),
+            ls_build=version.get("ls_build"),
+            test_success=test.get("success") if summary and bundle else None,
+            release_url=event.get("release_url"),
+            artifact_url=event.get("artifact_url"),
+            index_digest=(bundle or {}).get("index_digest"),
+            platforms=[str(p.get("arch")) for p in (bundle or {}).get("platforms", []) if isinstance(p, dict)],
+            received_at=now,
+            bundle_json=json.dumps(bundle, separators=(",", ":")) if bundle else None,
+            created_at=norm_ts(event.get("sent")) or now,
+            updated_at=norm_ts(event.get("sent")) or now,
+        )
+
+    @property
+    def running(self) -> bool:
+        return self.result is None
+
+    @property
+    def bundle(self) -> dict[str, Any] | None:
+        if not self.bundle_json:
+            return None
+        loaded = json.loads(self.bundle_json)
+        return loaded if isinstance(loaded, dict) else None
+
+
+class SchedulerDecision(BaseModel):
+    id: int
+    at: str
+    image: str
+    branch: str
+    outcome: str
+    detail: str | None
+    created_at: str
+    updated_at: str
+
+
+BUILD_COLUMNS = ", ".join(name for name in Build.model_fields if name != "bundle_json")
+
+
+# -- store --------------------------------------------------------------------------------------------------------
+
+
+def _upsert(
+    conn: sqlite3.Connection,
+    table: str,
+    values: dict[str, Any],
+    keys: tuple[str, ...],
+    keep: tuple[str, ...] = (),
+    guard: str | None = None,
+) -> bool:
+    """INSERT ... ON CONFLICT DO UPDATE for every non-key column except created_at; `keep` columns only take a
+    new value when the new one is not NULL; `guard` is a WHERE on the update so stale data cannot win."""
+    columns = list(values)
+    updates = [c for c in columns if c not in keys and c != "created_at"]
+    assignments = ", ".join(
+        f"{c} = COALESCE(excluded.{c}, {table}.{c})" if c in keep else f"{c} = excluded.{c}" for c in updates
+    )
+    sql = (
+        f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))}) "
+        f"ON CONFLICT({', '.join(keys)}) DO UPDATE SET {assignments}"
+    )
+    if guard:
+        sql += f" WHERE {guard}"
+    cursor = conn.execute(sql, tuple(_sql_value(v) for v in values.values()))
+    return cursor.rowcount > 0
+
+
+def _sql_value(value: Any) -> Any:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, list | dict):
+        return json.dumps(value, separators=(",", ":"))
+    if isinstance(value, BaseModel):
+        return value.model_dump_json()
+    return value
+
+
+def _job_row(row: sqlite3.Row) -> Job:
+    data = dict(row)
+    data["steps"] = data.pop("steps_json")
+    return Job(**data)
+
+
+class Model:
+    """All reads and writes of the state tables. One instance per app, wrapping the Database."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    # -- repos ----------------------------------------------------------------------------------------------------
+
+    def upsert_repo(self, repo: Repo) -> None:
+        with self.db.connect() as conn:
+            _upsert(conn, "repos", repo.model_dump(), ("full_name",))
+
+    def touch_repo(self, data: dict[str, Any]) -> Repo | None:
+        """Every webhook carries `repository`; keep the row current from whatever arrives."""
+        if not isinstance(data, dict) or not data.get("full_name") or not data.get("name"):
+            return None
+        repo = Repo.from_github(data)
+        self.upsert_repo(repo)
+        return repo
+
+    def delete_repo(self, full_name: str) -> None:
+        with self.db.connect() as conn:
+            conn.execute("DELETE FROM repos WHERE full_name = ?", (full_name,))
+
+    def repos(self, images_only: bool = False) -> list[Repo]:
+        sql = "SELECT * FROM repos" + (" WHERE is_image = 1" if images_only else "") + " ORDER BY name"
+        with self.db.connect() as conn:
+            return [Repo(**dict(row)) for row in conn.execute(sql).fetchall()]
+
+    def repo(self, full_name: str) -> Repo | None:
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT * FROM repos WHERE full_name = ?", (full_name,)).fetchone()
+        return Repo(**dict(row)) if row else None
+
+    def repo_by_name(self, name: str) -> Repo | None:
+        """`docker-sonarr` or `org/docker-sonarr` both find the row; URLs use the short form."""
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT * FROM repos WHERE full_name = ? OR name = ?", (name, name)).fetchone()
+        return Repo(**dict(row)) if row else None
+
+    # -- runs -----------------------------------------------------------------------------------------------------
+
+    def upsert_run(self, run: Run) -> bool:
+        with self.db.connect() as conn:
+            return _upsert(conn, "runs", run.model_dump(), ("id",), guard="excluded.updated_at >= runs.updated_at")
+
+    def run(self, run_id: int) -> Run | None:
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+        return Run(**dict(row)) if row else None
+
+    def active_runs(self) -> list[Run]:
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM runs WHERE status IS NULL OR status != 'completed' ORDER BY created_at DESC"
+            ).fetchall()
+        return [Run(**dict(row)) for row in rows]
+
+    def recent_runs(self, limit: int = 50, repo: str | None = None) -> list[Run]:
+        sql = "SELECT * FROM runs WHERE status = 'completed'"
+        params: list[Any] = []
+        if repo:
+            sql += " AND repo = ?"
+            params.append(repo)
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        with self.db.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [Run(**dict(row)) for row in rows]
+
+    def latest_run_for_sha(self, repo: str, head_sha: str, event: str | None = None) -> Run | None:
+        sql = "SELECT * FROM runs WHERE repo = ? AND head_sha = ?"
+        params: list[Any] = [repo, head_sha]
+        if event:
+            sql += " AND event = ?"
+            params.append(event)
+        sql += " ORDER BY created_at DESC, attempt DESC LIMIT 1"
+        with self.db.connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        return Run(**dict(row)) if row else None
+
+    # -- jobs -----------------------------------------------------------------------------------------------------
+
+    def upsert_job(self, job: Job) -> bool:
+        guard = f"{STATUS_RANK.format('excluded.status')} >= {STATUS_RANK.format('jobs.status')}"
+        values = job.model_dump()
+        values["steps_json"] = values.pop("steps")
+        with self.db.connect() as conn:
+            return _upsert(conn, "jobs", values, ("id",), guard=guard)
+
+    def job(self, job_id: int) -> Job | None:
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        return _job_row(row) if row else None
+
+    def jobs_for_run(self, run_id: int) -> list[Job]:
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE run_id = ? ORDER BY COALESCE(started_at, created_at), id", (run_id,)
+            ).fetchall()
+        return [_job_row(row) for row in rows]
+
+    def jobs_with_status(self, status: str) -> list[Job]:
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE status = ? ORDER BY COALESCE(started_at, created_at)", (status,)
+            ).fetchall()
+        return [_job_row(row) for row in rows]
+
+    def count_jobs(self, status: str) -> int:
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS n FROM jobs WHERE status = ?", (status,)).fetchone()
+        return int(row["n"])
+
+    def job_durations(self, repo: str, name: str, limit: int = 200) -> list[float]:
+        """Wall seconds of the most recent completed jobs with this name in this repo, for stuck detection."""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT started_at, completed_at FROM jobs WHERE repo = ? AND name = ? AND status = 'completed' "
+                "AND started_at IS NOT NULL AND completed_at IS NOT NULL ORDER BY completed_at DESC LIMIT ?",
+                (repo, name, limit),
+            ).fetchall()
+        durations: list[float] = []
+        for row in rows:
+            start = datetime.datetime.fromisoformat(row["started_at"])
+            end = datetime.datetime.fromisoformat(row["completed_at"])
+            durations.append(max(0.0, (end - start).total_seconds()))
+        return durations
+
+    # -- pull requests --------------------------------------------------------------------------------------------
+
+    def upsert_pull_request(self, pr: PullRequest) -> bool:
+        with self.db.connect() as conn:
+            return _upsert(
+                conn,
+                "pull_requests",
+                pr.model_dump(),
+                ("repo", "number"),
+                keep=("review_state",),
+                guard="excluded.updated_at >= pull_requests.updated_at",
+            )
+
+    def set_review_state(self, repo: str, number: int, review_state: str, at: str | None = None) -> None:
+        with self.db.connect() as conn:
+            conn.execute(
+                "UPDATE pull_requests SET review_state = ?, updated_at = MAX(updated_at, ?) "
+                "WHERE repo = ? AND number = ?",
+                (review_state, norm_ts(at) or utcnow(), repo, number),
+            )
+
+    def pull_request(self, repo: str, number: int) -> PullRequest | None:
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT * FROM pull_requests WHERE repo = ? AND number = ?", (repo, number)).fetchone()
+        return PullRequest(**dict(row)) if row else None
+
+    def open_pull_requests(self) -> list[PullRequest]:
+        with self.db.connect() as conn:
+            rows = conn.execute("SELECT * FROM pull_requests WHERE state = 'open' ORDER BY created_at").fetchall()
+        return [PullRequest(**dict(row)) for row in rows]
+
+    # -- issues ---------------------------------------------------------------------------------------------------
+
+    def upsert_issue(self, issue: Issue) -> bool:
+        with self.db.connect() as conn:
+            return _upsert(
+                conn, "issues", issue.model_dump(), ("repo", "number"), guard="excluded.updated_at >= issues.updated_at"
+            )
+
+    def issue(self, repo: str, number: int) -> Issue | None:
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT * FROM issues WHERE repo = ? AND number = ?", (repo, number)).fetchone()
+        return Issue(**dict(row)) if row else None
+
+    def open_issues(self) -> list[Issue]:
+        with self.db.connect() as conn:
+            rows = conn.execute("SELECT * FROM issues WHERE state = 'open' ORDER BY created_at").fetchall()
+        return [Issue(**dict(row)) for row in rows]
+
+    # -- releases -------------------------------------------------------------------------------------------------
+
+    def upsert_release(self, release: Release) -> bool:
+        with self.db.connect() as conn:
+            return _upsert(conn, "releases", release.model_dump(), ("repo", "tag"))
+
+    def delete_release(self, repo: str, tag: str) -> None:
+        with self.db.connect() as conn:
+            conn.execute("DELETE FROM releases WHERE repo = ? AND tag = ?", (repo, tag))
+
+    def release(self, repo: str, tag: str) -> Release | None:
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT * FROM releases WHERE repo = ? AND tag = ?", (repo, tag)).fetchone()
+        return Release(**dict(row)) if row else None
+
+    def recent_releases(self, limit: int = 100) -> list[Release]:
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM releases ORDER BY COALESCE(published_at, created_at) DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [Release(**dict(row)) for row in rows]
+
+    def releases_for_repo(self, repo: str, limit: int = 50) -> list[Release]:
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM releases WHERE repo = ? ORDER BY COALESCE(published_at, created_at) DESC LIMIT ?",
+                (repo, limit),
+            ).fetchall()
+        return [Release(**dict(row)) for row in rows]
+
+    # -- builds ---------------------------------------------------------------------------------------------------
+
+    def upsert_build(self, build: Build) -> bool:
+        """A summary always wins; a `build.started` only creates or refreshes a row that has no result yet."""
+        guard = None if build.result is not None else "builds.result IS NULL"
+        with self.db.connect() as conn:
+            return _upsert(
+                conn, "builds", build.model_dump(), ("repo", "run_id"), keep=("discord_message_id",), guard=guard
+            )
+
+    def set_build_message(self, repo: str, run_id: int, message_id: str) -> None:
+        with self.db.connect() as conn:
+            conn.execute(
+                "UPDATE builds SET discord_message_id = ? WHERE repo = ? AND run_id = ?", (message_id, repo, run_id)
+            )
+
+    def build(self, repo: str, run_id: int) -> Build | None:
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT * FROM builds WHERE repo = ? AND run_id = ?", (repo, run_id)).fetchone()
+        return Build(**dict(row)) if row else None
+
+    def builds_for_run(self, run_id: int) -> list[Build]:
+        with self.db.connect() as conn:
+            rows = conn.execute(f"SELECT {BUILD_COLUMNS} FROM builds WHERE run_id = ?", (run_id,)).fetchall()
+        return [Build(**dict(row)) for row in rows]
+
+    def recent_builds(self, limit: int = 100) -> list[Build]:
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                f"SELECT {BUILD_COLUMNS} FROM builds ORDER BY received_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [Build(**dict(row)) for row in rows]
+
+    def latest_builds_per_branch(self, repo: str, mode: str = "live") -> list[Build]:
+        """The newest build of each branch of a repo in one mode: the fleet board's live branches."""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                f"SELECT {BUILD_COLUMNS} FROM builds WHERE repo = ? AND mode = ? AND rowid IN ("
+                "  SELECT rowid FROM builds b2 WHERE b2.repo = builds.repo AND b2.mode = builds.mode "
+                "  AND b2.branch IS builds.branch ORDER BY received_at DESC LIMIT 1) ORDER BY branch",
+                (repo, mode),
+            ).fetchall()
+        return [Build(**dict(row)) for row in rows]
+
+    def latest_live_build(self, image: str, release_tag: str) -> Build | None:
+        """The newest finished live build that publishes `release_tag` (`latest` for the default branch).
+        Builds before the bundle carried `release_tag` are matched by the tag prefix convention (§3)."""
+        with self.db.connect() as conn:
+            row = conn.execute(
+                f"SELECT {BUILD_COLUMNS} FROM builds WHERE image = ? AND mode = 'live' AND result IS NOT NULL AND ("
+                "  release_tag = ? OR (release_tag IS NULL AND (? = 'latest' OR version_tag LIKE ? || '-%')))"
+                " ORDER BY received_at DESC LIMIT 1",
+                (image, release_tag, release_tag, release_tag),
+            ).fetchone()
+        return Build(**dict(row)) if row else None
+
+    # -- scheduler ------------------------------------------------------------------------------------------------
+
+    def add_decision(self, image: str, branch: str, outcome: str, detail: str | None = None) -> int:
+        now = utcnow()
+        with self.db.connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO scheduler_decisions (at, image, branch, outcome, detail, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (now, image, branch, outcome, detail, now, now),
+            )
+        return int(cursor.lastrowid or 0)
+
+    def recent_decisions(self, limit: int = 100) -> list[SchedulerDecision]:
+        with self.db.connect() as conn:
+            rows = conn.execute("SELECT * FROM scheduler_decisions ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [SchedulerDecision(**dict(row)) for row in rows]
+
+    # -- status ---------------------------------------------------------------------------------------------------
+
+    def counts(self) -> dict[str, int]:
+        tables = ("repos", "runs", "jobs", "pull_requests", "issues", "releases", "builds", "scheduler_decisions")
+        with self.db.connect() as conn:
+            return {t: int(conn.execute(f"SELECT COUNT(*) AS n FROM {t}").fetchone()["n"]) for t in tables}
+
+
+# -- stuck detection ----------------------------------------------------------------------------------------------
+
+DEFAULT_STUCK_SECONDS = 60 * 60
+MIN_SAMPLES = 10
+
+
+def p95(samples: list[float]) -> float:
+    """Nearest-rank 95th percentile."""
+    ordered = sorted(samples)
+    rank = max(1, -(-len(ordered) * 95 // 100))  # ceil(n * 0.95)
+    return ordered[rank - 1]
+
+
+def stuck_threshold(samples: list[float]) -> float:
+    """Seconds after which an in-progress job counts as stuck: the p95 of its history, or an hour."""
+    if len(samples) < MIN_SAMPLES:
+        return DEFAULT_STUCK_SECONDS
+    return p95(samples)
+
+
+def is_stuck(job: Job, samples: list[float], now: datetime.datetime | None = None) -> bool:
+    if job.status != "in_progress":
+        return False
+    elapsed = job.duration_seconds(now)
+    return elapsed is not None and elapsed > stuck_threshold(samples)

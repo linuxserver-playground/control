@@ -11,10 +11,14 @@ from fastapi import Request
 from .config import Settings
 from .db import Database
 from .github_app import CredentialStore, InstallationTokens
+from .model import Model
 from .notify import Discord
+from .stream import Broadcaster
 
 INSTALLATION_ID = "installation_id"
 """kv key: the id of the app's installation on the org, once it is installed."""
+LAST_BACKFILL = "last_backfill"
+"""kv key: JSON summary of the last backfill (started, finished, counts, error), shown on /status."""
 
 
 @dataclass
@@ -25,6 +29,8 @@ class State:
     discord: Discord
     http: httpx.AsyncClient
     tokens: InstallationTokens
+    model: Model
+    stream: Broadcaster
 
     @property
     def installation_id(self) -> int | None:

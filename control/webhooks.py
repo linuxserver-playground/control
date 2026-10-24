@@ -1,8 +1,7 @@
 """
-Webhook intake. Every delivery is verified against the app's webhook secret and stored whole; handlers
-that act on events come in a later increment and will read from `deliveries`, so nothing is lost if they
-are added after the fact. GitHub retries on non-2xx, so we only answer 4xx/5xx when storing would be
-wrong (bad signature, no secret yet).
+Webhook intake. Every delivery is verified against the app's webhook secret and stored whole before any
+handler sees it, so a handler bug loses nothing: `python -m control replay` reprocesses the table. GitHub
+retries on non-2xx, so we only answer 4xx/5xx when storing would be wrong (bad signature, no secret yet).
 """
 
 import hashlib
@@ -13,6 +12,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 
+from . import handlers
 from .state import INSTALLATION_ID, state_of
 
 log = logging.getLogger(__name__)
@@ -62,4 +62,5 @@ async def github_webhook(
         elif isinstance(installation.get("id"), int):
             state.db.set(INSTALLATION_ID, str(installation["id"]))
     log.info("stored %s %s (%s)", x_github_event, payload.get("action", ""), x_github_delivery)
+    handlers.process(state.model, state.stream, x_github_event, payload)
     return Response(status_code=202)

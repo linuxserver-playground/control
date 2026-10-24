@@ -1,0 +1,46 @@
+{
+  "total_count": 1,
+  "jobs": [
+    {
+      "id": 9001,
+      "run_id": 5001,
+      "run_attempt": 1,
+      "node_id": "CR_1",
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
+      "html_url": "https://github.com/example-org/docker-sonarr/actions/runs/5001/job/9001",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-10-24T12:00:03Z",
+      "started_at": "2026-10-24T12:00:10Z",
+      "completed_at": "2026-10-24T12:09:05Z",
+      "name": "build (amd64)",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-10-24T12:00:10Z",
+          "completed_at": "2026-10-24T12:00:12Z"
+        },
+        {
+          "name": "Build",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-10-24T12:00:12Z",
+          "completed_at": "2026-10-24T12:09:00Z"
+        }
+      ],
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "runner_id": 11,
+      "runner_name": "GitHub Actions 11",
+      "runner_group_id": 2,
+      "runner_group_name": "GitHub Actions",
+      "workflow_name": "Build image",
+      "head_branch": "main"
+    }
+  ]
+}

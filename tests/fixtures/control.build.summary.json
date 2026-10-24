@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "type": "build.summary",
+  "sent": "2026-10-24T12:09:45Z",
+  "repository": "example-org/docker-sonarr",
+  "run_id": 5001,
+  "run_url": "https://github.com/example-org/docker-sonarr/actions/runs/5001",
+  "image": "sonarr",
+  "branch": "main",
+  "mode": "live",
+  "reason": "upstream",
+  "result": "success",
+  "bundle": {
+    "schema": 1,
+    "image": "sonarr",
+    "repository": "example-org/docker-sonarr",
+    "branch": "main",
+    "mode": "live",
+    "version": {
+      "upstream": "4.0.20.3014",
+      "upstream_clean": "4.0.20.3014",
+      "semver": "4.0.20",
+      "ls_build": 1,
+      "tag": "4.0.20.3014-ls1",
+      "release_tag": "latest",
+      "tags": [
+        "latest",
+        "4.0.20.3014-ls1",
+        "version-4.0.20.3014",
+        "4.0.20"
+      ],
+      "source": "github_release",
+      "source_url": "https://github.com/Sonarr/Sonarr/releases/tag/v4.0.20.3014"
+    },
+    "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
+    "created": "2026-10-24T12:09:30Z",
+    "reason": "upstream",
+    "base": {
+      "family": "alpine",
+      "image": "ghcr.io/linuxserver/baseimage-alpine:3.22",
+      "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "platforms": [
+      {
+        "arch": "amd64",
+        "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "size": 120000000,
+        "runner": "ubuntu-latest",
+        "build_seconds": 480.5
+      },
+      {
+        "arch": "arm64",
+        "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "size": 118000000,
+        "runner": "ubuntu-24.04-arm",
+        "build_seconds": 510.0
+      }
+    ],
+    "index_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "labels": {
+      "org.opencontainers.image.version": "4.0.20.3014-ls1",
+      "io.linuxserver.image.mode": "live"
+    },
+    "config": {
+      "exposed_ports": [
+        "8989/tcp"
+      ],
+      "volumes": [
+        "/config"
+      ]
+    },
+    "dockerfile": {
+      "amd64": "FROM ghcr.io/linuxserver/baseimage-alpine:3.22\n"
+    },
+    "test": {
+      "enabled": true,
+      "success": true,
+      "per_arch": {
+        "amd64": true,
+        "arm64": true
+      }
+    },
+    "assets": [
+      {
+        "name": "build.json",
+        "size": 4096,
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    ],
+    "workflow": {
+      "run_id": 5001,
+      "run_url": "https://github.com/example-org/docker-sonarr/actions/runs/5001",
+      "workflows_ref": "v1"
+    }
+  },
+  "release_url": "https://github.com/example-org/docker-sonarr/releases/tag/4.0.20.3014-ls1"
+}
