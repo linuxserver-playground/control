@@ -1,0 +1,23 @@
+---
+services:
+  control:
+    image: ghcr.io/linuxserver-playground/control:latest
+    # first deploy, before the image is published: build from this checkout instead
+    # build: ../..
+    container_name: control
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+    # holds CONTROL_PUBLIC_URL, DISCORD_WEBHOOK_URL and CONTROL_SETUP_TOKEN; mode 600, never committed
+    env_file: /home/thelamer/control/.env
+    volumes:
+      - /home/thelamer/control/config:/config
+    # no published ports: SWAG proxies to control:8080 over the shared network
+    networks:
+      - sealskin-demo
+
+networks:
+  sealskin-demo:
+    external: true
