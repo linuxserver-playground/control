@@ -5,21 +5,29 @@ proxy is fine because the port is never published outside the compose network.
 Usage: python -m control            serve
        python -m control replay     reprocess every stored delivery through the handlers
        python -m control backfill   fill the state tables from the GitHub API, once
+       python -m control discover   read every live branch's image.yml from GitHub, once
+       python -m control schedule --once [--image x] [--branch y] [--dry-run]
+                                    run the upstream check now for every (or one) live branch;
+                                    --dry-run resolves and prints but records and dispatches nothing
 """
 
+import argparse
 import asyncio
 import logging
 import sys
+from collections.abc import Awaitable, Callable
 
 import httpx
 import uvicorn
 
-from . import handlers
+from . import handlers, scheduler
 from .app import build_state
 from .backfill import backfill_once
 from .config import Settings
 from .db import Database
+from .fleet import discover_once
 from .model import Model
+from .state import State
 from .stream import Broadcaster
 from .templating import package_version
 
@@ -45,17 +53,39 @@ def main(argv: list[str]) -> int:
         processed, applied = handlers.replay(Model(db), Broadcaster())
         print(f"replayed {processed} deliveries, {applied} applied")
         return 0
-    if command == "backfill":
-        record = asyncio.run(_backfill(settings, db))
+    if command in ("backfill", "discover"):
+        once = backfill_once if command == "backfill" else discover_once
+        record = asyncio.run(_with_state(settings, db, once))
         print(record)
         return 1 if record.get("error") else 0
+    if command == "schedule":
+        return _schedule(settings, db, argv[1:])
     print(__doc__, file=sys.stderr)
     return 2
 
 
-async def _backfill(settings: Settings, db: Database) -> dict[str, object]:
+def _schedule(settings: Settings, db: Database, argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="python -m control schedule")
+    parser.add_argument("--once", action="store_true", required=True, help="run the upstream check now and exit")
+    parser.add_argument("--image", help="only this image (name or repo)")
+    parser.add_argument("--branch", help="only this branch")
+    parser.add_argument("--dry-run", action="store_true", help="resolve and print; record and dispatch nothing")
+    args = parser.parse_args(argv)
+
+    async def once(state: State) -> list[scheduler.Decision]:
+        return await scheduler.run_once(state, args.image, args.branch, args.dry_run)
+
+    decisions = asyncio.run(_with_state(settings, db, once))
+    for decision in decisions:
+        print(("would " if args.dry_run and decision.outcome == "dispatch" else "") + decision.line())
+    if not decisions:
+        print("no live branches matched; run `python -m control discover` or check --image/--branch")
+    return 1 if any(d.outcome == "error" for d in decisions) else 0
+
+
+async def _with_state[T](settings: Settings, db: Database, run: Callable[[State], Awaitable[T]]) -> T:
     async with httpx.AsyncClient(timeout=30, headers={"User-Agent": f"lsio-control/{package_version()}"}) as http:
-        return await backfill_once(build_state(settings, db, http))
+        return await run(build_state(settings, db, http))
 
 
 if __name__ == "__main__":

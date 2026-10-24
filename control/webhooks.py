@@ -12,7 +12,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 
-from . import handlers
+from . import fleet, handlers
 from .state import INSTALLATION_ID, state_of
 
 log = logging.getLogger(__name__)
@@ -63,4 +63,6 @@ async def github_webhook(
             state.db.set(INSTALLATION_ID, str(installation["id"]))
     log.info("stored %s %s (%s)", x_github_event, payload.get("action", ""), x_github_delivery)
     handlers.process(state.model, state.stream, x_github_event, payload)
+    if x_github_event == "push":
+        fleet.schedule_refresh(state, payload)  # re-reads image.yml for a live branch, in the background
     return Response(status_code=202)

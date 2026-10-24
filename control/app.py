@@ -7,13 +7,14 @@ the environment.
 import asyncio
 import contextlib
 import logging
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request
 
-from . import events, setup, views, webhooks
+from . import auth, events, manage, scheduler, setup, views, webhooks
 from .backfill import backfill_once
 from .config import Settings
 from .db import Database
@@ -38,6 +39,7 @@ def build_state(settings: Settings, db: Database, http: httpx.AsyncClient) -> St
         tokens=InstallationTokens(http),
         model=Model(db),
         stream=Broadcaster(),
+        session_secret=settings.session_secret or secrets.token_hex(32),
     )
 
 
@@ -54,20 +56,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             log.info(
                 "control %s ready, public url %s, data in %s", package_version(), settings.public_url, settings.data_dir
             )
-            # The backfill talks to GitHub for a while; it runs beside the server and is cancelled on shutdown.
-            task = asyncio.create_task(backfill_once(state)) if settings.backfill_on_start else None
+            if not settings.session_secret:
+                log.warning("CONTROL_SESSION_SECRET is unset; using a random one, so sign-ins end at every restart")
+            # The backfill and the scheduler talk to GitHub for a while (forever, for the scheduler); they run
+            # beside the server and are cancelled on shutdown.
+            tasks: list[asyncio.Task[object]] = []
+            if settings.backfill_on_start:
+                tasks.append(asyncio.create_task(backfill_once(state)))
+            if settings.scheduler:
+                tasks.append(asyncio.create_task(scheduler.run(state)))
             try:
                 yield
             finally:
-                if task and not task.done():
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await task
+                for task in [*tasks, *state.background]:
+                    if not task.done():
+                        task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError, Exception):
+                            await task
 
     app = FastAPI(title="LinuxServer CI control", version=package_version(), lifespan=lifespan, docs_url=None)
     app.include_router(webhooks.router)
     app.include_router(events.router)
     app.include_router(setup.router)
+    app.include_router(auth.router)
+    app.include_router(manage.router)
     app.include_router(views.router)
 
     @app.get("/healthz")
