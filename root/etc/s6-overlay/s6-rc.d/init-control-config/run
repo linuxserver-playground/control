@@ -1,0 +1,12 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+# control creates control.db and github_app.json itself; both hold secrets, so keep them to abc
+mkdir -p \
+    /config
+
+# permissions
+lsiown abc:abc \
+    /config
+chmod 700 \
+    /config
