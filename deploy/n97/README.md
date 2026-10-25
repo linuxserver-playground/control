@@ -84,9 +84,10 @@ keeps that pin until you put `:latest` back.
 
 ## What only n97 holds
 
-- `~/control/.env` (mode 600): every secret and setting listed above, plus `OAUTH_CLIENT_ID`/`OAUTH_CLIENT_SECRET`
-  for member sign-in and `HUB_CONSUMERS` (the repos that get `hub-updated`). Changing it needs ssh and
-  `docker compose -f compose.yml up -d control`.
+- `~/control/.env` (mode 600): the secrets listed above plus `OAUTH_CLIENT_ID`/`OAUTH_CLIENT_SECRET` for member
+  sign-in, and the one deployment-specific value, `CONTROL_PUBLIC_URL`. Everything else (site, hub and consumer
+  repos, allowed origins) uses the defaults in `control/config.py`, so changing it is a pull request, not an
+  edit here. Changing `.env` needs ssh and `docker compose -f compose.yml up -d control`.
 - `~/control/config/`: `control.db` and `github_app.json` (the App's private key).
 - The SWAG side: `~/sealskin-demo/stack/compose.yml` mounts `ci.subdomain.conf`; the `*.thelamer.duckdns.org`
   certificate in `~/sealskin-demo/swag/keys/` is copied there by hand.
