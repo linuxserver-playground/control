@@ -314,7 +314,12 @@ class Scheduler:
             return self.record(image, branch, kind, "skipped", {"reason": "cooldown", "dispatched_at": dispatched_at})
         _, tag = self.released_tag(manifest)
         if tag is None:
-            return self.record(image, branch, kind, "skipped", {"reason": "no release yet"})
+            # A live branch with no Release at all: nothing to compare against, so build it. This covers a
+            # push that produced no run (GitHub skips some first pushes) and os images, whose upstream
+            # check never dispatches. The cooldown above keeps this to one dispatch per two hours.
+            return await self.dispatch(
+                repo, branch, image, kind, "rebuild", {"reason": "no release yet, initial build"}
+            )
         if self.github is None:
             why = {"reason": "GitHub App not configured or not installed", "released_tag": tag}
             return self.record(image, branch, kind, "error", why)

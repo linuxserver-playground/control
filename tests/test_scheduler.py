@@ -486,11 +486,20 @@ async def test_release_check_ignores_generated_files_behind_skip_ci(state: State
 
 
 @pytest.mark.anyio
+async def test_release_check_builds_a_branch_without_any_release(state: State) -> None:
+    """No Release means nothing to compare against: an initial build is dispatched (os images and pushes
+    that produced no run depend on this); the cooldown then holds further dispatches."""
+    manifest = live(state)
+    decision, github = await run_release(state, manifest, FakeGitHub(head=HEAD), clock=lambda: NOW)
+    assert decision.outcome == "dispatch" and decision.detail["reason"] == "no release yet, initial build"
+    assert github.gets == []  # nothing to compare against, so no GitHub reads before the dispatch
+    again, _ = await run_release(state, manifest, FakeGitHub(head=HEAD), clock=lambda: NOW)
+    assert again.outcome == "skipped" and again.detail["reason"] == "cooldown"
+
+
+@pytest.mark.anyio
 async def test_release_check_waits_and_skips(state: State) -> None:
     manifest = live(state)
-    # Without a Release the upstream check builds the first one; this check has nothing to compare.
-    decision, github = await run_release(state, manifest, FakeGitHub(head=HEAD), clock=lambda: NOW)
-    assert decision.outcome == "skipped" and decision.detail == {"reason": "no release yet"} and github.gets == []
     seed(state, "release.published")
 
     # A queued or running build of the branch; then one that finished less than 15 minutes ago.
@@ -650,7 +659,9 @@ async def test_run_once_filters_and_works_without_installation(state: State, mon
     assert [(d.kind, d.outcome) for d in forced] == [("packages", "dispatch")]
     assert forced[0].detail["dispatch_reason"] == "packages"
     released = await scheduler.run_once(state, branch="main", kind="release")
-    assert [(d.kind, d.outcome) for d in released] == [("release", "skipped")]  # no Release yet
+    # No Release yet means an initial build; without an installation that dispatch is recorded as an error.
+    assert [(d.kind, d.outcome) for d in released] == [("release", "error")]
+    assert released[0].detail["reason"] == "no release yet, initial build"
 
 
 def test_cli_schedule_once_dry_run(
