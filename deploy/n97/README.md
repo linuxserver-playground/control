@@ -39,8 +39,8 @@ for `*.thelamer.duckdns.org` and proxies by container name. Nothing here publish
    docker compose -f compose.yml up -d
    ```
 
-   For the very first deploy, before `ghcr.io/linuxserver-playground/control` exists, comment out `image:`
-   and uncomment `build: ../..` so it builds from the checkout, then `docker compose -f compose.yml up -d --build`.
+   For the very first deploy, before `ghcr.io/linuxserver-playground/control` exists, replace `image:` with
+   `build: ../..` so it builds from the checkout, then `docker compose -f compose.yml up -d --build`.
 
 4. Check it answers: `curl -fsS https://ci.thelamer.duckdns.org:8443/healthz` → `{"status":"ok","db":true}`.
 
@@ -65,10 +65,30 @@ authorizing users** add the callback URL `https://ci.thelamer.duckdns.org:8443/l
 after this increment get the URL automatically. Then `/login` works for anyone, and members of the org (active
 membership) see the action forms on `/management`, `/runs/{id}`, `/images/{name}` and the fleet board.
 
-## Upgrading
+## Deploying changes
+
+Merge to `main`. The Publish workflow runs the checks, builds both arches and moves
+`ghcr.io/linuxserver-playground/control:latest`; within 5 minutes the `updater` service pulls it and recreates
+`control` (and only `control`). Watch it with `docker logs -f control-updater`, and confirm the running
+revision with `docker inspect control --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'`.
+To deploy right away instead of waiting:
 
 ```bash
-docker compose -f compose.yml pull && docker compose -f compose.yml up -d
+docker compose -f compose.yml pull control && docker compose -f compose.yml up -d control
 ```
 
+To roll back, pin `image:` to an older `:<sha7>` tag in `~/control/compose.yml` and `up -d`; the updater then
+keeps that pin until you put `:latest` back.
+
 `/config` is the only state. Back it up like a secret; restoring it to a fresh container restores the app.
+
+## What only n97 holds
+
+- `~/control/.env` (mode 600): every secret and setting listed above, plus `OAUTH_CLIENT_ID`/`OAUTH_CLIENT_SECRET`
+  for member sign-in and `HUB_CONSUMERS` (the repos that get `hub-updated`). Changing it needs ssh and
+  `docker compose -f compose.yml up -d control`.
+- `~/control/config/`: `control.db` and `github_app.json` (the App's private key).
+- The SWAG side: `~/sealskin-demo/stack/compose.yml` mounts `ci.subdomain.conf`; the `*.thelamer.duckdns.org`
+  certificate in `~/sealskin-demo/swag/keys/` is copied there by hand.
+
+Adding an image to the fleet needs none of this: discovery reads every `docker-*` repo with an `image.yml`.

@@ -1,6 +1,7 @@
 """The hub-deploy-to-site relay: only a successful hub Deploy run dispatches, and only to the site repo."""
 
 import asyncio
+import datetime
 import json
 from typing import Any
 
@@ -8,10 +9,11 @@ import httpx
 import pytest
 
 from control import relay
+from control.github import GitHub
 from control.github_app import AppCredentials
 from control.state import State
 
-from .conftest import install, mock_github, token_response
+from .conftest import install, mock_client, mock_github, token_response
 
 
 def hub_run(
@@ -57,3 +59,28 @@ def test_dispatch_goes_to_every_hub_consumer(
 
 def test_dispatch_without_installation_is_a_quiet_no(state: State) -> None:
     assert asyncio.run(relay.dispatch_site_refresh(state, hub_run(state))) is False
+
+
+@pytest.mark.anyio
+async def test_hub_refresh_dispatches_hourly(state: State) -> None:
+    now = datetime.datetime(2026, 10, 25, 12, 0, tzinfo=datetime.UTC)
+    seen: list[tuple[str, dict[str, Any]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(204)
+
+    assert relay.hub_refresh_due(state, now)
+    async with mock_client(handler) as http:
+        assert await relay.dispatch_hub_refresh(state, GitHub(http, "ghs_token"), now)
+    path = f"/repos/{state.settings.github_org}/hub/actions/workflows/deploy.yml/dispatches"
+    assert seen == [(path, {"ref": "main"})]
+    assert not relay.hub_refresh_due(state, now + datetime.timedelta(minutes=59))
+    assert relay.hub_refresh_due(state, now + datetime.timedelta(hours=1))
+
+
+@pytest.mark.anyio
+async def test_failed_hub_refresh_stays_due(state: State) -> None:
+    async with mock_client(lambda request: httpx.Response(422)) as http:
+        assert not await relay.dispatch_hub_refresh(state, GitHub(http, "ghs_token"))
+    assert relay.hub_refresh_due(state)

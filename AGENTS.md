@@ -38,6 +38,13 @@ pytest
 
 All three must pass before a commit. Match the existing style: short modules, docstrings that say why.
 
+## Deploying
+
+A push to `main` is a deploy: Publish (`.github/workflows/publish.yml`) runs Check, publishes
+`ghcr.io/linuxserver-playground/control:latest`, and the `updater` service on n97 recreates the container
+within 5 minutes. A red `main` ships nothing. Settings and secrets live only in `~/control/.env` on n97; a new
+setting needs a default that works without it, plus a line in `deploy/n97/README.md` for the operator.
+
 ## Rules
 
 - Never commit secrets. Everything under the data dir (`control.db`, `github_app.json`) is a secret: it holds

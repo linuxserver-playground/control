@@ -191,6 +191,12 @@ def test_push_webhook_schedules_a_refresh(
         time.sleep(0.02)
     row = state.model.manifest(REPO, "main")
     assert row and row.sha == "sha-main-1"
+    # The repo had nothing live, so the first push found its other live branches too.
+    for _ in range(50):
+        if state.model.manifest(REPO, "develop"):
+            break
+        time.sleep(0.02)
+    assert [m.branch for m in state.model.manifests(REPO)] == ["develop", "main"]
     # A push to a branch nobody tracks is ignored without a GitHub call.
     before = len(github.requests)
     payload["ref"] = "refs/heads/feature-x"

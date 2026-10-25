@@ -30,7 +30,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel
 
-from . import events
+from . import events, relay
 from .fleet import discover_once, discovery_due
 from .github import GitHub, installation_client
 from .model import Manifest, Model, Release
@@ -509,6 +509,8 @@ class Scheduler:
                     log.debug("scheduler idle: GitHub App not configured or not installed")
                 else:
                     await self.tick()
+                    if relay.hub_refresh_due(self.state, self.clock()):
+                        await relay.dispatch_hub_refresh(self.state, self.github, self.clock())
             except asyncio.CancelledError:
                 raise
             except Exception:

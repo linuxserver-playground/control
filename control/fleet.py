@@ -263,9 +263,13 @@ async def refresh_on_push(state: State, repo_full_name: str, branch: str) -> Man
         github = await installation_client(state)
         if github is None:
             return None
-        return await Discovery(github, state.settings.github_org, state.model, state.stream).refresh_branch(
-            repo, branch
-        )
+        discovery = Discovery(github, state.settings.github_org, state.model, state.stream)
+        if branch == repo.default_branch and not state.model.manifests(repo_full_name):
+            # A repo with nothing live yet (new, or image.yml just added): find every live branch now rather
+            # than at the next 30-minute discovery.
+            await discovery.repo(repo)
+            return state.model.manifest(repo_full_name, branch)
+        return await discovery.refresh_branch(repo, branch)
     except Exception:
         log.exception("manifest refresh after push to %s %s failed", repo_full_name, branch)
         return None

@@ -2,8 +2,6 @@
 services:
   control:
     image: ghcr.io/linuxserver-playground/control:latest
-    # first deploy, before the image is published: build from this checkout instead
-    # build: ../..
     container_name: control
     restart: unless-stopped
     environment:
@@ -19,6 +17,26 @@ services:
     # no published ports: SWAG proxies to control:8080 over the shared network
     networks:
       - sealskin-demo
+
+  updater:
+    # The deploy: every 5 minutes pull control's :latest (published by every push to main) and recreate the
+    # container only when the digest changed. Nobody needs to ssh in to ship a change.
+    image: docker:29-cli
+    container_name: control-updater
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          docker compose -p control -f /home/thelamer/control/compose.yml pull -q control &&
+            docker compose -p control -f /home/thelamer/control/compose.yml up -d control
+          sleep 300
+        done
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # compose reads compose.yml and .env from the host paths, so mount them at the same place
+      - /home/thelamer/control:/home/thelamer/control:ro
 
 networks:
   sealskin-demo:

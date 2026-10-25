@@ -1,0 +1,74 @@
+# Runs the checks, then builds the control plane image for amd64 and arm64 on native runners and publishes a
+# multi-arch ghcr.io/linuxserver-playground/control:latest on every push to main. n97 deploys it by itself:
+# the updater beside the container pulls :latest every few minutes (deploy/n97/README.md), so merging to main
+# is the deploy.
+name: Publish image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  check:
+    uses: ./.github/workflows/check.yml
+
+  build:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04, dockerfile: Dockerfile }
+          - { arch: arm64, runner: ubuntu-24.04-arm, dockerfile: Dockerfile.aarch64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build and push ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file "${DOCKERFILE}" \
+            --build-arg VERSION="${GITHUB_SHA::7}" \
+            --build-arg BUILD_DATE="$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --provenance=false --sbom=false \
+            --tag "${IMAGE}:${ARCH}-${GITHUB_SHA::7}" \
+            --push .
+        env:
+          ARCH: ${{ matrix.arch }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+
+  manifest:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Create multi-arch tags
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "${IMAGE}:latest" --tag "${IMAGE}:${GITHUB_SHA::7}" \
+            "${IMAGE}:amd64-${GITHUB_SHA::7}" "${IMAGE}:arm64-${GITHUB_SHA::7}"
+          docker buildx imagetools inspect "${IMAGE}:latest"

@@ -3,18 +3,26 @@ Cross-repository nudges GitHub cannot do with a workflow token: when the hub's D
 successfully, tell the website to refresh (repository_dispatch `hub-updated`). The control plane already
 receives every workflow_run webhook and holds the App installation token, so it is the natural relay. Best
 effort: the site also rebuilds on its daily cron.
+
+It also starts the hub's hourly full refresh (`workflow_dispatch` of deploy.yml), because GitHub skips most
+runs of the hub's own hourly cron and new builds then wait hours for their vulnerability scan.
 """
 
 import asyncio
+import datetime
 import logging
 from typing import Any
 
-from .github import installation_client
+from .github import GitHub, installation_client
 from .state import State
 
 log = logging.getLogger(__name__)
 
 HUB_DEPLOY_WORKFLOW = "Deploy"
+HUB_DEPLOY_FILE = "deploy.yml"
+HUB_REFRESH_INTERVAL = datetime.timedelta(hours=1)
+LAST_HUB_REFRESH = "last_hub_refresh"
+"""kv key: ISO time of the last hub refresh dispatch that GitHub accepted."""
 
 
 def is_hub_deploy_success(state: State, payload: dict[str, Any]) -> bool:
@@ -71,3 +79,25 @@ def schedule_site_refresh(state: State, payload: dict[str, Any]) -> asyncio.Task
     if not is_hub_deploy_success(state, payload):
         return None
     return state.spawn(dispatch_site_refresh(state, payload))
+
+
+def hub_refresh_due(state: State, now: datetime.datetime | None = None) -> bool:
+    last = state.db.get(LAST_HUB_REFRESH)
+    if not last:
+        return True
+    at = now or datetime.datetime.now(datetime.UTC)
+    return at - datetime.datetime.fromisoformat(last) >= HUB_REFRESH_INTERVAL
+
+
+async def dispatch_hub_refresh(state: State, github: GitHub, now: datetime.datetime | None = None) -> bool:
+    """`workflow_dispatch` of the hub's Deploy on main, the same full refresh as its cron. Never raises."""
+    at = now or datetime.datetime.now(datetime.UTC)
+    repo = f"{state.settings.github_org}/{state.settings.hub_repo}"
+    try:
+        await github.post(f"/repos/{repo}/actions/workflows/{HUB_DEPLOY_FILE}/dispatches", {"ref": "main"})
+    except Exception:
+        log.exception("hub refresh dispatch failed")
+        return False
+    state.db.set(LAST_HUB_REFRESH, at.isoformat(timespec="seconds"))
+    log.info("hub refresh dispatched")
+    return True
