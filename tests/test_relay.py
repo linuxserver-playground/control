@@ -54,7 +54,7 @@ def test_dispatch_goes_to_every_hub_consumer(
     mock_github(state, monkeypatch, handler)
     assert asyncio.run(relay.dispatch_site_refresh(state, hub_run(state))) is True
     body = {"event_type": "hub-updated", "client_payload": {"hub_run_id": 42, "head_sha": "a" * 40}}
-    assert seen == [(f"/repos/{state.settings.github_org}/{repo}/dispatches", body) for repo in ("site", "docs")]
+    assert seen == [(f"/repos/{state.settings.github_org}/{repo}/dispatches", body) for repo in ("site",)]
 
 
 def test_dispatch_without_installation_is_a_quiet_no(state: State) -> None:

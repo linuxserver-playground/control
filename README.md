@@ -53,6 +53,10 @@ docker run --rm -p 8080:8080 -e PUID=1000 -e PGID=1000 -e CONTROL_PUBLIC_URL=htt
 | `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET` | unset | A classic OAuth App (callback `${CONTROL_PUBLIC_URL}/login/callback`) used only for sign-in: its consent screen lists `read:user` and `read:org`, and membership is read with the user's token. Without it the GitHub App's OAuth client is used, which needs the App's Members permission. |
 | `CONTROL_SETUP_TOKEN` | unset                         | When set, `/setup` requires `?token=<value>`. Set it on any public deployment.       |
 | `DISCORD_WEBHOOK_URL` | unset                         | Discord webhook for notifications; without it they are logged and dropped.           |
+| `HUB_URL`             | `https://linuxserver-playground.github.io/hub` | The hub's Pages site, read to say where an overdue publication is stuck. |
+| `CONTROL_PUBLISH_DEADLINE_MINUTES` | `30`             | A released build's Discord message says "publishing" until its website page answers; past this it is reported (see below). |
+| `CONTROL_PUBLISH_EXPIRY_HOURS` | `24`                 | After this control stops watching an overdue publication and posts once more. |
+| `CONTROL_PUBLISH_WATCH` | `true`                      | Run the publication watcher (`control/publish.py`). |
 | `CONTROL_DISCORD_VERBOSE` | `false`                   | Also post the quiet scheduler embeds (grey): a `rebuild` dispatched for a branch head that was never released, and a skip flag holding a branch back. Build embeds and the error-streak alert post regardless. |
 | `CONTROL_EVENTS_SECRET` | unset                       | Shared with the `workflows` repo; signs the events POSTed to `/events`. Unset means `/events` answers 503. |
 | `CONTROL_BACKFILL_ON_START` | `false`                 | `true` runs one GitHub API backfill in the background after boot (once the app is configured and installed). |
@@ -309,3 +313,14 @@ delivery is stored whole, keyed by `X-GitHub-Delivery` so redeliveries are ignor
 events keep the stored installation id current.
 
 > Sign-in needs the organisation permission **Members: read** on the App (it is in the manifest for new apps). On an app created before it was added, grant it under the App's *Permissions & events* and then accept the updated permissions on the installation; until then every user is treated as a non-member.
+
+## Publication hold
+
+A released build's website page appears minutes after the release: the hub ingests it and deploys, then the site
+refreshes and deploys, longer when a burst of releases queues. So the build's Discord message is edited into the
+summary as "passed, publishing", linking control instead of a page that would 404, and `control/publish.py` checks
+every held build's page once a minute. When it answers the message becomes the final summary with its CI report
+link. Past `CONTROL_PUBLISH_DEADLINE_MINUTES` the message turns into "not on the site" and a separate post (an edit
+does not notify) says where it is stuck, read from the hub's own data: the hub has not ingested the release, or the
+hub has it and the site has not published it, with the runs to look at. A page that turns up later is announced
+with a short follow-up; after `CONTROL_PUBLISH_EXPIRY_HOURS` control stops watching and says so.

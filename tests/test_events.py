@@ -96,7 +96,20 @@ def test_started_posts_and_summary_edits_one_live_message(
 
     assert post_event(client, fixture("control.build.summary")).status_code == 202
     assert len(calls) == 2 and calls[1][0] == "PATCH" and calls[1][1].endswith("/messages/msg-1")
-    embed = calls[1][2]["embeds"][0]
+    # Released, but its website page is minutes away: held at "publishing", pointing at control.
+    held = calls[1][2]["embeds"][0]
+    assert held["title"] == "sonarr 4.0.20.3014-ls1 \u00b7 \U0001f7e1 passed, publishing" and held["color"] == AMBER
+    assert held["description"] == "live \u00b7 upstream \u00b7 publishing to the website"
+    assert held["url"] == f"https://ci.example.test:8443/builds/{REPO}/5001"
+    assert field(held, "Links").startswith("CI report (publishing\u2026)")
+    build = state.model.build(REPO, 5001)
+    assert build and build.publish_state == "pending" and build.publish_started_at
+
+    # The final form, once publish.py has seen the page live.
+    state.model.set_publication(REPO, 5001, "live", published_at="2026-10-24T12:15:00+00:00")
+    build = state.model.build(REPO, 5001)
+    assert build is not None
+    embed = build_embed(build, state.settings)
     assert embed["title"] == "sonarr 4.0.20.3014-ls1 \u00b7 \U0001f7e2 passed" and embed["color"] == GREEN
     assert embed["description"] == "live \u00b7 upstream"
     report = f"{site}/images/sonarr/builds/4.0.20.3014-ls1/"
@@ -249,6 +262,7 @@ def test_packages_compared_with_the_previous_release(client: TestClient, state: 
         "arm64": {"count": 119, "distro": "Alpine Linux v3.22", "hash": "bbbbbbbb"},
     }
     assert post_event(client, current).status_code == 202
+    state.model.set_publication(REPO, 5002, "live")  # on the website, so the line is the final one
     build = state.model.build(REPO, 5002)
     assert build is not None
     before = state.model.build_for_tag(REPO, "4.0.20.3014-ls1", with_bundle=True)

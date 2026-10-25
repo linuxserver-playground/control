@@ -210,6 +210,15 @@ MIGRATIONS: list[str] = [
     ALTER TABLE scheduler_decisions ADD COLUMN kind TEXT NOT NULL DEFAULT 'upstream';
     CREATE INDEX scheduler_decisions_branch ON scheduler_decisions (image, branch, kind, id DESC);
     """,
+    # A released build's site page appears minutes after the release (hub ingest and deploy, then the site's);
+    # its Discord message is held at "publishing" until then and an overdue one is reported (publish.py).
+    """
+    ALTER TABLE builds ADD COLUMN publish_state TEXT;
+    ALTER TABLE builds ADD COLUMN publish_started_at TEXT;
+    ALTER TABLE builds ADD COLUMN published_at TEXT;
+    ALTER TABLE builds ADD COLUMN publish_note TEXT;
+    CREATE INDEX builds_publish_state ON builds (publish_state);
+    """,
 ]
 
 

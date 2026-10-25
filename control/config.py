@@ -31,11 +31,19 @@ class Settings(BaseModel):
     discord_verbose: bool = False
     """Also post the quiet scheduler embeds (a rebuild dispatched for an unreleased head, a skip flag that
     held a branch back). The error-streak alert and the build embeds post regardless."""
+    hub_url: str = "https://linuxserver-playground.github.io/hub"
+    """The hub's Pages site; control reads a build's entry there to say where an overdue publication is stuck."""
+    publish_deadline_minutes: int = 30
+    """A released build's site page normally appears within minutes; past this it is reported on Discord."""
+    publish_expiry_hours: int = 24
+    """After this control stops watching an overdue publication and says so."""
+    publish_watch: bool = True
+    """Hold released builds' Discord messages until their website page is live (publish.py). Tests turn it off."""
     hub_repo: str = "hub"
     """Repository (in github_org) that receives a repository_dispatch `image-released` after a live release."""
     site_repo: str = "site"
     """Repository (in github_org) that receives a repository_dispatch `hub-updated` when the hub's Deploy succeeds."""
-    hub_consumers: tuple[str, ...] = ("site", "docs")
+    hub_consumers: tuple[str, ...] = ("site",)
     """Repositories (in github_org) that rebuild from hub data; each gets `hub-updated`. Env HUB_CONSUMERS (csv)."""
     oauth_client_id: str | None = None
     oauth_client_secret: str | None = None
@@ -91,6 +99,14 @@ class Settings(BaseModel):
             fields["site_url"] = site.rstrip("/")
         if verbose := env("CONTROL_DISCORD_VERBOSE"):
             fields["discord_verbose"] = verbose.strip().lower() in ("1", "true", "yes", "on")
+        if hub_url := env("HUB_URL"):
+            fields["hub_url"] = hub_url.rstrip("/")
+        if deadline := env("CONTROL_PUBLISH_DEADLINE_MINUTES"):
+            fields["publish_deadline_minutes"] = int(deadline)
+        if expiry := env("CONTROL_PUBLISH_EXPIRY_HOURS"):
+            fields["publish_expiry_hours"] = int(expiry)
+        if watch := env("CONTROL_PUBLISH_WATCH"):
+            fields["publish_watch"] = watch.strip().lower() in ("1", "true", "yes", "on")
         if hub_repo := env("HUB_REPO"):
             fields["hub_repo"] = hub_repo
         if site_repo := env("SITE_REPO"):

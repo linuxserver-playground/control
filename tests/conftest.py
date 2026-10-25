@@ -58,7 +58,11 @@ FINISHED_SEED = (*ACTIVE_SEED, "workflow_job.completed", "workflow_run.completed
 def settings(tmp_path: Path) -> Settings:
     """Each test gets its own data dir, so the db and credentials never leak between tests."""
     return Settings(
-        public_url=PUBLIC_URL, data_dir=tmp_path / "data", github_org="example-org", events_secret=EVENTS_SECRET
+        public_url=PUBLIC_URL,
+        data_dir=tmp_path / "data",
+        github_org="example-org",
+        events_secret=EVENTS_SECRET,
+        publish_watch=False,  # tests drive publish.check_once themselves
     )
 
 

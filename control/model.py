@@ -355,6 +355,13 @@ class Build(BaseModel):
     discord_message_id: str | None = None
     created_at: str
     updated_at: str
+    publish_state: str | None = None
+    """For a released live build: `pending` until its site page is live, then `live`; `overdue` past the deadline,
+    `expired` when control stopped watching. None for everything that has no site page."""
+    publish_started_at: str | None = None
+    published_at: str | None = None
+    publish_note: str | None = None
+    """Where an overdue build is stuck, as control diagnosed it."""
 
     @field_validator("platforms", mode="before")
     @classmethod
@@ -527,6 +534,8 @@ class Action(BaseModel):
 
 
 BUILD_COLUMNS = ", ".join(name for name in Build.model_fields if name != "bundle_json")
+PUBLICATION_COLUMNS = ("discord_message_id", "publish_state", "publish_started_at", "published_at", "publish_note")
+"""Columns control sets itself; a (re)delivered event never overwrites them."""
 
 
 # -- store --------------------------------------------------------------------------------------------------------
@@ -830,8 +839,36 @@ class Model:
         guard = None if build.result is not None else "builds.result IS NULL"
         with self.db.connect() as conn:
             return _upsert(
-                conn, "builds", build.model_dump(), ("repo", "run_id"), keep=("discord_message_id",), guard=guard
+                conn, "builds", build.model_dump(), ("repo", "run_id"), keep=PUBLICATION_COLUMNS, guard=guard
             )
+
+    def start_publication(self, repo: str, run_id: int, now: str) -> None:
+        """Hold a released build at `pending` until its site page is live; a replayed summary changes nothing."""
+        with self.db.connect() as conn:
+            conn.execute(
+                "UPDATE builds SET publish_state = 'pending', publish_started_at = ? "
+                "WHERE repo = ? AND run_id = ? AND publish_state IS NULL",
+                (now, repo, run_id),
+            )
+
+    def set_publication(
+        self, repo: str, run_id: int, state: str, note: str | None = None, published_at: str | None = None
+    ) -> None:
+        with self.db.connect() as conn:
+            conn.execute(
+                "UPDATE builds SET publish_state = ?, publish_note = ?, published_at = COALESCE(?, published_at) "
+                "WHERE repo = ? AND run_id = ?",
+                (state, note, published_at, repo, run_id),
+            )
+
+    def publications(self) -> list[Build]:
+        """Released builds whose site page control is still waiting for, oldest first."""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                f"SELECT {BUILD_COLUMNS} FROM builds WHERE publish_state IN ('pending', 'overdue') "
+                "ORDER BY publish_started_at"
+            ).fetchall()
+        return [Build(**dict(row)) for row in rows]
 
     def set_build_message(self, repo: str, run_id: int, message_id: str) -> None:
         with self.db.connect() as conn:

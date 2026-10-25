@@ -4,6 +4,8 @@ HMAC-SHA256 over the raw body using the per-org `CONTROL_EVENTS_SECRET`, validat
 schema, stored in `deliveries` as `control:<type>` so it replays like a webhook, then applied and
 announced on Discord. A live build gets one message, posted on `build.started` and edited into the
 summary; dev and pr builds only get the summary. The embeds link to the website, the single pane of glass.
+A released build's page reaches the website minutes later (hub, then site), so its summary says "publishing"
+and points at control until publish.py sees the page live and edits it into the final form.
 """
 
 import datetime
@@ -18,6 +20,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 
 from . import handlers
 from .config import Settings
+from .db import utcnow
 from .github import installation_client
 from .model import Build, Model, Run
 from .state import State, state_of
@@ -105,8 +108,13 @@ def two_columns(fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return laid
 
 
+def awaiting_site(build: Build) -> bool:
+    """A released build whose page is not on the website yet (or never made it)."""
+    return build.publish_state in ("pending", "overdue", "expired")
+
+
 def embed_color(build: Build) -> int:
-    if build.running:
+    if build.running or awaiting_site(build):
         return AMBER
     if build.result == "success":
         return GREEN if build.mode == "live" else GREY
@@ -116,7 +124,12 @@ def embed_color(build: Build) -> int:
 
 
 def result_word(build: Build) -> str:
-    return "running" if build.running else RESULT_WORD.get(str(build.result), str(build.result))
+    word = "running" if build.running else RESULT_WORD.get(str(build.result), str(build.result))
+    if build.publish_state == "pending":
+        return f"{word}, publishing"
+    if build.publish_state in ("overdue", "expired"):
+        return f"{word}, not on the site"
+    return word
 
 
 def mib(size: Any) -> str | None:
@@ -159,6 +172,11 @@ def site_scheduler_url(site_url: str, image: str) -> str:
 
 def control_build_url(public_url: str, build: Build) -> str:
     return f"{public_url}/builds/{build.repo}/{build.run_id}"
+
+
+def released(build: Build) -> bool:
+    """A live build that published a release, so the website will get a page for it."""
+    return build.mode == "live" and build.result == "success" and bool(build.version_tag and build.release_url)
 
 
 def is_package_check(build: Build) -> bool:
@@ -212,6 +230,12 @@ def description_of(build: Build, previous: Build | None, follow_up: Run | None) 
                 parts.append("release build follows")
     elif bundle and (changed := packages_changed(bundle, previous)):
         parts.append(changed)
+    if build.publish_state == "pending":
+        parts.append("publishing to the website")
+    elif build.publish_state == "overdue":
+        parts.append(f"\u26a0\ufe0f not on the website yet: {build.publish_note or 'no diagnosis'}")
+    elif build.publish_state == "expired":
+        parts.append(f"\u26a0\ufe0f never reached the website: {build.publish_note or 'no diagnosis'}")
     return " \u00b7 ".join(parts)
 
 
@@ -289,7 +313,10 @@ def instant(timestamp: str) -> float:
 def links_field(build: Build, public_url: str, site_url: str) -> str:
     links = []
     if build.mode == "live" and build.version_tag and build.release_url:
-        links.append(f"[CI report]({site_build_url(site_url, build.image, build.version_tag)})")
+        if build.publish_state == "pending":
+            links.append("CI report (publishing\u2026)")
+        else:
+            links.append(f"[CI report]({site_build_url(site_url, build.image, build.version_tag)})")
     if build.run_url:
         links.append(f"[run]({build.run_url})")
     if build.release_url:
@@ -311,7 +338,7 @@ def build_embed(
     page. `previous` is the previous release's build (for the packages line) and `follow_up` the release
     build a package check dispatched, when control has seen either."""
     color = embed_color(build)
-    released = build.mode == "live" and build.version_tag and build.release_url
+    released = build.mode == "live" and build.version_tag and build.release_url and not awaiting_site(build)
     url = (
         site_build_url(settings.site_url, build.image, str(build.version_tag))
         if released
@@ -424,6 +451,9 @@ async def control_event(
         return {"status": "duplicate", "type": event_type}
     applied = handlers.process(state.model, state.stream, handlers.CONTROL_EVENT_PREFIX + event_type, payload)
     build = state.model.build(str(payload["repository"]), int(payload["run_id"]))
+    if applied and build is not None and event_type == "build.summary" and released(build):
+        state.model.start_publication(build.repo, build.run_id, utcnow())
+        build = state.model.build(build.repo, build.run_id)
     if applied and build is not None:
         await announce(state, build, event_type)
         if event_type == "build.summary":
