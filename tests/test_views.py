@@ -122,7 +122,10 @@ def test_queue_page_counts_capacity(client: TestClient, state: State) -> None:
     assert page.limit == 20 and page.in_use == 1 and page.utilisation == 0.05
     assert [j.job.name for j in page.queued] == ["build (arm64)"]
     assert [j.job.name for j in page.in_progress] == ["build (amd64)"]
-    assert '1 <span class="muted">/ 20</span>' in client.get("/queue").text
+    # Each job names the branch and event of its run.
+    assert [(j.branch, j.event) for j in page.queued + page.in_progress] == [("main", "push"), ("main", "push")]
+    html = client.get("/queue").text
+    assert '1 <span class="muted">/ 20</span>' in html and "<code>main</code>" in html
 
 
 def test_pulls_page_shows_build_and_quarantine_tag(client: TestClient, state: State) -> None:

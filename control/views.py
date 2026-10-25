@@ -127,6 +127,10 @@ class JobView(BaseModel):
     elapsed_seconds: float | None
     threshold_seconds: float | None
     stuck: bool
+    branch: str | None = None
+    """The branch the job's run builds (the queue fills it in from the run; jobs carry no branch)."""
+    event: str | None = None
+    """What started the run: push, pull_request, workflow_dispatch, schedule."""
 
 
 class RunView(BaseModel):
@@ -276,14 +280,21 @@ class ManagementPage(BaseModel):
 # -- helpers -----------------------------------------------------------------------------------------------------
 
 
-def job_view(state: State, job: Job, now: datetime.datetime) -> JobView:
+def job_view(state: State, job: Job, now: datetime.datetime, run: Run | None = None) -> JobView:
     elapsed = job.duration_seconds(now)
     threshold = None
     stuck = False
     if job.status == "in_progress":
         threshold = stuck_threshold(state.model.job_durations(job.repo, job.name))
         stuck = elapsed is not None and elapsed > threshold
-    return JobView(job=job, elapsed_seconds=elapsed, threshold_seconds=threshold, stuck=stuck)
+    return JobView(
+        job=job,
+        elapsed_seconds=elapsed,
+        threshold_seconds=threshold,
+        stuck=stuck,
+        branch=run.branch if run else None,
+        event=run.event if run else None,
+    )
 
 
 def run_elapsed(run: Run, jobs: list[Job], now: datetime.datetime) -> float | None:
@@ -480,8 +491,15 @@ def run_page(state: State, run_id: int) -> RunPage:
 
 def queue_page(state: State) -> QueuePage:
     now = now_utc()
-    in_progress = [job_view(state, job, now) for job in state.model.jobs_with_status("in_progress")]
-    queued = [job_view(state, job, now) for job in state.model.jobs_with_status("queued")]
+    runs: dict[int, Run | None] = {}
+
+    def view(job: Job) -> JobView:
+        if job.run_id not in runs:
+            runs[job.run_id] = state.model.run(job.run_id)
+        return job_view(state, job, now, runs[job.run_id])
+
+    in_progress = [view(job) for job in state.model.jobs_with_status("in_progress")]
+    queued = [view(job) for job in state.model.jobs_with_status("queued")]
     limit = state.settings.concurrency_limit
     return QueuePage(
         queued=queued,

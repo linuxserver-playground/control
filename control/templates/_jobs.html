@@ -1,7 +1,7 @@
 {% macro job_rows(jobs, show_run=False) %}
   {% for v in jobs %}
     <tr>
-      {% if show_run %}<td><a href="/runs/{{ v.job.run_id }}">{{ v.job.repo.split('/')[-1] }} #{{ v.job.run_id }}</a></td>{% endif %}
+      {% if show_run %}<td><a href="/runs/{{ v.job.run_id }}">{{ v.job.repo.split('/')[-1] }} #{{ v.job.run_id }}</a>{% if v.branch %} <code>{{ v.branch }}</code>{% endif %}{% if v.event and v.event != "push" %} <span class="muted">{{ v.event }}</span>{% endif %}</td>{% endif %}
       <td>{% if v.job.html_url %}<a href="{{ v.job.html_url }}">{{ v.job.name }}</a>{% else %}{{ v.job.name }}{% endif %}</td>
       <td>
         <span class="pill {{ kind(v.job.status, v.job.conclusion) }}">{{ v.job.conclusion or v.job.status or "unknown" }}</span>
