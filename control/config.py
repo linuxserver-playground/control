@@ -25,8 +25,12 @@ class Settings(BaseModel):
     """Optional; when set, /setup only answers to ?token=<this>, so strangers cannot start the app flow."""
     app_name: str = "LinuxServer CI (playground)"
     """The GitHub App's display name; GitHub derives the slug from it."""
-    hub_url: str | None = None
-    """Public URL of the hub on GitHub Pages; live builds link their rendered results page there."""
+    site_url: str = "https://linuxserver-playground.github.io/site"
+    """Public URL of the website, the single pane of glass: Discord embeds link to its image, build and
+    scheduler pages. No trailing slash."""
+    discord_verbose: bool = False
+    """Also post the quiet scheduler embeds (a rebuild dispatched for an unreleased head, a skip flag that
+    held a branch back). The error-streak alert and the build embeds post regardless."""
     hub_repo: str = "hub"
     """Repository (in github_org) that receives a repository_dispatch `image-released` after a live release."""
     site_repo: str = "site"
@@ -83,8 +87,10 @@ class Settings(BaseModel):
             fields["setup_token"] = token
         if name := env("CONTROL_APP_NAME"):
             fields["app_name"] = name
-        if hub := env("HUB_URL"):
-            fields["hub_url"] = hub.rstrip("/")
+        if site := env("SITE_URL"):
+            fields["site_url"] = site.rstrip("/")
+        if verbose := env("CONTROL_DISCORD_VERBOSE"):
+            fields["discord_verbose"] = verbose.strip().lower() in ("1", "true", "yes", "on")
         if hub_repo := env("HUB_REPO"):
             fields["hub_repo"] = hub_repo
         if site_repo := env("SITE_REPO"):

@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 import pytest
 
-from control import scheduler
+from control import events, scheduler
 from control.__main__ import main
 from control.fleet import manifest_row
 from control.github import GitHub
@@ -31,11 +31,14 @@ class FakeDispatch:
     def __init__(self, status: int = 204) -> None:
         self.posts: list[tuple[str, dict[str, Any]]] = []
         self.status = status
-        self.discord: list[str] = []
+        self.discord: list[dict[str, Any]] = []
+        """Every embed posted to Discord."""
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         if request.url.host == "discord.com":
-            self.discord.append(json.loads(request.content)["content"])
+            body = json.loads(request.content)
+            assert "content" not in body and len(body["embeds"]) == 1
+            self.discord.extend(body["embeds"])
             return httpx.Response(200, json={"id": "1"})
         assert request.method == "POST" and request.headers["Authorization"] == "Bearer ghs_token"
         self.posts.append((request.url.path, json.loads(request.content)))
@@ -135,6 +138,7 @@ async def run_release(
 ) -> tuple[scheduler.Decision, FakeGitHub]:
     github = github or FakeGitHub()
     async with mock_client(github) as http:
+        state.discord.client = http
         sched = scheduler.Scheduler(state, GitHub(http, "ghs_token"), **kwargs)
         return await sched.check_release(manifest), github
 
@@ -351,10 +355,68 @@ async def test_errors_alert_discord_once_after_six(state: State, monkeypatch: py
         decision, github = await run_check(state, manifest, FakeResolver(error=rv.ResolveError("HTTP 500")), github)
         assert decision.outcome == "error" and decision.detail["message"] == "ResolveError: HTTP 500"
         assert state.model.consecutive_errors("sonarr", "main") == n
-    assert len(github.discord) == 1 and "failed 6 times in a row" in github.discord[0] and "sonarr" in github.discord[0]
+    assert len(github.discord) == 1
+    (alert,) = github.discord
+    assert alert["title"] == "sonarr main \u00b7 \U0001f534 upstream check failing" and alert["color"] == events.RED
+    assert "failed 6 times in a row" in alert["description"] and "`ResolveError: HTTP 500`" in alert["description"]
+    assert alert["url"] == f"{state.settings.site_url}/fleet/scheduler/?image=sonarr"
+    assert f"[control]({state.settings.public_url}/scheduler?image=sonarr)" in alert["fields"][0]["value"]
     # A success resets the streak.
     decision, _ = await run_check(state, manifest, FakeResolver("1.0"))
     assert decision.outcome == "dispatch" and state.model.consecutive_errors("sonarr", "main") == 0
+
+
+def verbose(state: State, monkeypatch: pytest.MonkeyPatch, on: bool = True) -> None:
+    monkeypatch.setattr(state.discord, "webhook_url", "https://discord.com/api/webhooks/1/t")
+    monkeypatch.setattr(state, "settings", state.settings.model_copy(update={"discord_verbose": on}))
+
+
+@pytest.mark.anyio
+async def test_quiet_embeds_only_when_verbose(state: State, monkeypatch: pytest.MonkeyPatch) -> None:
+    seed(state, "release.published")  # 4.0.20.3014-ls1
+    manifest = live(state)
+    site = f"{state.settings.site_url}/fleet/scheduler/?image=sonarr"
+    # Default: a rebuild dispatch and a skip-flag match say nothing on Discord.
+    verbose(state, monkeypatch, on=False)
+    decision, github = await run_release(state, manifest, FakeGitHub(head=HEAD), clock=lambda: NOW)
+    assert decision.outcome == "dispatch" and github.discord == []
+    state.model.set_skip("sonarr", "broken upstream", "octocat")
+    decision, dispatch = await run_check(state, manifest, FakeResolver("9.9"), clock=lambda: NOW)
+    assert decision.outcome == "skipped" and dispatch.discord == []
+
+    # Verbose: one grey embed each, pointing at the branch's scheduler page on the website. (Clearing the flag
+    # and checking once in between ends the skip streak the quiet phase started.)
+    state.model.remove_skip("sonarr")
+    decision, _ = await run_check(state, manifest, FakeResolver("9.9"), clock=lambda: NOW)
+    assert decision.detail["reason"] == "cooldown"
+    state.model.set_skip("sonarr", "broken upstream", "octocat")
+    verbose(state, monkeypatch)
+    decision, dispatch = await run_check(state, manifest, FakeResolver("9.9"), clock=lambda: NOW)
+    assert decision.outcome == "skipped" and len(dispatch.discord) == 1
+    (embed,) = dispatch.discord
+    assert embed["title"] == "sonarr main \u00b7 \u26aa skipped by flag" and embed["color"] == events.GREY
+    assert embed["description"] == "Held back by the skip flag `sonarr`: broken upstream" and embed["url"] == site
+    # The flag matches every hourly check from now on; Discord hears about it once per streak.
+    decision, dispatch = await run_check(state, manifest, FakeResolver("9.9"), clock=lambda: NOW)
+    assert decision.outcome == "skipped" and dispatch.discord == []
+    state.model.remove_skip("sonarr")
+
+    later = NOW + scheduler.COOLDOWN
+    decision, github = await run_release(state, manifest, FakeGitHub(head=HEAD), clock=lambda: later)
+    assert decision.outcome == "dispatch" and len(github.discord) == 1
+    (embed,) = github.discord
+    assert embed["title"] == "sonarr main \u00b7 \u26aa rebuild dispatched" and embed["color"] == events.GREY
+    assert embed["description"] == (
+        f"Branch head `{HEAD[:7]}` is not the released commit `{RELEASED[:7]}` (4.0.20.3014-ls1); "
+        "a rebuild was dispatched."
+    )
+    assert embed["url"] == site and embed["footer"]["text"] == "scheduler \u00b7 sonarr/main"
+    # Other outcomes stay quiet even when verbose, and a dry run never posts.
+    decision, github = await run_release(state, manifest, FakeGitHub(head=HEAD), clock=lambda: later)
+    assert decision.outcome == "skipped" and decision.detail["reason"] == "cooldown" and github.discord == []
+    much_later = later + scheduler.COOLDOWN
+    decision, github = await run_release(state, manifest, FakeGitHub(head=HEAD), clock=lambda: much_later, dry_run=True)
+    assert decision.outcome == "dispatch" and github.discord == []
 
 
 @pytest.mark.anyio

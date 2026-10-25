@@ -30,6 +30,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel
 
+from . import events
 from .fleet import discover_once, discovery_due
 from .github import GitHub, installation_client
 from .model import Manifest, Model, Release
@@ -255,7 +256,7 @@ class Scheduler:
             return last.at
         return None
 
-    async def check_upstream(self, manifest: Manifest, kind: str = KIND_UPSTREAM) -> Decision:
+    async def _check_upstream(self, manifest: Manifest, kind: str = KIND_UPSTREAM) -> Decision:
         image = manifest.image
         branch = manifest.branch
         now = self.clock()
@@ -276,8 +277,9 @@ class Scheduler:
         except rv.AssetsNotReady as exc:
             return self.record(image, branch, kind, "skipped", {"reason": "assets not ready", "message": str(exc)})
         except Exception as exc:
-            decision = self.record(image, branch, kind, "error", {"message": f"{type(exc).__name__}: {exc}"})
-            await self.alert_on_errors(image, branch, str(exc))
+            message = f"{type(exc).__name__}: {exc}"
+            decision = self.record(image, branch, kind, "error", {"message": message})
+            await self.alert_on_errors(image, branch, message)
             return decision
 
         upstream = str(resolved["upstream_clean"])
@@ -296,7 +298,7 @@ class Scheduler:
         detail["reason"] = "no release yet" if released is None else "upstream changed"
         return await self.dispatch(manifest.repo, branch, image, kind, "upstream", detail)
 
-    async def check_release(self, manifest: Manifest, kind: str = KIND_RELEASE) -> Decision:
+    async def _check_release(self, manifest: Manifest, kind: str = KIND_RELEASE) -> Decision:
         """Dispatch a `rebuild` when the branch head is not the commit its newest Release tag points at."""
         image = manifest.image
         branch = manifest.branch
@@ -342,12 +344,21 @@ class Scheduler:
         detail["reason"] = "head not released"
         return await self.dispatch(repo, branch, image, kind, "rebuild", detail)
 
-    async def check_packages(self, manifest: Manifest, kind: str = KIND_PACKAGES) -> Decision:
+    async def _check_packages(self, manifest: Manifest, kind: str = KIND_PACKAGES) -> Decision:
         image = manifest.image
         if blocked := self.blocked(manifest, image):
             return self.record(image, manifest.branch, kind, "skipped", blocked)
         why = {"reason": "weekly package check"}
         return await self.dispatch(manifest.repo, manifest.branch, image, kind, "packages", why)
+
+    async def check_upstream(self, manifest: Manifest, kind: str = KIND_UPSTREAM) -> Decision:
+        return await self.announce(await self._check_upstream(manifest, kind))
+
+    async def check_release(self, manifest: Manifest, kind: str = KIND_RELEASE) -> Decision:
+        return await self.announce(await self._check_release(manifest, kind))
+
+    async def check_packages(self, manifest: Manifest, kind: str = KIND_PACKAGES) -> Decision:
+        return await self.announce(await self._check_packages(manifest, kind))
 
     async def dispatch(
         self, repo: str, branch: str, image: str, kind: str, reason: str, detail: dict[str, Any]
@@ -388,13 +399,72 @@ class Scheduler:
             return build.upstream_clean, build.version_tag
         return None, None
 
+    # -- Discord --------------------------------------------------------------------------------------------------
+
+    def alert_embed(self, image: str, branch: str, headline: str, description: str, color: int) -> dict[str, Any]:
+        """A scheduler embed: `<image> <branch> · <dot> <headline>` linking to the branch's scheduler page on
+        the website, with the control page as the secondary link."""
+        settings = self.state.settings
+        links = f"[scheduler]({events.site_scheduler_url(settings.site_url, image)}) \u00b7 "
+        links += f"[control]({settings.public_url}/scheduler?image={image})"
+        return events.within_limits(
+            {
+                "author": {"name": image, "url": events.site_image_url(settings.site_url, image)},
+                "title": f"{image} {branch} \u00b7 {events.DOT[color]} {headline}",
+                "url": events.site_scheduler_url(settings.site_url, image),
+                "color": color,
+                "description": description,
+                "fields": [{"name": "Links", "value": links, "inline": False}],
+                "footer": {"text": f"scheduler \u00b7 {image}/{branch}"},
+                "timestamp": self.clock().isoformat(timespec="seconds"),
+            }
+        )
+
     async def alert_on_errors(self, image: str, branch: str, message: str) -> None:
+        """One red embed when a branch's upstream check has failed ERROR_ALERT_AFTER times in a row."""
         if self.dry_run or self.model.consecutive_errors(image, branch) != ERROR_ALERT_AFTER:
             return
-        await self.state.discord.post(
-            f"scheduler: the upstream check for **{image}** `{branch}` failed {ERROR_ALERT_AFTER} times in a row: "
-            f"{message}\n{self.state.settings.public_url}/scheduler?image={image}&outcome=error"
+        embed = self.alert_embed(
+            image,
+            branch,
+            "upstream check failing",
+            f"The upstream resolver failed {ERROR_ALERT_AFTER} times in a row:\n`{message}`",
+            events.RED,
         )
+        await self.state.discord.post(embeds=[embed])
+
+    async def announce(self, decision: Decision) -> Decision:
+        """The quiet embeds, grey and only with CONTROL_DISCORD_VERBOSE: a rebuild dispatched because a branch
+        head was never released, and a skip flag holding a branch back (once per streak: the flag matches
+        every hourly check until someone clears it). Never raises."""
+        if self.dry_run or not self.state.settings.discord_verbose or not self.state.discord.configured:
+            return decision
+        detail = decision.detail
+        embed = None
+        if decision.kind == KIND_RELEASE and decision.outcome == "dispatch":
+            head, released = str(detail.get("head") or "")[:7], str(detail.get("released") or "")[:7]
+            text = f"Branch head `{head}` is not the released commit `{released}` ({detail.get('released_tag')}); "
+            text += "a rebuild was dispatched."
+            embed = self.alert_embed(decision.image, decision.branch, "rebuild dispatched", text, events.GREY)
+        elif decision.outcome == "skipped" and detail.get("reason") == "skip":
+            if self.skip_already_announced(decision):
+                return decision
+            text = f"Held back by the skip flag `{detail.get('scope')}`"
+            text += f": {detail['note']}" if detail.get("note") else "."
+            if detail.get("upstream"):
+                text += f"\nUpstream resolved to {detail['upstream']}, released {detail.get('released') or 'nothing'}."
+            embed = self.alert_embed(decision.image, decision.branch, "skipped by flag", text, events.GREY)
+        if embed is not None:
+            await self.state.discord.post(embeds=[embed])
+        return decision
+
+    def skip_already_announced(self, decision: Decision) -> bool:
+        """Whether the branch's previous decision of this kind was the same skip-flag match."""
+        for previous in self.model.recent_decisions(50, decision.image, None, decision.kind):
+            if previous.branch != decision.branch or previous.id == decision.id:
+                continue
+            return previous.outcome == "skipped" and previous.info.get("reason") == "skip"
+        return False
 
     # -- the loop -------------------------------------------------------------------------------------------------
 

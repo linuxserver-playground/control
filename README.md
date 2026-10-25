@@ -46,13 +46,14 @@ docker run --rm -p 8080:8080 -e PUID=1000 -e PGID=1000 -e CONTROL_PUBLIC_URL=htt
 | `CONTROL_DATA_DIR`    | `/config`                     | Holds `control.db` and `github_app.json`. **Secrets**: the app's private key and webhook secret live here. |
 | `GITHUB_ORG`          | `linuxserver-playground`      | The organisation the GitHub App is created in and installed on.                      |
 | `CONTROL_APP_NAME`    | `LinuxServer CI (playground)` | The GitHub App's display name.                                                       |
-| `HUB_URL`             | unset                       | Public URL of the hub on GitHub Pages; live build embeds and pages link their rendered results there. |
+| `SITE_URL`            | `https://linuxserver-playground.github.io/site` | Public URL of the website, the single pane of glass: Discord embeds link to its image pages (`/images/<image>/`), build pages (`/images/<image>/builds/<tag>/`) and scheduler page (`/fleet/scheduler/?image=<image>`). No trailing slash. |
 | `HUB_REPO`            | `hub`                       | Repository in the org that gets a `repository_dispatch` `image-released` after every successful live build, so the hub ingests the release right away. |
 | `SITE_REPO`           | `site`                      | Repository in the org that gets a `repository_dispatch` `hub-updated` whenever the hub's Deploy workflow succeeds, so the website refreshes from the hub. |
 | `HUB_CONSUMERS`       | `site,docs`                 | Every repository that rebuilds from hub data; each gets `hub-updated` after a successful hub Deploy (the site repo is always included). |
 | `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET` | unset | A classic OAuth App (callback `${CONTROL_PUBLIC_URL}/login/callback`) used only for sign-in: its consent screen lists `read:user` and `read:org`, and membership is read with the user's token. Without it the GitHub App's OAuth client is used, which needs the App's Members permission. |
 | `CONTROL_SETUP_TOKEN` | unset                         | When set, `/setup` requires `?token=<value>`. Set it on any public deployment.       |
 | `DISCORD_WEBHOOK_URL` | unset                         | Discord webhook for notifications; without it they are logged and dropped.           |
+| `CONTROL_DISCORD_VERBOSE` | `false`                   | Also post the quiet scheduler embeds (grey): a `rebuild` dispatched for a branch head that was never released, and a skip flag holding a branch back. Build embeds and the error-streak alert post regardless. |
 | `CONTROL_EVENTS_SECRET` | unset                       | Shared with the `workflows` repo; signs the events POSTed to `/events`. Unset means `/events` answers 503. |
 | `CONTROL_BACKFILL_ON_START` | `false`                 | `true` runs one GitHub API backfill in the background after boot (once the app is configured and installed). |
 | `CONTROL_CONCURRENCY_LIMIT` | `20`                    | GitHub's concurrent job limit for the org; the queue page measures in-progress jobs against it. |
@@ -133,7 +134,7 @@ of the branch is the hint. Both sides are compared as sanitised strings (§3). O
 | `unchanged` | Released equals upstream.                                                                              |
 | `dispatch`  | They differ, or nothing was released yet: `workflow_dispatch` of `build.yml` on the branch with `reason: upstream`. |
 | `skipped`   | A skip flag matches; a run of the branch is in progress; a dispatch for the branch happened in the last 2 hours (cooldown, whatever triggered it); `upstream.version.type` is `os` (those build on the package check); the type is `command` or `deb_repo` (arbitrary shell, or docker, which control will not run: they build on the package check too); or `require_assets` are not published yet. |
-| `error`     | The resolver or the dispatch failed. After 6 errors in a row for one branch Discord gets one alert; a success resets the streak. |
+| `error`     | The resolver or the dispatch failed. After 6 errors in a row for one branch Discord gets one red embed naming the image, branch and error, linking `${SITE_URL}/fleet/scheduler/?image=<image>`; a success resets the streak. |
 
 **Release check**: in the same hourly pass, after the upstream check, every live branch is checked for a
 head that was never released. A package-check run commits `Update package versions` and then dispatches the
@@ -252,8 +253,29 @@ its hash, so a retried POST is a no-op) and replays with the webhooks.
   embed is posted and its message id kept on the row.
 - `build.summary` fills the row (result, failed job, version, upstream, platforms, test outcome, release or
   artifact URL, the whole bundle as `bundle_json`) and edits the started message into the summary, or posts
-  one for dev/pr builds. Green for a live success, red for any failure, grey for a dev/pr success; title
-  `<image> <tag>`, fields mode, reason, result, platforms, test, links (run, release, artifact, control).
+  one for dev/pr builds.
+
+### Discord embeds
+
+One embed per build message, the same shape while running and once finished, so the edit reads well. The
+website is the single pane of glass, so the embed links there: a released live build's title opens its build
+page `${SITE_URL}/images/<image>/builds/<tag>/` (also the "CI report" link) and the image name above the title
+opens `${SITE_URL}/images/<image>/`; dev, pr and package-check runs open the control run page instead, and a
+pr build links its pull request.
+
+- Title `<image> <tag> · <dot> <result>`, the dot in the embed's colour: green `passed` for a live success,
+  grey `passed` for a dev/pr success, red `failed`, grey `skipped`/`cancelled`, amber `running`.
+- Description, one line: `mode · reason`, then `PR #n`, the failed job, and for a released build whose bundle
+  names `previous.tag` a build control holds: `packages changed (amd64 +3)` (table hash per arch against the
+  previous release; the delta is in package count) or `packages unchanged`. A package check (`reason:
+  packages`, nothing released) says `packages unchanged, nothing released` (grey, result `skipped`) or `new
+  package table committed` and links the release build it dispatched once that run's webhook has arrived.
+- Fields in two columns: **Platforms** (per arch: short digest, compressed size in MiB, tests passed/failed,
+  or the arch's own failure), **Upstream** (the version linked to `version.source_url`, with the source
+  type), **Timing** (build time per arch, `started → finished (elapsed)`), **Links** (CI report, run, release,
+  artifact, PR, control). Footer `<repository> · run <id>`. No thumbnail.
+- Every part is clipped to Discord's limits (title 256, description 4096, field value 1024, 25 fields, 6000
+  in all) with an ellipsis, so a long error can never bounce the message.
 
 ## Backfill
 

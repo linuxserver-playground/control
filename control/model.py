@@ -646,16 +646,26 @@ class Model:
             ).fetchone()
         return Run(**dict(row)) if row else None
 
-    def run_after(self, repo: str, branch: str, event: str, after: str, within_seconds: int = 900) -> Run | None:
-        """The first run of `event` on a branch created after `after`: how a dispatch decision finds its run."""
+    def run_after(
+        self,
+        repo: str,
+        branch: str,
+        event: str,
+        after: str,
+        within_seconds: int = 900,
+        exclude_run_id: int | None = None,
+    ) -> Run | None:
+        """The first run of `event` on a branch created after `after`: how a dispatch decision finds its run,
+        and how a package check finds the release build it dispatched (`exclude_run_id` keeps it from
+        matching itself)."""
         limit = (datetime.datetime.fromisoformat(after) + datetime.timedelta(seconds=within_seconds)).isoformat(
             timespec="seconds"
         )
         with self.db.connect() as conn:
             row = conn.execute(
                 "SELECT * FROM runs WHERE repo = ? AND branch = ? AND event = ? AND created_at >= ? "
-                "AND created_at <= ? ORDER BY created_at LIMIT 1",
-                (repo, branch, event, after, limit),
+                "AND created_at <= ? AND id IS NOT ? ORDER BY created_at LIMIT 1",
+                (repo, branch, event, after, limit, exclude_run_id),
             ).fetchone()
         return Run(**dict(row)) if row else None
 
@@ -838,11 +848,13 @@ class Model:
             ).fetchall()
         return [Build(**dict(row)) for row in rows]
 
-    def build_for_tag(self, repo: str, tag: str) -> Build | None:
-        """The live build that produced a release tag (the releases feed shows its reason and upstream)."""
+    def build_for_tag(self, repo: str, tag: str, with_bundle: bool = False) -> Build | None:
+        """The live build that produced a release tag (the releases feed shows its reason and upstream; a
+        summary's `previous.tag` names it when its packages are compared, bundle included)."""
+        columns = "*" if with_bundle else BUILD_COLUMNS
         with self.db.connect() as conn:
             row = conn.execute(
-                f"SELECT {BUILD_COLUMNS} FROM builds WHERE repo = ? AND version_tag = ? AND mode = 'live' "
+                f"SELECT {columns} FROM builds WHERE repo = ? AND version_tag = ? AND mode = 'live' "
                 "ORDER BY received_at DESC, rowid DESC LIMIT 1",
                 (repo, tag),
             ).fetchone()
