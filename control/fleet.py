@@ -27,6 +27,9 @@ log = logging.getLogger(__name__)
 
 LAST_DISCOVERY = "last_discovery"
 """kv key: JSON summary of the last fleet discovery (started, finished, counts, error), shown on /status."""
+HELPER_REPOS = "helper_repos"
+"""kv key: JSON list of the `docker-*` repos the last discovery found without an image.yml on their default
+branch (docker-mods, say). They are not images: the fleet board lists them apart and never links an image page."""
 REFRESH_INTERVAL = datetime.timedelta(minutes=30)
 MAX_CANDIDATE_BRANCHES = 20
 """How many non-default branches we are willing to read image.yml from when hunting for a tag's branch."""
@@ -99,6 +102,7 @@ class Discovery:
         self.model = model
         self.stream = stream
         self.counts: dict[str, int] = {"repos": 0, "branches": 0, "fetched": 0, "unchanged": 0, "errors": 0}
+        self.helpers: list[str] = []
 
     async def run(self) -> dict[str, int]:
         repos = await self.github.paginate(
@@ -124,15 +128,17 @@ class Discovery:
         for known in self.model.repos(images_only=True):
             if known.full_name not in seen:
                 self.model.delete_manifests(known.full_name)
-        log.info("fleet discovery: %s", self.counts)
+        self.model.db.set(HELPER_REPOS, json.dumps(sorted(self.helpers)))
+        log.info("fleet discovery: %s, helper repos: %s", self.counts, ", ".join(self.helpers) or "none")
         return dict(self.counts)
 
     async def repo(self, repo: Repo) -> list[str]:
         """Store the live branches of one repo and return their names."""
         default = await self.fetch(repo.full_name, repo.default_branch)
         if default is None:
-            log.warning("%s has no image.yml on %s", repo.full_name, repo.default_branch)
+            log.info("%s has no image.yml on %s: a helper repo, not an image", repo.full_name, repo.default_branch)
             self.model.delete_manifests(repo.full_name)
+            self.helpers.append(repo.full_name)
             return []
         sha, data = default
         self.store(repo.full_name, repo.default_branch, sha, data)
@@ -228,6 +234,13 @@ async def discover_once(state: State) -> dict[str, Any]:
     record["finished"] = utcnow()
     state.db.set(LAST_DISCOVERY, json.dumps(record))
     return record
+
+
+def helper_repos(state: State) -> set[str]:
+    """The helper repos of the last discovery; a repo that has gained live branches since is an image again."""
+    raw = state.db.get(HELPER_REPOS)
+    names = json.loads(raw) if raw else []
+    return {str(n) for n in names if not state.model.manifests(str(n))} if isinstance(names, list) else set()
 
 
 def last_discovery(state: State) -> dict[str, Any] | None:

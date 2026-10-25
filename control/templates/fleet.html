@@ -37,4 +37,22 @@
 {% else %}
 <p class="note">No image repositories known yet. They appear as webhooks arrive, or after <code>python -m control backfill</code>.</p>
 {% endif %}
+{% if page.helpers %}
+<h2>Helper repositories</h2>
+<p class="muted">Repositories named <code>docker-*</code> that are not images (no image.yml on their default branch). Each branch's newest build.</p>
+<table>
+  <thead><tr><th>Repository</th><th>Branches built</th><th>Passing</th><th>Running</th><th>Failing</th></tr></thead>
+  <tbody>
+  {% for h in page.helpers %}
+    <tr>
+      <td><a href="https://github.com/{{ h.repo }}">{{ h.name }}</a></td>
+      <td>{{ h.branches }}</td>
+      <td>{{ h.success }}</td>
+      <td>{{ h.running }}</td>
+      <td>{% for b in h.failing %}<code>{{ b }}</code> {% else %}<span class="muted">none</span>{% endfor %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
 {% endblock %}

@@ -671,6 +671,17 @@ class Model:
             ).fetchone()
         return Run(**dict(row)) if row else None
 
+    def latest_branch_runs(self, repo: str) -> list[Run]:
+        """The newest push or dispatch run of every branch of a repo (pull request runs are left out)."""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM runs r WHERE repo = ? AND event IN ('push', 'workflow_dispatch') AND id = ("
+                "SELECT id FROM runs WHERE repo = r.repo AND branch = r.branch "
+                "AND event IN ('push', 'workflow_dispatch') ORDER BY created_at DESC, id DESC LIMIT 1) ORDER BY branch",
+                (repo,),
+            ).fetchall()
+        return [Run(**dict(row)) for row in rows]
+
     def run_after(
         self,
         repo: str,

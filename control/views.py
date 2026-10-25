@@ -18,7 +18,7 @@ from . import auth, badge
 from . import scheduler as sched
 from .backfill import last_backfill
 from .db import Delivery
-from .fleet import last_discovery
+from .fleet import helper_repos, last_discovery
 from .manage import REASONS
 from .model import (
     Action,
@@ -99,9 +99,26 @@ class FleetRow(BaseModel):
     """Skip-flag scopes that hold the branch back, plus `archived`."""
 
 
+class HelperRepo(BaseModel):
+    """A `docker-*` repo that is not an image (no image.yml on its default branch), such as docker-mods, with the
+    state of each branch's newest build."""
+
+    repo: str
+    name: str
+    archived: bool
+    branches: int
+    """Branches with a push or dispatch build (skipped runs, like a guarded default branch's, do not count)."""
+    success: int
+    running: int
+    failing: list[str]
+    """Branches whose newest build failed, timed out or could not start."""
+    last_run_at: str | None
+
+
 class FleetPage(BaseModel):
     rows: list[FleetRow]
     images: int
+    helpers: list[HelperRepo] = []
     generated_at: str
 
 
@@ -370,10 +387,28 @@ def fleet_rows(state: State, repos: list[Repo]) -> list[FleetRow]:
     return rows
 
 
+def helper_row(state: State, repo: Repo) -> HelperRepo:
+    runs = [r for r in state.model.latest_branch_runs(repo.full_name) if r.conclusion != "skipped"]
+    return HelperRepo(
+        repo=repo.full_name,
+        name=repo.name,
+        archived=repo.archived,
+        branches=len(runs),
+        success=sum(r.conclusion == "success" for r in runs),
+        running=sum(r.status != "completed" for r in runs),
+        failing=sorted(r.branch or "" for r in runs if r.conclusion in ("failure", "timed_out", "startup_failure")),
+        last_run_at=max((r.created_at for r in runs), default=None),
+    )
+
+
 def fleet_page(state: State) -> FleetPage:
-    repos = state.model.repos(images_only=True)
+    helpers = helper_repos(state)
+    repos = [r for r in state.model.repos(images_only=True) if r.full_name not in helpers]
     return FleetPage(
-        rows=fleet_rows(state, repos), images=len(repos), generated_at=now_utc().isoformat(timespec="seconds")
+        rows=fleet_rows(state, repos),
+        images=len(repos),
+        helpers=[helper_row(state, r) for r in state.model.repos(images_only=True) if r.full_name in helpers],
+        generated_at=now_utc().isoformat(timespec="seconds"),
     )
 
 
@@ -567,7 +602,8 @@ def status_page(state: State) -> StatusPage:
 
 def management_page(state: State, user: auth.User | None) -> ManagementPage:
     manifests = state.model.manifests()
-    repos = sorted({m.repo for m in manifests} | {r.full_name for r in state.model.repos(images_only=True)})
+    helpers = helper_repos(state)
+    repos = sorted({m.repo for m in manifests} | {r.full_name for r in state.model.repos(images_only=True)} - helpers)
     return ManagementPage(
         member=user.login if user and user.member else None,
         signed_in=user.login if user else None,

@@ -6,10 +6,10 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from control import fleet
+from control import fleet, views
 from control.github import GitHub
 from control.github_app import AppCredentials
-from control.model import Repo
+from control.model import Repo, Run
 from control.state import State
 
 from .conftest import REPO, deliver, fixture, install, mock_client, token_response
@@ -203,3 +203,48 @@ def test_push_webhook_schedules_a_refresh(
     assert deliver(client, configured.webhook_secret, "push", payload, delivery_id="d-2").status_code == 202
     time.sleep(0.05)
     assert len(github.requests) == before
+
+
+class FakeOrgWithHelper(FakeRepo):
+    """The image repo plus docker-mods, a docker-* repo without an image.yml."""
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/orgs/example-org/repos":
+            mods = {**fixture("api.repos")[0], "name": "docker-mods", "full_name": "example-org/docker-mods"}
+            return httpx.Response(200, json=[*fixture("api.repos"), mods])
+        return super().__call__(request)
+
+
+@pytest.mark.anyio
+async def test_helper_repos_are_listed_apart_from_images(state: State) -> None:
+    async with mock_client(FakeOrgWithHelper()) as http:
+        counts = await fleet.Discovery(GitHub(http, "ghs_token"), "example-org", state.model, state.stream).run()
+    assert counts["errors"] == 0 and fleet.helper_repos(state) == {"example-org/docker-mods"}
+    for run_id, branch, event, status, conclusion in [
+        (1, "master", "push", "completed", "skipped"),  # the guarded default branch
+        (2, "universal-git", "push", "completed", "failure"),
+        (3, "universal-git", "push", "completed", "success"),  # the newest run of the branch wins
+        (4, "swag-dbip", "push", "completed", "failure"),
+        (5, "swag-dbip", "pull_request", "completed", "success"),  # pull request runs do not count
+        (6, "universal-tshoot", "workflow_dispatch", "in_progress", None),
+    ]:
+        state.model.upsert_run(
+            Run.from_github(
+                "example-org/docker-mods",
+                {
+                    "id": run_id,
+                    "name": "Build",
+                    "event": event,
+                    "head_branch": branch,
+                    "status": status,
+                    "conclusion": conclusion,
+                    "created_at": f"2026-10-25T10:0{run_id}:00Z",
+                },
+            )
+        )
+    page = views.fleet_page(state)
+    assert {r.repo for r in page.rows} == {REPO} and page.images == 1
+    [helper] = page.helpers
+    assert (helper.name, helper.branches, helper.success, helper.running) == ("docker-mods", 3, 1, 1)
+    assert helper.failing == ["swag-dbip"] and helper.last_run_at == "2026-10-25T10:06:00+00:00"
+    assert "example-org/docker-mods" not in views.management_page(state, None).repos
