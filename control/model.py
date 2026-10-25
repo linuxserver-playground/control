@@ -76,6 +76,22 @@ class Repo(BaseModel):
         )
 
 
+IGNORED_WORKFLOW_FILES = frozenset({".github/workflows/pr-report.yml"})
+"""Workflows of image repositories that are not builds. The trusted PR report runs on the default branch
+(workflow_run, pull_request_target), so storing its runs would make them look like that branch's latest build."""
+IGNORED_WORKFLOW_NAMES = frozenset({"PR report"})
+
+
+def is_build_run(data: dict[str, Any]) -> bool:
+    """False for a run of an ignored workflow, by file (`path`, which may carry `@ref`) or by name."""
+    path = str(data.get("path") or "").split("@", 1)[0]
+    return path not in IGNORED_WORKFLOW_FILES and data.get("name") not in IGNORED_WORKFLOW_NAMES
+
+
+def is_build_job(data: dict[str, Any]) -> bool:
+    return data.get("workflow_name") not in IGNORED_WORKFLOW_NAMES
+
+
 class Run(BaseModel):
     id: int
     repo: str

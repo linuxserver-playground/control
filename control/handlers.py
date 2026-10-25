@@ -9,7 +9,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from .model import Build, Issue, Job, Model, PullRequest, Release, Repo, Run
+from .model import Build, Issue, Job, Model, PullRequest, Release, Repo, Run, is_build_job, is_build_run
 from .stream import Broadcaster
 
 log = logging.getLogger(__name__)
@@ -60,12 +60,16 @@ def workflow_run(model: Model, stream: Broadcaster, payload: dict[str, Any]) -> 
     workflow = payload.get("workflow")
     if isinstance(workflow, dict) and workflow.get("name") and not data.get("name"):
         data = {**data, "name": workflow["name"]}
+    if not is_build_run(data):
+        return
     run = Run.from_github(_repo_name(payload), data)
     if model.upsert_run(run):
         stream.publish("runs", run.id)
 
 
 def workflow_job(model: Model, stream: Broadcaster, payload: dict[str, Any]) -> None:
+    if not is_build_job(payload["workflow_job"]):
+        return
     job = Job.from_github(_repo_name(payload), payload["workflow_job"])
     if model.upsert_job(job):
         stream.publish("jobs", job.id)

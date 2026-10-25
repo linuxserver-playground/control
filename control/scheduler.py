@@ -49,7 +49,9 @@ COOLDOWN = datetime.timedelta(hours=2)
 SETTLE = datetime.timedelta(minutes=15)
 """The release check leaves a branch alone while its last run is younger than this: the Release webhook or
 the build's own follow-up commit may still be on the way."""
-GENERATED_FILES = frozenset({"README.md", "AGENTS.md", "LICENSE", ".github/workflows/build.yml"})
+GENERATED_FILES = frozenset(
+    {"README.md", "AGENTS.md", "LICENSE", ".github/workflows/build.yml", ".github/workflows/pr-report.yml"}
+)
 """Files the build regenerates and commits with `[skip ci]`; a head that differs from the released commit
 only in these needs no release."""
 ERROR_ALERT_AFTER = 6

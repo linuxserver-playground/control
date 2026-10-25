@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 
 from .github_app import API
-from .model import Issue, Job, Model, PullRequest, Release, Repo, Run
+from .model import Issue, Job, Model, PullRequest, Release, Repo, Run, is_build_run
 from .state import LAST_BACKFILL, State
 from .stream import Broadcaster
 
@@ -116,6 +116,8 @@ class Backfill:
             f"{API}/repos/{repo}/actions/runs", {"per_page": RUNS_PER_REPO}, key="workflow_runs", limit=RUNS_PER_REPO
         )
         for data in runs:
+            if not is_build_run(data):
+                continue
             run = Run.from_github(repo, data)
             existing = self.model.run(run.id)
             self.model.upsert_run(run)

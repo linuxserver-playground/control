@@ -203,3 +203,22 @@ def test_webhook_intake_applies_handlers(client: TestClient, configured: AppCred
     run = state.model.run(5001)
     assert run and run.status == "queued"
     assert state.model.repo(REPO) is not None
+
+
+def test_pr_report_runs_and_jobs_are_not_builds(state: State) -> None:
+    """The trusted PR report runs on the default branch; storing it would make it that branch's latest build."""
+    run = fixture("workflow_run.completed")
+    run["workflow_run"] = {
+        **run["workflow_run"],
+        "id": 5999,
+        "name": "PR report",
+        "path": ".github/workflows/pr-report.yml",
+    }
+    handlers.process(state.model, state.stream, "workflow_run", run)
+    assert state.model.run(5999) is None
+    job = fixture("workflow_job.queued")
+    job["workflow_job"] = {**job["workflow_job"], "id": 9999, "workflow_name": "PR report"}
+    handlers.process(state.model, state.stream, "workflow_job", job)
+    assert state.model.job(9999) is None
+    seed(state, "workflow_run.completed")
+    assert state.model.run(5001) is not None
