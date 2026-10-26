@@ -46,6 +46,11 @@ KIND_MANUAL = "manual"
 KINDS = (KIND_UPSTREAM, KIND_RELEASE, KIND_PACKAGES, KIND_MANUAL)
 COOLDOWN = datetime.timedelta(hours=2)
 """No second dispatch for a branch within this long of the last one, whatever triggered it."""
+INITIAL_RETRY = datetime.timedelta(hours=24)
+"""A branch with no Release whose build of its head failed or was cancelled is tried again after this long, not
+at every cooldown: an image broken upstream, or one a maintainer cancelled, would otherwise rebuild every two
+hours. A push or a member dispatch still builds at once."""
+FAILED_CONCLUSIONS = frozenset({"failure", "cancelled", "timed_out", "startup_failure"})
 SETTLE = datetime.timedelta(minutes=15)
 """The release check leaves a branch alone while its last run is younger than this: the Release webhook or
 the build's own follow-up commit may still be on the way."""
@@ -252,6 +257,28 @@ class Scheduler:
             return {"reason": "run in progress", "run_url": run.html_url, "run_id": run.id}
         return None
 
+    async def failed_initial_build(self, repo: str, branch: str, now: datetime.datetime) -> dict[str, Any] | None:
+        """Why not to dispatch an initial build yet: the newest run built the current head and did not pass."""
+        last = self.model.latest_run_for_branch(repo, branch)
+        if not last or last.status != "completed" or last.conclusion not in FAILED_CONCLUSIONS:
+            return None
+        if now - datetime.datetime.fromisoformat(last.created_at) >= INITIAL_RETRY:
+            return None
+        if self.github is not None:
+            try:
+                head = await self.github.get_json(f"/repos/{repo}/branches/{branch}")
+            except httpx.HTTPError:
+                head = None
+            commit = head.get("commit") if isinstance(head, dict) else None
+            if isinstance(commit, dict) and commit.get("sha") != last.head_sha:
+                return None  # a newer commit that got no run (GitHub skips some first pushes)
+        return {
+            "reason": "initial build did not pass, retried daily",
+            "conclusion": last.conclusion,
+            "run_url": last.html_url,
+            "run_id": last.id,
+        }
+
     def in_cooldown(self, image: str, branch: str, now: datetime.datetime) -> str | None:
         last = self.model.last_decision(image, branch, outcome="dispatch")
         if last and now - datetime.datetime.fromisoformat(last.at) < COOLDOWN:
@@ -297,6 +324,8 @@ class Scheduler:
             return self.record(image, branch, kind, "skipped", detail)
         if released == upstream:
             return self.record(image, branch, kind, "unchanged", detail)
+        if released is None and (failed := await self.failed_initial_build(manifest.repo, branch, now)):
+            return self.record(image, branch, kind, "skipped", {**detail, **failed})
         detail["reason"] = "no release yet" if released is None else "upstream changed"
         return await self.dispatch(manifest.repo, branch, image, kind, "upstream", detail)
 
@@ -318,7 +347,10 @@ class Scheduler:
         if tag is None:
             # A live branch with no Release at all: nothing to compare against, so build it. This covers a
             # push that produced no run (GitHub skips some first pushes) and os images, whose upstream
-            # check never dispatches. The cooldown above keeps this to one dispatch per two hours.
+            # check never dispatches. The cooldown above keeps this to one dispatch per two hours, and a build of
+            # the head that did not pass to one a day.
+            if failed := await self.failed_initial_build(repo, branch, now):
+                return self.record(image, branch, kind, "skipped", failed)
             return await self.dispatch(
                 repo, branch, image, kind, "rebuild", {"reason": "no release yet, initial build"}
             )

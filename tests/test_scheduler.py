@@ -498,6 +498,27 @@ async def test_release_check_builds_a_branch_without_any_release(state: State) -
 
 
 @pytest.mark.anyio
+async def test_a_failed_initial_build_is_retried_daily_not_every_cooldown(state: State) -> None:
+    """An image broken upstream, or one a maintainer cancelled, is not rebuilt every two hours."""
+    from control import handlers
+
+    manifest = live(state)
+    failed = fixture("workflow_run.completed")
+    failed["workflow_run"].update(conclusion="failure", head_sha=HEAD)  # run 5001, created 12:00
+    handlers.process(state.model, state.stream, "workflow_run", failed)
+    decision, github = await run_release(state, manifest, FakeGitHub(head=HEAD), clock=lambda: NOW)
+    assert decision.outcome == "skipped" and decision.detail["reason"] == "initial build did not pass, retried daily"
+    assert decision.detail["run_id"] == 5001 and github.posts == []
+    # A newer commit that got no run is built at once.
+    decision, _ = await run_release(state, manifest, FakeGitHub(head="c" * 40), clock=lambda: NOW)
+    assert decision.outcome == "dispatch"
+    # The same head a day after the failed build is tried again.
+    later = NOW + datetime.timedelta(hours=24)
+    decision, _ = await run_release(state, manifest, FakeGitHub(head=HEAD), clock=lambda: later)
+    assert decision.outcome == "dispatch" and decision.detail["reason"] == "no release yet, initial build"
+
+
+@pytest.mark.anyio
 async def test_release_check_waits_and_skips(state: State) -> None:
     manifest = live(state)
     seed(state, "release.published")
