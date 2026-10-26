@@ -125,3 +125,26 @@ def test_replayed_summary_keeps_the_publication_state(client: Any, state: State,
     assert post_event(client, replay).status_code == 202
     build = state.model.build(REPO, 5001)
     assert build and build.publish_state == "live" and build.published_at == at(5)
+
+
+@pytest.mark.anyio
+async def test_releases_stuck_in_the_same_check_share_one_post(client: Any, state: State, world: World) -> None:
+    second = fixture("control.build.summary")
+    second["run_id"] = 5002
+    second["bundle"]["version"]["tag"] = "4.0.20.3014-ls2"
+    assert post_event(client, second).status_code == 202
+    state.model.set_publication(REPO, 5002, "pending")
+    with state.db.connect() as conn:
+        conn.execute("UPDATE builds SET publish_started_at = ? WHERE run_id = 5002", (RELEASED_AT,))
+    await publish.check_once(state, now=lambda: at(31))
+    posts = world.posts()
+    assert len(posts) == 1 and posts[0].startswith("⚠️ 2 releases, 31 min old, still have no website page: the hub")
+    assert "- **sonarr 4.0.20.3014-ls1**" in posts[0] and "- **sonarr 4.0.20.3014-ls2**" in posts[0]
+
+
+def test_a_long_group_is_split_at_the_discord_limit() -> None:
+    group = [publish.Alert(f"image-{n:03} 1.0.{n}-ls1", 30 + n % 5, "") for n in range(120)]
+    posts = publish.grouped("live", "", group, 24)
+    assert len(posts) > 1 and all(len(p) <= publish.DISCORD_LIMIT for p in posts)
+    assert all(p.startswith("✅ 120 releases reached the website after 30 to 34 min:") for p in posts)
+    assert sum(p.count("\n- **") for p in posts) == 120

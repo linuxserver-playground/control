@@ -8,9 +8,10 @@ page and, once it answers, edits the message into its final form.
 
 Nothing is left dangling: past `publish_deadline_minutes` the message says the page is overdue and a separate
 post (which notifies, where an edit does not) says where it is stuck, from the hub's own data: the hub has not
-ingested the release, or the hub has it and the site has not published it. Control keeps watching; a page that
-turns up later clears the warning with a short follow-up, and after `publish_expiry_hours` control stops and says
-so once more.
+ingested the release, or the hub has it and the site has not published it. Releases that cross the deadline in the
+same check for the same reason share one post, since a burst of them waits on the same deploy. Control keeps
+watching; a page that turns up later clears the warning with a short follow-up, and after `publish_expiry_hours`
+control stops and says so once more.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import asyncio
 import datetime
 import logging
 from collections.abc import Callable
+from typing import NamedTuple
 
 import httpx
 
@@ -85,6 +87,7 @@ async def check_once(state: State, now: Callable[[], str] = utcnow) -> None:
     settings = state.settings
     deadline = settings.publish_deadline_minutes * 60
     expiry = settings.publish_expiry_hours * 3600
+    alerts: Alerts = {}
     for build in state.model.publications():
         tag = str(build.version_tag)
         url = site_build_url(settings.site_url, build.image, tag)
@@ -95,26 +98,74 @@ async def check_once(state: State, now: Callable[[], str] = utcnow) -> None:
             log.info("%s %s is on the website after %s min", build.image, tag, minutes)
             await _refresh(state, build)
             if build.publish_state == "overdue":
-                await state.discord.post(f"✅ **{build.image} {tag}** reached the website after {minutes} min: {url}")
+                message = f"✅ **{build.image} {tag}** reached the website after {minutes} min: {url}"
+                alerts.setdefault(("live", ""), []).append(Alert(f"{build.image} {tag}", minutes, message))
             continue
         if build.publish_state == "pending" and age >= deadline:
             note = await diagnose(state, build)
             state.model.set_publication(build.repo, build.run_id, "overdue", note=note)
             log.warning("%s %s not on the website after %s min: %s", build.image, tag, minutes, note)
             await _refresh(state, build)
-            await state.discord.post(
+            message = (
                 f"⚠️ **{build.image} {tag}** was released {minutes} min ago and its website page is still "
                 f"missing: {note}. Release: {build.release_url}"
             )
+            alerts.setdefault(("overdue", note), []).append(Alert(f"{build.image} {tag}", minutes, message))
         elif build.publish_state == "overdue" and age >= expiry:
             note = await diagnose(state, build)
             state.model.set_publication(build.repo, build.run_id, "expired", note=note)
             log.error("%s %s never reached the website: %s", build.image, tag, note)
             await _refresh(state, build)
-            await state.discord.post(
+            message = (
                 f"❌ **{build.image} {tag}** still has no website page {settings.publish_expiry_hours} h after "
                 f"its release, control has stopped watching: {note}. Release: {build.release_url}"
             )
+            alerts.setdefault(("expired", note), []).append(Alert(f"{build.image} {tag}", minutes, message))
+    for (kind, note), group in alerts.items():
+        if len(group) == 1:
+            await state.discord.post(group[0].message)
+            continue
+        for content in grouped(kind, note, group, settings.publish_expiry_hours):
+            await state.discord.post(content)
+
+
+class Alert(NamedTuple):
+    release: str
+    minutes: int
+    message: str
+    """The post when this release is the only one in its group."""
+
+
+Alerts = dict[tuple[str, str], list[Alert]]
+
+DISCORD_LIMIT = 2000
+
+
+def grouped(kind: str, note: str, group: list[Alert], expiry_hours: int) -> list[str]:
+    """
+    One post for every release that changed state in the same check and for the same reason. A burst of releases
+    queues behind one hub or site deploy, so they cross the deadline together; one post each buried the channel.
+    Split into several posts only past Discord's message limit.
+    """
+    low, high = min(a.minutes for a in group), max(a.minutes for a in group)
+    span = f"{low}" if low == high else f"{low} to {high}"
+    head = {
+        "live": f"✅ {len(group)} releases reached the website after {span} min:",
+        "overdue": f"⚠️ {len(group)} releases, {span} min old, still have no website page: {note}.",
+        "expired": (
+            f"❌ {len(group)} releases still have no website page {expiry_hours} h after their release, control has "
+            f"stopped watching: {note}."
+        ),
+    }[kind]
+    posts, lines = [], [head]
+    for alert in group:
+        line = f"- **{alert.release}**"
+        if len("\n".join([*lines, line])) > DISCORD_LIMIT:
+            posts.append("\n".join(lines))
+            lines = [head]
+        lines.append(line)
+    posts.append("\n".join(lines))
+    return posts
 
 
 async def _refresh(state: State, build: Build) -> None:
