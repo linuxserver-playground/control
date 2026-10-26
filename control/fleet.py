@@ -1,9 +1,10 @@
 """
-Fleet discovery: which branches of which image repos are live, straight from the manifests. Every
-`docker-*` repo of the org has an `image.yml` on its default branch whose `release.tags` names every tag
-the image publishes; each other tag belongs to the branch whose own `image.yml` says `release.tag` is it
-(CONVENTIONS §3). The result is the `manifests` table, one row per live branch, which the scheduler
-walks and the fleet board lists instead of guessing branches from past builds. Rows are cached by the
+Fleet discovery: which branches of which image repos are live, straight from the manifests. A `docker-*` repo
+with an `image.yml` on its default branch is an image; every other branch whose own `image.yml` names it in
+`release.branch` is live too, as the build workflow decides (CONVENTIONS §2), whether or not the default
+branch's `release.tags` advertises its tag yet: a branch is often cut and tested before the README lists it.
+The result is the `manifests` table, one row per live branch, which the scheduler walks and the fleet board
+lists instead of guessing branches from past builds. Rows are cached by the
 blob sha of image.yml, refreshed every 30 minutes and on `push` webhooks for a branch we know.
 """
 
@@ -31,8 +32,8 @@ HELPER_REPOS = "helper_repos"
 """kv key: JSON list of the `docker-*` repos the last discovery found without an image.yml on their default
 branch (docker-mods, say). They are not images: the fleet board lists them apart and never links an image page."""
 REFRESH_INTERVAL = datetime.timedelta(minutes=30)
-MAX_CANDIDATE_BRANCHES = 20
-"""How many non-default branches we are willing to read image.yml from when hunting for a tag's branch."""
+MAX_CANDIDATE_BRANCHES = 50
+"""How many non-default branches of one repo we read image.yml from (webtop has 21)."""
 
 
 class _Loader(yaml.SafeLoader):
@@ -143,29 +144,35 @@ class Discovery:
         sha, data = default
         self.store(repo.full_name, repo.default_branch, sha, data)
         live = [repo.default_branch]
-        wanted = release_tags(data)[1:]  # the first is the default branch's own
-        if wanted:
-            branches = [
-                str(b["name"])
-                for b in await self.github.paginate(f"/repos/{repo.full_name}/branches", {"per_page": 100}, limit=200)
-                if isinstance(b, dict) and b.get("name") and b["name"] != repo.default_branch
-            ]
-            # A branch named after its tag is the convention, so try those first, then the rest.
-            candidates = [b for b in branches if b in wanted] + [b for b in branches if b not in wanted]
-            for branch in candidates[:MAX_CANDIDATE_BRANCHES]:
-                if not wanted:
-                    break
-                found = await self.fetch(repo.full_name, branch)
-                if found is None:
-                    continue
-                branch_sha, branch_data = found
-                tag = _section(branch_data, "release").get("tag")
-                if tag in wanted and release_branch(branch_data) == branch:
-                    self.store(repo.full_name, branch, branch_sha, branch_data)
-                    live.append(branch)
-                    wanted.remove(tag)
-            if wanted:
-                log.info("%s: no branch publishes %s", repo.full_name, ", ".join(wanted))
+        tags = {str(_section(data, "release").get("tag"))}
+        advertised = release_tags(data)[1:]  # the first is the default branch's own
+        branches = [
+            str(b["name"])
+            for b in await self.github.paginate(f"/repos/{repo.full_name}/branches", {"per_page": 100}, limit=200)
+            if isinstance(b, dict) and b.get("name") and b["name"] != repo.default_branch
+        ]
+        # Branches named after an advertised tag first, so the cap never drops one of those.
+        candidates = [b for b in branches if b in advertised] + [b for b in branches if b not in advertised]
+        if len(candidates) > MAX_CANDIDATE_BRANCHES:
+            cap = MAX_CANDIDATE_BRANCHES
+            log.warning("%s has %s branches; reading the first %s", repo.full_name, len(candidates), cap)
+        for branch in candidates[:MAX_CANDIDATE_BRANCHES]:
+            found = await self.fetch(repo.full_name, branch)
+            if found is None:
+                continue
+            branch_sha, branch_data = found
+            if release_branch(branch_data) != branch:
+                continue  # a dev branch: its image.yml came from another branch
+            tag = str(_section(branch_data, "release").get("tag"))
+            if tag in tags:
+                log.warning("%s: %s publishes %s, which another live branch already does", repo.full_name, branch, tag)
+                continue
+            self.store(repo.full_name, branch, branch_sha, branch_data)
+            live.append(branch)
+            tags.add(tag)
+        missing = [t for t in advertised if t not in tags]
+        if missing:
+            log.info("%s: no branch publishes %s", repo.full_name, ", ".join(missing))
         pruned = self.model.prune_manifests(repo.full_name, live)
         if pruned:
             self.stream.publish("manifests", repo.full_name)

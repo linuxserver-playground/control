@@ -83,9 +83,9 @@ async def test_discovery_stores_default_and_tag_branches(state: State) -> None:
     main = state.model.manifest(REPO, "main")
     assert main and main.image == "sonarr" and main.source_type == "json" and main.manifest["schema"] == 1
     assert main.version_source == MAIN["upstream"]["version"]
-    # The branch named after the tag was read first; the stray feature branch was never touched.
+    # The branch named after an advertised tag is read first; the feature branch has no image.yml.
     reads = [r.split("?ref=")[1] for r in github.requests if "contents/image.yml" in r]
-    assert reads == ["main", "develop"]
+    assert reads == ["main", "develop", "feature-x"]
     # Discovery is about image repos only; the backfill records the rest.
     assert state.model.repo("example-org/workflows") is None
 
@@ -94,14 +94,35 @@ async def test_discovery_stores_default_and_tag_branches(state: State) -> None:
         counts = await fleet.Discovery(GitHub(http, "ghs_token"), "example-org", state.model, state.stream).run()
     assert counts["unchanged"] == 2 and counts["fetched"] == 0
 
-    # The develop branch stops publishing its tag: its row goes.
+    # The develop branch's image.yml stops naming it (a merge from main, say): its row goes.
     github.files["develop"] = (
-        {**DEVELOP, "release": {"branch": "develop", "tag": "nightly", "channel": "prerelease"}},
+        {**DEVELOP, "release": {"branch": "main", "tag": "latest", "channel": "stable"}},
         "sha-dev-2",
     )
     async with mock_client(github) as http:
         await fleet.Discovery(GitHub(http, "ghs_token"), "example-org", state.model, state.stream).run()
     assert [m.branch for m in state.model.manifests(REPO)] == ["main"]
+
+
+@pytest.mark.anyio
+async def test_a_branch_is_live_before_the_readme_advertises_it(state: State) -> None:
+    """baseimage-debian's bookworm names itself in release.branch while master's release.tags lists only trixie:
+    it is live, as it was under Jenkins (ls_branch), and the README can advertise it later."""
+    github = FakeRepo()
+    github.branches = ["main", "bookworm", "feature-x"]
+    bookworm = {**DEVELOP, "release": {"branch": "bookworm", "tag": "bookworm", "channel": "prerelease"}}
+    github.files = {"main": ({**MAIN, "release": {**MAIN["release"], "tags": []}}, "s1"), "bookworm": (bookworm, "s2")}
+    async with mock_client(github) as http:
+        await fleet.Discovery(GitHub(http, "ghs_token"), "example-org", state.model, state.stream).run()
+    rows = [(m.branch, m.release_tag) for m in state.model.manifests(REPO)]
+    assert rows == [("bookworm", "bookworm"), ("main", "latest")]
+
+    # A second branch claiming the same tag is not a second live branch.
+    github.branches.append("bookworm-copy")
+    github.files["bookworm-copy"] = ({**bookworm, "release": {**bookworm["release"], "branch": "bookworm-copy"}}, "s3")
+    async with mock_client(github) as http:
+        await fleet.Discovery(GitHub(http, "ghs_token"), "example-org", state.model, state.stream).run()
+    assert [m.branch for m in state.model.manifests(REPO)] == ["bookworm", "main"]
 
 
 @pytest.mark.anyio
