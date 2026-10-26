@@ -27,6 +27,7 @@ class World:
     def __init__(self) -> None:
         self.page_live = False
         self.hub_tags: list[str] = []
+        self.hub_rejected: dict[str, Any] = {}
         self.discord: list[tuple[str, dict[str, Any]]] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -36,6 +37,8 @@ class World:
             return httpx.Response(200, json={"id": "msg-1"})
         if f"/images/sonarr/builds/{TAG}/" in url:
             return httpx.Response(200 if self.page_live else 404, text="page")
+        if url.endswith("/api/v1/status.json"):
+            return httpx.Response(200, json={"data": {"status": {"rejected": self.hub_rejected}}})
         if url.endswith("/api/v1/catalog/sonarr/builds.json"):
             return httpx.Response(200, json={"data": {"builds": [{"tag": t} for t in self.hub_tags]}})
         return httpx.Response(404)
@@ -96,6 +99,22 @@ async def test_overdue_page_is_reported_with_where_it_is_stuck(state: State, wor
     assert build and build.publish_state == "live"
     assert len(world.posts()) == 2 and "reached the website after 45 min" in world.posts()[1]
     assert "not on the website" not in world.last_embed()["description"]
+
+
+@pytest.mark.anyio
+async def test_overdue_page_quotes_why_the_hub_rejected_it(state: State, world: World) -> None:
+    """A release from a branch the default branch's release.tags does not list is turned down by the hub; the
+    alert says so instead of pointing at the hub's runs."""
+    error = "build.json branch 'develop' is not a live branch of the image"
+    world.hub_rejected = {
+        f"sonarr@{TAG}": {"checked_at": at(5), "error": error},
+        "sonarr@other-ls1": {"checked_at": at(5), "error": "unrelated"},
+    }
+    await publish.check_once(state, now=lambda: at(31))
+    build = state.model.build(REPO, 5001)
+    note = "the hub rejected it: build.json branch 'develop' is not a live branch of the image"
+    assert build and build.publish_note == note
+    assert len(world.posts()) == 1 and note in world.posts()[0]
 
 
 @pytest.mark.anyio

@@ -8,11 +8,11 @@ seconds this checks each held build's site page and the hub's builds list and, o
 message into its final form.
 
 Nothing is left dangling: past `publish_deadline_minutes` the message says the page is overdue and a separate
-post (which notifies, where an edit does not) says where it is stuck, from the hub's own data: the hub has not
-ingested the release, or the hub has it and the site has not published it. Releases that cross the deadline in the
-same check for the same reason share one post, since a burst of them waits on the same deploy. Control keeps
-watching; a page that turns up later clears the warning with a short follow-up, and after `publish_expiry_hours`
-control stops and says so once more.
+post (which notifies, where an edit does not) says where it is stuck, from the hub's own data: the hub rejected
+the release (with the reason from its status API), has not ingested it yet, or has it and the site has not
+published it. Releases that cross the deadline in the same check for the same reason share one post, since a burst
+of them waits on the same deploy. Control keeps watching; a page that turns up later clears the warning with a
+short follow-up, and after `publish_expiry_hours` control stops and says so once more.
 """
 
 from __future__ import annotations
@@ -70,6 +70,17 @@ async def hub_has(http: httpx.AsyncClient, hub_url: str, image: str, tag: str) -
     return any(isinstance(b, dict) and b.get("tag") == tag for b in builds)
 
 
+async def hub_rejection(http: httpx.AsyncClient, hub_url: str, image: str, tag: str) -> str | None:
+    """Why the hub turned the release down, from its status API; None when it did not or cannot be read."""
+    try:
+        response = await http.get(f"{hub_url}/api/v1/status.json", timeout=15)
+        rejected = response.json()["data"]["status"]["rejected"]
+        error = rejected[f"{image}@{tag}"]["error"]
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        return None
+    return str(error) if error else None
+
+
 async def diagnose(state: State, build: Build) -> str:
     """Where a release is stuck on its way to the website, in a sentence with the runs to look at."""
     settings = state.settings
@@ -80,6 +91,9 @@ async def diagnose(state: State, build: Build) -> str:
     if has is None:
         return f"the hub could not be read ({settings.hub_url})"
     if not has:
+        rejection = await hub_rejection(state.http, settings.hub_url, build.image, str(build.version_tag))
+        if rejection:
+            return f"the hub rejected it: {rejection}"
         return f"the hub has not ingested it (hub runs: {hub_runs})"
     return f"the hub has it, the site has not published it (site runs: {site_runs})"
 
