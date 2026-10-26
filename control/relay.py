@@ -4,8 +4,8 @@ successfully, tell the website to refresh (repository_dispatch `hub-updated`). T
 receives every workflow_run webhook and holds the App installation token, so it is the natural relay. Best
 effort: the site also rebuilds on its daily cron.
 
-It also starts the hub's hourly full refresh (`workflow_dispatch` of deploy.yml), because GitHub skips most
-runs of the hub's own hourly cron and new builds then wait hours for their vulnerability scan.
+It also starts the hub's hourly refresh (`workflow_dispatch` of refresh.yml: stars, GHCR tags, the mods index and the
+vulnerability rescans), because GitHub skips most runs of the hub's own hourly cron.
 """
 
 import asyncio
@@ -19,7 +19,7 @@ from .state import State
 log = logging.getLogger(__name__)
 
 HUB_DEPLOY_WORKFLOW = "Deploy"
-HUB_DEPLOY_FILE = "deploy.yml"
+HUB_REFRESH_FILE = "refresh.yml"
 HUB_REFRESH_INTERVAL = datetime.timedelta(hours=1)
 LAST_HUB_REFRESH = "last_hub_refresh"
 """kv key: ISO time of the last hub refresh dispatch that GitHub accepted."""
@@ -90,11 +90,11 @@ def hub_refresh_due(state: State, now: datetime.datetime | None = None) -> bool:
 
 
 async def dispatch_hub_refresh(state: State, github: GitHub, now: datetime.datetime | None = None) -> bool:
-    """`workflow_dispatch` of the hub's Deploy on main, the same full refresh as its cron. Never raises."""
+    """`workflow_dispatch` of the hub's Refresh on main, the same as its cron. Never raises."""
     at = now or datetime.datetime.now(datetime.UTC)
     repo = f"{state.settings.github_org}/{state.settings.hub_repo}"
     try:
-        await github.post(f"/repos/{repo}/actions/workflows/{HUB_DEPLOY_FILE}/dispatches", {"ref": "main"})
+        await github.post(f"/repos/{repo}/actions/workflows/{HUB_REFRESH_FILE}/dispatches", {"ref": "main"})
     except Exception:
         log.exception("hub refresh dispatch failed")
         return False

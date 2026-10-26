@@ -73,7 +73,7 @@ async def test_hub_refresh_dispatches_hourly(state: State) -> None:
     assert relay.hub_refresh_due(state, now)
     async with mock_client(handler) as http:
         assert await relay.dispatch_hub_refresh(state, GitHub(http, "ghs_token"), now)
-    path = f"/repos/{state.settings.github_org}/hub/actions/workflows/deploy.yml/dispatches"
+    path = f"/repos/{state.settings.github_org}/hub/actions/workflows/refresh.yml/dispatches"
     assert seen == [(path, {"ref": "main"})]
     assert not relay.hub_refresh_due(state, now + datetime.timedelta(minutes=59))
     assert relay.hub_refresh_due(state, now + datetime.timedelta(hours=1))
