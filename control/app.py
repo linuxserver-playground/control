@@ -15,7 +15,7 @@ import httpx
 from fastapi import FastAPI, Request
 from starlette.middleware.cors import CORSMiddleware
 
-from . import auth, events, manage, publish, scheduler, setup, views, webhooks
+from . import auth, events, heal, manage, publish, scheduler, setup, views, webhooks
 from .backfill import backfill_once
 from .config import Settings
 from .db import Database
@@ -66,6 +66,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 tasks.append(asyncio.create_task(backfill_once(state)))
             if settings.scheduler:
                 tasks.append(asyncio.create_task(scheduler.run(state)))
+                tasks.append(asyncio.create_task(heal.heal(state, delay=0)))  # jobs left running while control was down
             if settings.publish_watch:
                 tasks.append(asyncio.create_task(publish.run(state)))
             try:

@@ -737,6 +737,16 @@ class Model:
             ).fetchall()
         return [_job_row(row) for row in rows]
 
+    def runs_with_unfinished_jobs(self) -> list[tuple[str, int]]:
+        """(repo, run id) of completed runs that still hold a job not marked completed: a lost job webhook."""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT jobs.repo AS repo, jobs.run_id AS run_id FROM jobs JOIN runs ON runs.id = jobs.run_id "
+                "WHERE runs.status = 'completed' AND (jobs.status IS NULL OR jobs.status != 'completed') "
+                "ORDER BY jobs.run_id"
+            ).fetchall()
+        return [(str(row["repo"]), int(row["run_id"])) for row in rows]
+
     def jobs_with_status(self, status: str) -> list[Job]:
         with self.db.connect() as conn:
             rows = conn.execute(

@@ -12,7 +12,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 
-from . import fleet, handlers, relay
+from . import fleet, handlers, heal, relay
 from .state import INSTALLATION_ID, state_of
 
 log = logging.getLogger(__name__)
@@ -67,4 +67,5 @@ async def github_webhook(
         fleet.schedule_refresh(state, payload)  # re-reads image.yml for a live branch, in the background
     elif x_github_event == "workflow_run":
         relay.schedule_site_refresh(state, payload)  # a successful hub Deploy makes the website refresh
+        heal.schedule_heal(state, payload)  # a completed run's jobs whose own webhook never came
     return Response(status_code=202)
