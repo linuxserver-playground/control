@@ -1,10 +1,11 @@
 """
 Holding a released build's Discord message until its page is on the website.
 
-A release reaches the website in steps: the hub ingests it and deploys, then the site refreshes and deploys, a
-few minutes normally and longer when a burst of releases queues behind one another. The summary therefore says
-"publishing" and links control instead of a page that would 404. Every minute this checks each held build's site
-page and, once it answers, edits the message into its final form.
+A release reaches the website when the hub has ingested and deployed it: the site renders a build it predates
+from the hub's data in the browser, and its own rebuild, which turns that into a static page, comes later. The
+summary says "publishing" and links control until then, instead of a page that would show nothing. Every 20
+seconds this checks each held build's site page and the hub's builds list and, once either has it, edits the
+message into its final form.
 
 Nothing is left dangling: past `publish_deadline_minutes` the message says the page is overdue and a separate
 post (which notifies, where an edit does not) says where it is stuck, from the hub's own data: the hub has not
@@ -31,8 +32,8 @@ from .state import State
 
 log = logging.getLogger(__name__)
 
-CHECK_SECONDS = 60.0
-"""Pages answers within the minute of a deploy; checking more often only adds requests."""
+CHECK_SECONDS = 20.0
+"""How often held builds are checked: two small requests each, and only while a release is held."""
 
 
 def _instant(timestamp: str | None) -> float:
@@ -93,7 +94,9 @@ async def check_once(state: State, now: Callable[[], str] = utcnow) -> None:
         url = site_build_url(settings.site_url, build.image, tag)
         age = _instant(now()) - _instant(build.publish_started_at)
         minutes = int(age // 60)
-        if await page_live(state.http, url):
+        # The site renders a build it predates from the hub's data (its 404 fallback), so the page works as soon as
+        # the hub serves the build, before the site's own rebuild makes it a static page.
+        if await page_live(state.http, url) or await hub_has(state.http, settings.hub_url, build.image, tag):
             state.model.set_publication(build.repo, build.run_id, "live", published_at=now())
             log.info("%s %s is on the website after %s min", build.image, tag, minutes)
             await _refresh(state, build)

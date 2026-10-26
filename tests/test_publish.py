@@ -86,12 +86,11 @@ async def test_overdue_page_is_reported_with_where_it_is_stuck(state: State, wor
     assert "not on the website yet: the hub has not ingested it" in world.last_embed()["description"]
 
     # Still overdue on the next check: no second alert.
-    world.hub_tags = [TAG]
     await publish.check_once(state, now=lambda: at(40))
     assert len(world.posts()) == 1
 
     # It turns up after all: the message is finished and a short follow-up clears the alert.
-    world.page_live = True
+    world.hub_tags = [TAG]
     await publish.check_once(state, now=lambda: at(45))
     build = state.model.build(REPO, 5001)
     assert build and build.publish_state == "live"
@@ -100,11 +99,12 @@ async def test_overdue_page_is_reported_with_where_it_is_stuck(state: State, wor
 
 
 @pytest.mark.anyio
-async def test_hub_has_it_but_the_site_does_not(state: State, world: World) -> None:
+async def test_the_hub_having_it_is_enough(state: State, world: World) -> None:
+    """The site renders a build from the hub before its own rebuild, so the hub's builds list decides."""
     world.hub_tags = [TAG]
-    await publish.check_once(state, now=lambda: at(31))
+    await publish.check_once(state, now=lambda: at(2))
     build = state.model.build(REPO, 5001)
-    assert build and build.publish_note and build.publish_note.startswith("the hub has it, the site has not published")
+    assert build and build.publish_state == "live" and world.posts() == []
 
 
 @pytest.mark.anyio
