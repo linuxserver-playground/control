@@ -3,11 +3,14 @@ The `/events` endpoint the shared workflow POSTs to (CONVENTIONS §10): a contro
 HMAC-SHA256 over the raw body using the per-org `CONTROL_EVENTS_SECRET`, validated against the `contracts`
 schema, stored in `deliveries` as `control:<type>` so it replays like a webhook, then applied and
 announced on Discord. A live build gets one message, posted on `build.started` and edited into the
-summary; dev and pr builds only get the summary. The embeds link to the website, the single pane of glass.
-A released build's page reaches the website minutes later (hub, then site), so its summary says "publishing"
-and points at control until publish.py sees the page live and edits it into the final form.
+summary; dev and pr builds only get the summary, and a package check only when it fails (the release build
+it dispatches is what counts). A released build links its page on the website, the single pane of glass;
+that page reaches the website minutes later (hub, then site), so its summary says "publishing" and points at
+control until publish.py sees the page live and edits it into the final form. Any other build links the
+report GitHub shows: a pull request build its report comment, a dev or failed build its run's job summary.
 """
 
+import asyncio
 import datetime
 import hashlib
 import json
@@ -22,7 +25,7 @@ from . import handlers
 from .config import Settings
 from .db import utcnow
 from .github import installation_client
-from .model import Build, Model, Run
+from .model import IGNORED_WORKFLOW_NAMES, Build, Model
 from .state import State, state_of
 from .webhooks import signature_valid
 
@@ -30,11 +33,24 @@ log = logging.getLogger(__name__)
 
 router = APIRouter()
 
-GREEN = 0x3FB950
-RED = 0xF85149
+# The Jenkins-era colours: live builds bright, dev and pull request builds dark.
+GREEN = 0x19A719
+DARK_GREEN = 0x3C6124
+RED = 0xFF0000
+DARK_RED = 0xC15253
 GREY = 0x8B949E
 AMBER = 0xD29922
-DOT = {GREEN: "\U0001f7e2", RED: "\U0001f534", AMBER: "\U0001f7e1", GREY: "\u26aa"}
+DOT = {
+    GREEN: "\U0001f7e2",
+    DARK_GREEN: "\U0001f7e2",
+    RED: "\U0001f534",
+    DARK_RED: "\U0001f534",
+    AMBER: "\U0001f7e1",
+    GREY: "\u26aa",
+}
+REPORT_MARKER = "<!-- lsio-build-report -->"
+"""Marks the pull request comment the PR report workflow keeps up to date (workflows/scripts/pr_report.py)."""
+REPORT_BOT = "github-actions[bot]"
 """The colour as a word: a circle emoji in the embed's own colour in front of the result word."""
 RESULT_WORD = {"success": "passed", "failure": "failed", "skipped": "skipped", "cancelled": "cancelled"}
 
@@ -116,10 +132,11 @@ def awaiting_site(build: Build) -> bool:
 def embed_color(build: Build) -> int:
     if build.running or awaiting_site(build):
         return AMBER
+    live = build.mode == "live"
     if build.result == "success":
-        return GREEN if build.mode == "live" else GREY
+        return GREEN if live else DARK_GREEN
     if build.result == "failure":
-        return RED
+        return RED if live else DARK_RED
     return GREY
 
 
@@ -184,6 +201,51 @@ def is_package_check(build: Build) -> bool:
     return build.mode == "live" and build.reason == "packages" and not build.release_url
 
 
+def announced(build: Build) -> bool:
+    """Whether Discord hears of this build. A package check only when it failed: whether it found new packages
+    or not, what matters is the release build it dispatches, which is announced on its own."""
+    if is_package_check(build):
+        return build.result == "failure"
+    return True
+
+
+def summary_url(model: Model, build: Build) -> str | None:
+    """The run page scrolled to the Publish job's summary, which opens with the build's report."""
+    if not build.run_url:
+        return None
+    publish = next(
+        (j for j in model.jobs_for_run(build.run_id) if j.name.rsplit("/", 1)[-1].strip() == "Publish"), None
+    )
+    return f"{build.run_url}#summary-{publish.id}" if publish else build.run_url
+
+
+async def pr_comment_url(state: State, build: Build) -> str | None:
+    """The report comment on the build's pull request, once the PR report workflow has written it. Never raises."""
+    if not build.pull_request:
+        return None
+    try:
+        github = await installation_client(state)
+        if github is None:
+            return None
+        comments = await github.paginate(f"/repos/{build.repo}/issues/{build.pull_request}/comments", {"per_page": 100})
+    except Exception:
+        log.exception("report comment lookup failed for %s #%s", build.repo, build.pull_request)
+        return None
+    for comment in comments if isinstance(comments, list) else []:
+        if REPORT_MARKER in str(comment.get("body") or "") and (comment.get("user") or {}).get("login") == REPORT_BOT:
+            return str(comment.get("html_url") or "") or None
+    return None
+
+
+async def report_url(state: State, build: Build) -> str | None:
+    """Where a build without a website page has its report: the pull request comment, else the run summary."""
+    if build.running:
+        return None
+    if build.mode == "pr":
+        return await pr_comment_url(state, build)
+    return summary_url(state.model, build)
+
+
 def packages_changed(bundle: dict[str, Any], previous: Build | None) -> str | None:
     """`packages changed (amd64 +3, arm64 +3)` against the previous release's bundle, `packages unchanged`
     when every arch hashes the same, None without both summaries. The summary carries counts and a table
@@ -211,7 +273,7 @@ def packages_changed(bundle: dict[str, Any], previous: Build | None) -> str | No
     return "packages changed" + (f" ({', '.join(deltas)})" if deltas else "")
 
 
-def description_of(build: Build, previous: Build | None, follow_up: Run | None) -> str:
+def description_of(build: Build, previous: Build | None) -> str:
     """One line: mode · reason · what the build meant for the image."""
     parts = [build.mode or "?", build.reason or "?"]
     if build.pull_request:
@@ -219,16 +281,7 @@ def description_of(build: Build, previous: Build | None, follow_up: Run | None) 
     if build.failed_job and build.result == "failure":
         parts.append(f"failed job: {build.failed_job}")
     bundle = build.bundle
-    if is_package_check(build):
-        if build.result == "skipped":
-            parts.append("packages unchanged, nothing released")
-        elif build.result == "success":
-            parts.append("new package table committed")
-            if follow_up:
-                parts.append(f"release build [run {follow_up.id}]({follow_up.html_url})")
-            else:
-                parts.append("release build follows")
-    elif bundle and (changed := packages_changed(bundle, previous)):
+    if not is_package_check(build) and bundle and (changed := packages_changed(bundle, previous)):
         parts.append(changed)
     if build.publish_state == "pending":
         parts.append("publishing to the website")
@@ -310,13 +363,15 @@ def instant(timestamp: str) -> float:
         return 0.0
 
 
-def links_field(build: Build, public_url: str, site_url: str) -> str:
+def links_field(build: Build, public_url: str, site_url: str, report: str | None = None) -> str:
     links = []
     if build.mode == "live" and build.version_tag and build.release_url:
         if build.publish_state == "pending":
             links.append("CI report (publishing\u2026)")
         else:
             links.append(f"[CI report]({site_build_url(site_url, build.image, build.version_tag)})")
+    elif report:
+        links.append(f"[CI report]({report})")
     if build.run_url:
         links.append(f"[run]({build.run_url})")
     if build.release_url:
@@ -330,25 +385,27 @@ def links_field(build: Build, public_url: str, site_url: str) -> str:
 
 
 def build_embed(
-    build: Build, settings: Settings, previous: Build | None = None, follow_up: Run | None = None
+    build: Build, settings: Settings, previous: Build | None = None, report: str | None = None
 ) -> dict[str, Any]:
     """One embed per build; the same shape for the provisional and the final message so an edit reads well.
     A released live build points at its page on the website (the embed url and the "CI report" link), the
-    image name above the title at the image page; dev, pr and package-check runs point at the control run
-    page. `previous` is the previous release's build (for the packages line) and `follow_up` the release
-    build a package check dispatched, when control has seen either."""
+    image name above the title at the image page. Any other finished build points at `report`, the report
+    GitHub shows (`report_url`: the pull request comment, or the run's job summary), and a running one or one
+    without a report at the control run page. `previous` is the previous release's build (for the packages
+    line), when control has it."""
     color = embed_color(build)
     released = build.mode == "live" and build.version_tag and build.release_url and not awaiting_site(build)
-    url = (
-        site_build_url(settings.site_url, build.image, str(build.version_tag))
-        if released
-        else control_build_url(settings.public_url, build)
-    )
+    if released:
+        url = site_build_url(settings.site_url, build.image, str(build.version_tag))
+    elif report and not (build.mode == "live" and build.release_url):
+        url = report
+    else:
+        url = control_build_url(settings.public_url, build)
     fields = [
         {"name": "Platforms", "value": platforms_field(build)},
         {"name": "Upstream", "value": upstream_field(build)},
         {"name": "Timing", "value": timing_field(build)},
-        {"name": "Links", "value": links_field(build, settings.public_url, settings.site_url)},
+        {"name": "Links", "value": links_field(build, settings.public_url, settings.site_url, report)},
     ]
     title_tag = build.version_tag or build.branch or ""
     embed = {
@@ -356,7 +413,7 @@ def build_embed(
         "title": f"{build.image} {title_tag}".strip() + f" \u00b7 {DOT[color]} {result_word(build)}",
         "url": url,
         "color": color,
-        "description": description_of(build, previous, follow_up),
+        "description": description_of(build, previous),
         "fields": two_columns(fields),
         "footer": {"text": f"{build.repo} \u00b7 run {build.run_id}"},
         "timestamp": build.updated_at,
@@ -372,21 +429,16 @@ def previous_build(model: Model, build: Build) -> Build | None:
     return model.build_for_tag(build.repo, str(tag), with_bundle=True) if tag else None
 
 
-def follow_up_run(model: Model, build: Build) -> Run | None:
-    """The release build a package check dispatched on its branch after committing the new table, when its
-    run has already arrived by webhook (the same lookup the scheduler page uses for its dispatches)."""
-    if not (is_package_check(build) and build.result == "success" and build.branch):
-        return None
-    return model.run_after(build.repo, build.branch, "workflow_dispatch", build.created_at, exclude_run_id=build.run_id)
-
-
 async def announce(state: State, build: Build, event_type: str) -> None:
     """Post or edit the Discord message for a build. Never raises; Discord failures are logged by the client."""
     if not state.discord.configured:
         return
-    if event_type == "build.started" and build.mode != "live":
+    if event_type == "build.started" and (build.mode != "live" or build.reason == "packages"):
         return
-    embed = build_embed(build, state.settings, previous_build(state.model, build), follow_up_run(state.model, build))
+    if not announced(build):
+        return
+    report = None if (build.mode == "live" and build.release_url) else await report_url(state, build)
+    embed = build_embed(build, state.settings, previous_build(state.model, build), report)
     if build.discord_message_id and await state.discord.edit(build.discord_message_id, embeds=[embed]):
         return
     message_id = await state.discord.post(embeds=[embed])
@@ -460,3 +512,28 @@ async def control_event(
             await notify_hub(state, build)
     log.info("%s for %s run %s (%s)", event_type, payload["repository"], payload["run_id"], payload.get("result", ""))
     return {"status": "accepted", "type": event_type, "applied": applied}
+
+
+async def refresh_pr_reports(state: State, repo: str) -> int:
+    """After a PR report run: point the latest message of each recent pull request build of `repo` at the report
+    comment it wrote (the first build of a pull request finishes before its comment exists). Never raises."""
+    seen: set[int] = set()
+    count = 0
+    for build in state.model.recent_builds(200):
+        if build.repo != repo or build.mode != "pr" or not build.pull_request or not build.discord_message_id:
+            continue
+        if build.pull_request in seen:
+            continue
+        seen.add(build.pull_request)
+        await announce(state, build, "build.reported")
+        count += 1
+    return count
+
+
+def schedule_pr_report_refresh(state: State, payload: dict[str, Any]) -> asyncio.Task[Any] | None:
+    """Fire-and-forget from the webhook handler, for a completed run of an image repository's PR report."""
+    run = payload.get("workflow_run") or {}
+    repo = (payload.get("repository") or {}).get("full_name")
+    if payload.get("action") != "completed" or run.get("name") not in IGNORED_WORKFLOW_NAMES or not repo:
+        return None
+    return state.spawn(refresh_pr_reports(state, str(repo)))

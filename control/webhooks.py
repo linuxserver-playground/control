@@ -68,4 +68,7 @@ async def github_webhook(
     elif x_github_event == "workflow_run":
         relay.schedule_site_refresh(state, payload)  # a successful hub Deploy makes the website refresh
         heal.schedule_heal(state, payload)  # a completed run's jobs whose own webhook never came
+        from .events import schedule_pr_report_refresh  # events imports this module
+
+        schedule_pr_report_refresh(state, payload)  # Discord links the report comment a PR report run wrote
     return Response(status_code=202)

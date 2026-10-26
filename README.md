@@ -296,26 +296,32 @@ schema violations, and `202` otherwise. The body is stored in `deliveries` as `c
 its hash, so a retried POST is a no-op) and replays with the webhooks.
 
 - `build.started` creates a provisional `builds` row (result `null` = running). For `mode: live` one Discord
-  embed is posted and its message id kept on the row.
+  embed is posted and its message id kept on the row (not for a package check).
 - `build.summary` fills the row (result, failed job, version, upstream, platforms, test outcome, release or
   artifact URL, the whole bundle as `bundle_json`) and edits the started message into the summary, or posts
-  one for dev/pr builds.
+  one for dev/pr builds. A package check (`reason: packages` on a live branch, which never releases) is only
+  announced when it fails: what it found matters through the release build it dispatches, announced on its own.
 
 ### Discord embeds
 
 One embed per build message, the same shape while running and once finished, so the edit reads well. The
 website is the single pane of glass, so the embed links there: a released live build's title opens its build
 page `${SITE_URL}/images/<image>/builds/<tag>/` (also the "CI report" link) and the image name above the title
-opens `${SITE_URL}/images/<image>/`; dev, pr and package-check runs open the control run page instead, and a
-pr build links its pull request.
+opens `${SITE_URL}/images/<image>/`. A finished build without a website page opens the report GitHub shows
+(also the "CI report" link): a pr build its pull request's report comment (looked up by the comment's
+`<!-- lsio-build-report -->` marker; the first build of a pull request finishes before the comment exists, so
+every completed `PR report` run re-links the latest message of each recent pull request build of its repo),
+any other build its run page scrolled to the Publish job's summary (`#summary-<job id>`, from the jobs
+control holds; the run page until that job's webhook arrived), which opens with the same report. A running
+build opens the control run page.
 
-- Title `<image> <tag> · <dot> <result>`, the dot in the embed's colour: green `passed` for a live success,
-  grey `passed` for a dev/pr success, red `failed`, grey `skipped`/`cancelled`, amber `running`.
+- Title `<image> <tag> · <dot> <result>`, the dot in the embed's colour, the Jenkins-era scheme: green
+  (`0x19A719`) `passed` for a live success, dark green (`0x3C6124`) for a dev/pr success, red (`0xFF0000`)
+  `failed` for a live failure, dark red (`0xC15253`) for a dev/pr failure, grey `skipped`/`cancelled`, amber
+  `running` or held at "publishing".
 - Description, one line: `mode · reason`, then `PR #n`, the failed job, and for a released build whose bundle
   names `previous.tag` a build control holds: `packages changed (amd64 +3)` (table hash per arch against the
-  previous release; the delta is in package count) or `packages unchanged`. A package check (`reason:
-  packages`, nothing released) says `packages unchanged, nothing released` (grey, result `skipped`) or `new
-  package table committed` and links the release build it dispatched once that run's webhook has arrived.
+  previous release; the delta is in package count) or `packages unchanged`.
 - Fields in two columns: **Platforms** (per arch: short digest, compressed size in MiB, tests passed/failed,
   or the arch's own failure), **Upstream** (the version linked to `version.source_url`, with the source
   type), **Timing** (build time per arch, `started → finished (elapsed)`), **Links** (CI report, run, release,

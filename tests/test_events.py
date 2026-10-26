@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import Any
 
@@ -10,12 +11,17 @@ from control.app import create_app
 from control.config import Settings
 from control.events import (
     AMBER,
+    DARK_GREEN,
+    DARK_RED,
     GREEN,
     GREY,
     RED,
+    REPORT_BOT,
+    REPORT_MARKER,
     build_embed,
     embed_color,
     embed_length,
+    refresh_pr_reports,
     validate_event,
     within_limits,
 )
@@ -23,7 +29,7 @@ from control.github_app import AppCredentials
 from control.model import Build
 from control.state import State
 
-from .conftest import REPO, fixture, mock_discord, post_event, seed
+from .conftest import REPO, fixture, install, mock_discord, post_event, seed, token_response
 
 SITE = "https://site.example/site"
 SETTINGS = Settings(public_url="https://x", site_url=SITE)
@@ -141,14 +147,21 @@ def test_started_posts_and_summary_edits_one_live_message(
 
 
 def test_dev_and_pr_builds_only_get_a_summary(
-    client: TestClient, state: State, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, state: State, credentials: AppCredentials, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[dict[str, Any]] = []
+    comment = f"https://github.com/{REPO}/pull/7#issuecomment-99"
+    comments: list[dict[str, Any]] = [{"body": "LGTM", "user": {"login": "someone"}, "html_url": "x"}]
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if token := token_response(request):
+            return token
+        if request.url.path == f"/repos/{REPO}/issues/7/comments":
+            return httpx.Response(200, json=comments)
         calls.append(json.loads(request.content))
         return httpx.Response(200, json={"id": "m"})
 
+    install(state, credentials)
     mock_discord(state, monkeypatch, handler)
     started = fixture("control.build.started")
     started.update(mode="pr", pull_request=7, reason="pull_request", run_id=6001)
@@ -165,16 +178,24 @@ def test_dev_and_pr_builds_only_get_a_summary(
     assert post_event(client, summary).status_code == 202
     assert len(calls) == 1
     embed = calls[0]["embeds"][0]
-    assert embed["color"] == GREY and embed["title"] == "sonarr pr-7-ccccccc \u00b7 \u26aa passed"
+    assert embed["color"] == DARK_GREEN and embed["title"] == "sonarr pr-7-ccccccc \u00b7 \U0001f7e2 passed"
     assert embed["description"] == "pr \u00b7 pull_request \u00b7 PR #7"
-    # A pr build has no page on the website: the control run page and the pull request are the links.
+    # The PR report has not commented yet: the control run page and the pull request are the links.
     assert embed["url"] == f"https://ci.example.test:8443/builds/{REPO}/6001"
     links = field(embed, "Links")
     assert "[artifact](" in links and f"[PR #7](https://github.com/{REPO}/pull/7)" in links
     assert "CI report" not in links and "site.example" not in links
 
+    # Once the PR report run completes, the message is edited to link the report comment.
+    comments.append({"body": REPORT_MARKER + "\n### Build report", "user": {"login": REPORT_BOT}, "html_url": comment})
+    assert asyncio.run(refresh_pr_reports(state, REPO)) == 1
+    embed = calls[-1]["embeds"][0]
+    assert embed["url"] == comment and f"[CI report]({comment})" in field(embed, "Links")
 
-def test_failure_is_red_in_any_mode(client: TestClient, state: State, monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_dev_builds_are_dark_and_link_the_run_summary(
+    client: TestClient, state: State, monkeypatch: pytest.MonkeyPatch
+) -> None:
     calls: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -182,18 +203,40 @@ def test_failure_is_red_in_any_mode(client: TestClient, state: State, monkeypatc
         return httpx.Response(200, json={"id": "m"})
 
     mock_discord(state, monkeypatch, handler)
+    run = f"https://github.com/{REPO}/actions/runs/5001"
     failed = fixture("control.build.summary.failed")
     failed["mode"] = "dev"
     assert post_event(client, failed).status_code == 202
     embed = calls[0]["embeds"][0]
-    assert embed["color"] == RED and embed["title"] == "sonarr main \u00b7 \U0001f534 failed"
+    assert embed["color"] == DARK_RED and embed["title"] == "sonarr main \u00b7 \U0001f534 failed"
     assert embed["description"] == "dev \u00b7 upstream \u00b7 failed job: build (arm64)"
     assert field(embed, "Platforms") == "\u2014" and field(embed, "Upstream") == "\u2014"
     assert field(embed, "Timing") == "finished 12:05 UTC"
-    assert embed["url"] == f"https://ci.example.test:8443/builds/{REPO}/5001"
+    # Control has not seen the Publish job: the run page itself.
+    assert embed["url"] == run and f"[CI report]({run})" in field(embed, "Links")
+
+    # With the Publish job known, the link opens its summary, where the report is.
+    job = fixture("workflow_job.in_progress")
+    job["workflow_job"].update(id=9009, name="build / Publish")
+    handlers.process(state.model, state.stream, "workflow_job", job)
+    passed = fixture("control.build.summary")
+    passed.update(mode="dev", sent="2026-10-24T13:00:00Z")
+    passed.pop("release_url")
+    assert post_event(client, passed).status_code == 202
+    embed = calls[-1]["embeds"][0]
+    assert embed["color"] == DARK_GREEN and embed["url"] == f"{run}#summary-9009"
+
+    # A live build that failed has no page on the website either: bright red, the run summary.
+    live = fixture("control.build.summary.failed")
+    live["sent"] = "2026-10-24T14:00:00Z"
+    assert post_event(client, live).status_code == 202
+    embed = calls[-1]["embeds"][0]
+    assert embed["color"] == RED and embed["url"] == f"{run}#summary-9009"
 
 
-def test_package_check_embeds(client: TestClient, state: State, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_package_checks_are_announced_only_when_they_fail(
+    client: TestClient, state: State, monkeypatch: pytest.MonkeyPatch
+) -> None:
     calls: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -201,48 +244,23 @@ def test_package_check_embeds(client: TestClient, state: State, monkeypatch: pyt
         return httpx.Response(200, json={"id": "m"})
 
     mock_discord(state, monkeypatch, handler)
-    # A package check whose table did not change releases nothing and reports `skipped`: a grey embed.
-    unchanged = fixture("control.build.summary")
-    unchanged.update(reason="packages", result="skipped", run_id=7001)
-    unchanged.pop("release_url")
-    unchanged["bundle"].update(reason="packages")
-    assert post_event(client, unchanged).status_code == 202
-    embed = calls[-1]["embeds"][0]
-    assert embed["color"] == GREY and embed["title"] == "sonarr 4.0.20.3014-ls1 \u00b7 \u26aa skipped"
-    assert embed["description"] == "live \u00b7 packages \u00b7 packages unchanged, nothing released"
-    assert embed["url"] == f"https://ci.example.test:8443/builds/{REPO}/7001" and "CI report" not in field(
-        embed, "Links"
-    )
-
-    # One that committed a new table dispatched the release build; the embed links that run once its webhook
-    # arrived. The check itself was a `workflow_dispatch` run too, so the lookup must skip its own run.
     started = fixture("control.build.started")
-    started.update(reason="packages", run_id=7002, sent="2026-10-24T12:00:08Z")
+    started.update(reason="packages", run_id=7002)
     assert post_event(client, started).status_code == 202
-    for run_id, created in ((7002, "2026-10-24T12:00:08Z"), (7003, "2026-10-24T12:08:00Z")):
-        run = fixture("workflow_run.requested")
-        run["workflow_run"].update(id=run_id, event="workflow_dispatch", created_at=created)
-        run["workflow_run"]["html_url"] = f"https://github.com/{REPO}/actions/runs/{run_id}"
-        handlers.process(state.model, state.stream, "workflow_run", run)
-    committed = fixture("control.build.summary")
-    committed.update(reason="packages", run_id=7002)
-    committed.pop("release_url")
-    committed["bundle"].update(reason="packages")
-    assert post_event(client, committed).status_code == 202
-    embed = calls[-1]["embeds"][0]
-    assert embed["color"] == GREEN
-    assert embed["description"] == (
-        "live \u00b7 packages \u00b7 new package table committed \u00b7 "
-        f"release build [run 7003](https://github.com/{REPO}/actions/runs/7003)"
-    )
-    assert field(embed, "Timing").endswith("12:00 \u2192 12:09 UTC (9m37s)")
+    # Unchanged (`skipped`) or committed (`success`, the release build it dispatches is announced): silent.
+    for run_id, result in ((7001, "skipped"), (7002, "success")):
+        check = fixture("control.build.summary")
+        check.update(reason="packages", result=result, run_id=run_id)
+        check.pop("release_url")
+        check["bundle"].update(reason="packages")
+        assert post_event(client, check).status_code == 202
+    assert calls == []
 
-    # Without the follow-up run yet, the embed still says a release build follows.
-    build = state.model.build(REPO, 7002)
-    assert build is not None
-    assert build_embed(build, SETTINGS)["description"].endswith(
-        "new package table committed \u00b7 release build follows"
-    )
+    failed = fixture("control.build.summary.failed")
+    failed.update(reason="packages", run_id=7003)
+    assert post_event(client, failed).status_code == 202
+    embed = calls[-1]["embeds"][0]
+    assert embed["color"] == RED and embed["description"].startswith("live \u00b7 packages \u00b7 failed job")
 
 
 def test_packages_compared_with_the_previous_release(client: TestClient, state: State) -> None:
@@ -338,8 +356,10 @@ def test_discord_failure_does_not_fail_the_event(
 def test_embed_colors() -> None:
     seed_build = Build.from_event(fixture("control.build.summary"))
     assert embed_color(seed_build) == GREEN
-    assert embed_color(seed_build.model_copy(update={"mode": "dev"})) == GREY
+    assert embed_color(seed_build.model_copy(update={"mode": "dev"})) == DARK_GREEN
+    assert embed_color(seed_build.model_copy(update={"mode": "pr"})) == DARK_GREEN
     assert embed_color(seed_build.model_copy(update={"result": "failure"})) == RED
+    assert embed_color(seed_build.model_copy(update={"result": "failure", "mode": "dev"})) == DARK_RED
     assert embed_color(seed_build.model_copy(update={"result": "cancelled"})) == GREY
     assert embed_color(seed_build.model_copy(update={"result": None})) == AMBER
     assert build_embed(seed_build, SETTINGS)["footer"] == {"text": f"{REPO} \u00b7 run 5001"}
@@ -401,3 +421,20 @@ def test_live_success_summary_dispatches_the_hub(
     unreleased["run_id"] = payload["run_id"] + 1
     assert post_event(client, unreleased).status_code == 202
     assert dispatches == []
+
+
+def test_only_a_completed_pr_report_run_refreshes_the_messages(state: State) -> None:
+    from control.events import schedule_pr_report_refresh
+
+    def payload(name: str, action: str = "completed") -> dict[str, Any]:
+        return {"action": action, "workflow_run": {"name": name}, "repository": {"full_name": REPO}}
+
+    async def run() -> list[Any]:
+        tasks = [
+            schedule_pr_report_refresh(state, payload("PR report")),
+            schedule_pr_report_refresh(state, payload("PR report", "requested")),
+            schedule_pr_report_refresh(state, payload("Build")),
+        ]
+        return [await t if t else None for t in tasks]
+
+    assert asyncio.run(run()) == [0, None, None]
