@@ -1,18 +1,29 @@
 """
-The website's editor for the documentation and the blog. Members edit the Markdown under the site repo's
-`src/content/docs/` and `src/content/posts/` on the website; every save is a commit by the member on their
-own branch, `edit/<login>/docs/<section>/<slug>` or `edit/<login>/posts/<slug>`, and a pull request
-publishes it: an open PR is the draft, the site's checks build it, merging it is publishing.
+The website's editor for the documentation and the blog. Editors (members who may push to the site repo) edit
+the Markdown under `src/content/docs/` and `src/content/posts/` on the website: every save is a commit by
+them on the entry's edit branch, `edit/<login>/docs/<section>/<slug>` or `edit/<login>/posts/<slug>`, and a
+pull request publishes it: an open PR is the draft, the site's checks build it, merging it is publishing.
+Deleting a page or post is the same: one commit that removes the entry and its files, and its pull request.
+
+An edit belongs to the entry, not to a person. Everyone sees the open edits of what they are reading
+(`/api/editor/pending`, read with the installation token) and joins one by naming its branch: their saves go
+onto it, so one change stays one pull request however many people work on it.
 
 Sign-in (auth.py) keeps nothing of the user's. Editing asks once more, for the GitHub App's own
 authorisation (`/edit/authorize`, which comes back through `/login/callback`), and keeps the user-to-server
 token it returns, encrypted with a key derived from the session secret, so commits and PRs are the member's
 own. That token may do whatever both the App and the member may do in the org, so it never leaves this
-process and is only ever used on the site repo, on the two content trees. It is refreshed when it expires,
-dropped when GitHub stops accepting it (or the session secret changes), and revoked on sign-out.
+process and is only ever used on the site repo, on the content trees and their media. It is refreshed when it
+expires, dropped when GitHub stops accepting it (or the session secret changes), and revoked on sign-out.
 
-Reads are member-only GETs; saves, publishing and discarding are POSTs with the CSRF token, rate limited
-apart from the member actions (manage.py), and each writes an `actions` row whatever the outcome.
+Files go up one at a time, as git blobs, when they are added in the editor (`/api/editor/upload`); a save
+then names them, so a save request stays small whatever the videos weigh. Images sit beside the Markdown (the
+site optimises them); videos are served as they are, from `public/media/<slug>/` for a post and
+`public/media/docs/<section>/<slug>/` for a docs page. Commits are made with the git data API (tree, commit,
+then a fast-forward of the branch, which refuses when someone saved in between).
+
+Reads are member-only GETs; writes are POSTs with the CSRF token, rate limited apart from the member actions
+(manage.py), and each writes an `actions` row whatever the outcome.
 """
 
 import asyncio
@@ -23,11 +34,13 @@ import hashlib
 import logging
 import re
 import secrets
+import time
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import quote, urlencode
 
 import httpx
+import yaml
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
@@ -35,7 +48,7 @@ from pydantic import BaseModel, Field
 
 from . import auth, manage
 from .db import utcnow
-from .github import GitHub, GraphQLError
+from .github import GitHub, GraphQLError, installation_client
 from .state import State, state_of
 
 log = logging.getLogger(__name__)
@@ -46,16 +59,23 @@ PURPOSE = "edit"
 """The `purpose` of a pending OAuth cookie that authorises the editor rather than signs in."""
 DOC = re.compile(r"src/content/docs/(?P<section>[a-z0-9-]+)/(?P<slug>[a-z0-9][a-z0-9-]*)\.md")
 POST = re.compile(r"src/content/posts/(?P<slug>[a-z0-9][a-z0-9_-]*)/index\.md")
-ASSET = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.(?:png|jpe?g|gif|webp)", re.IGNORECASE)
+EDIT_BRANCH = re.compile(r"edit/(?P<login>[a-z0-9](?:[a-z0-9-]{0,38}))/(?P<key>.+)")
+IMAGE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.(?:png|jpe?g|gif|webp)", re.IGNORECASE)
 """Images people may add beside a page. No SVG: the site serves it from its own origin, where it could script."""
+VIDEO = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.(?:mp4|webm)", re.IGNORECASE)
+"""Videos, served as uploaded: nothing is transcoded, so they must already play in browsers."""
 SHOWN = re.compile(r".+\.(?:png|jpe?g|gif|webp|svg)", re.IGNORECASE)
 """Images already in a folder, listed for the editor's preview and its picker."""
 MARKDOWN_MAX = 512 * 1024
-ASSET_MAX = 5 * 1024 * 1024
-SAVE_MAX = 20 * 1024 * 1024
-ASSETS_MAX = 20
+IMAGE_MAX = 5 * 1024 * 1024
+VIDEO_MAX = 50 * 1024 * 1024
+FILES_MAX = 40
 REFRESH_MARGIN = datetime.timedelta(minutes=5)
+PENDING_TTL = 30.0
+EDITOR_TTL = 600.0
 _locks: dict[str, asyncio.Lock] = {}
+_pending: dict[str, tuple[float, list["Pending"]]] = {}
+_editors: dict[str, tuple[float, bool | None]] = {}
 
 
 # -- entries ------------------------------------------------------------------------------------------------------
@@ -68,14 +88,23 @@ class Entry:
     path: str
     kind: Literal["doc", "post"]
     key: str
-    """`docs/<section>/<slug>` or `posts/<slug>`: the tail of the edit branch, and how people name it."""
+    """`docs/<section>/<slug>` or `posts/<slug>`: the tail of an edit branch, and how people name it."""
 
     @property
     def folder(self) -> str:
         return self.path.rsplit("/", 1)[0]
 
+    @property
+    def media(self) -> str:
+        """Where its videos live in the repo; the site serves `public/` at its root."""
+        return f"public/media/{self.key[6:]}" if self.kind == "post" else f"public/media/{self.key}"
+
     def branch(self, login: str) -> str:
         return f"edit/{login.lower()}/{self.key}"
+
+    @property
+    def noun(self) -> str:
+        return "docs page" if self.kind == "doc" else "post"
 
     @property
     def label(self) -> str:
@@ -91,21 +120,29 @@ def entry_of(path: str) -> Entry:
     raise HTTPException(400, "path must be src/content/docs/<section>/<slug>.md or src/content/posts/<slug>/index.md")
 
 
-def entry_of_branch(branch: str, login: str) -> Entry | None:
-    prefix = f"edit/{login.lower()}/"
-    if not branch.startswith(prefix):
-        return None
-    key = branch[len(prefix) :]
-    if key.startswith("docs/"):
-        path = f"src/content/{key}.md"
-    elif key.startswith("posts/"):
-        path = f"src/content/{key}/index.md"
-    else:
-        return None
+def entry_of_key(key: str) -> Entry | None:
+    path = f"src/content/{key}.md" if key.startswith("docs/") else f"src/content/{key}/index.md"
     try:
         return entry_of(path)
     except HTTPException:
         return None
+
+
+def entry_of_branch(branch: str) -> tuple[str, Entry] | None:
+    """(owner, entry) of an edit branch, or None for any other branch."""
+    match = EDIT_BRANCH.fullmatch(branch)
+    entry = entry_of_key(match["key"]) if match else None
+    return (match["login"], entry) if match and entry else None
+
+
+def branch_for(target: Entry, login: str, branch: str | None) -> str:
+    """The branch a request works on: the one it names (anyone's edit of this entry), else the member's own."""
+    if not branch:
+        return target.branch(login)
+    found = entry_of_branch(branch)
+    if found is None or found[1] != target:
+        raise HTTPException(400, f"{branch!r} is not an edit branch of {target.key}")
+    return branch
 
 
 # -- tokens -------------------------------------------------------------------------------------------------------
@@ -370,7 +407,8 @@ async def _file(github: GitHub, repo: str, path: str, ref: str) -> str | None:
     raise HTTPException(413, f"{path} is too large for the editor")
 
 
-async def _images(github: GitHub, repo: str, folder: str, ref: str) -> list[str]:
+async def _listing(github: GitHub, repo: str, folder: str, ref: str) -> list[str]:
+    """File names in a folder at a ref (none when it does not exist)."""
     try:
         listing = await github.get_json(f"/repos/{repo}/contents/{quote(folder)}", {"ref": ref})
     except httpx.HTTPStatusError as exc:
@@ -379,7 +417,14 @@ async def _images(github: GitHub, repo: str, folder: str, ref: str) -> list[str]
         raise
     if not isinstance(listing, list):
         return []
-    return sorted(str(i["name"]) for i in listing if i.get("type") == "file" and SHOWN.fullmatch(str(i["name"])))
+    return sorted(str(i["name"]) for i in listing if i.get("type") == "file")
+
+
+async def _tree(github: GitHub, repo: str, sha: str) -> list[str]:
+    """Every file path in a commit."""
+    commit = await github.get_json(f"/repos/{repo}/git/commits/{sha}")
+    tree = await github.get_json(f"/repos/{repo}/git/trees/{commit['tree']['sha']}", {"recursive": "1"})
+    return [str(t["path"]) for t in tree.get("tree", []) if t.get("type") == "blob"]
 
 
 class Pull(BaseModel):
@@ -387,22 +432,17 @@ class Pull(BaseModel):
     title: str
     url: str
     branch: str
-    path: str | None = None
-    """The entry's Markdown file, when the branch is one of the editor's."""
     draft: bool = False
     checks: Literal["pending", "success", "failure"] | None = None
     updated_at: str | None = None
 
 
-def _pull(raw: dict[str, Any], login: str) -> Pull:
-    branch = str(raw["head"]["ref"])
-    entry = entry_of_branch(branch, login)
+def _pull(raw: dict[str, Any]) -> Pull:
     return Pull(
         number=int(raw["number"]),
         title=str(raw["title"]),
         url=str(raw["html_url"]),
-        branch=branch,
-        path=entry.path if entry else None,
+        branch=str(raw["head"]["ref"]),
         draft=bool(raw.get("draft")),
         updated_at=raw.get("updated_at"),
     )
@@ -411,7 +451,7 @@ def _pull(raw: dict[str, Any], login: str) -> Pull:
 async def _open_pull(github: GitHub, repo: str, branch: str) -> Pull | None:
     owner = repo.split("/", 1)[0]
     pulls = await github.get_json(f"/repos/{repo}/pulls", {"state": "open", "head": f"{owner}:{branch}"})
-    return _pull(pulls[0], branch.split("/")[1]) if pulls else None
+    return _pull(pulls[0]) if pulls else None
 
 
 async def _merged(github: GitHub, repo: str, branch: str, sha: str) -> bool:
@@ -421,38 +461,172 @@ async def _merged(github: GitHub, repo: str, branch: str, sha: str) -> bool:
     return any(p.get("merged_at") and p["head"]["sha"] == sha for p in closed)
 
 
-async def _checks(github: GitHub, repo: str, sha: str) -> Literal["pending", "success", "failure"] | None:
-    """The PR head's check runs in one word: the site's check.yml builds and validates every change."""
+def _title(markdown: str | None) -> str | None:
+    """The front matter's `title`, when it has one."""
+    match = re.match(r"---\r?\n(.*?)\r?\n---", markdown or "", re.DOTALL)
     try:
-        runs = (await github.get_json(f"/repos/{repo}/commits/{sha}/check-runs", {"per_page": 100})).get(
-            "check_runs", []
-        )
-    except httpx.HTTPStatusError:
+        data = yaml.safe_load(match[1]) if match else None
+    except yaml.YAMLError:
         return None
-    if not runs:
-        return None
-    if any(r.get("status") != "completed" for r in runs):
-        return "pending"
-    if any(r.get("conclusion") not in ("success", "skipped", "neutral") for r in runs):
-        return "failure"
-    return "success"
+    title = data.get("title") if isinstance(data, dict) else None
+    return str(title) if title else None
+
+
+# -- who may edit -------------------------------------------------------------------------------------------------
+
+
+async def can_edit(state: State, login: str) -> bool | None:
+    """Whether GitHub lets the member push to the site repo, read with the installation token so the site can show
+    its buttons before the editor is authorised; None when GitHub cannot say. Cached for ten minutes."""
+    key = f"{state.db.path}:{login.lower()}"
+    cached = _editors.get(key)
+    if cached and time.monotonic() - cached[0] < EDITOR_TTL:
+        return cached[1]
+    verdict: bool | None = None
+    try:
+        github = await installation_client(state)
+        if github is not None:
+            body = await github.get_json(f"/repos/{repo_of(state)}/collaborators/{login}/permission")
+            verdict = body.get("permission") in ("admin", "maintain", "write")
+    except httpx.HTTPError:
+        log.warning("cannot read %s's permission on %s", login, repo_of(state))
+    _editors[key] = (time.monotonic(), verdict)
+    return verdict
+
+
+# -- open edits ---------------------------------------------------------------------------------------------------
+
+
+class Pending(BaseModel):
+    """An open edit of an entry: a branch `edit/<owner>/<key>`, and its pull request once there is one."""
+
+    path: str
+    kind: Literal["doc", "post"]
+    key: str
+    branch: str
+    owner: str
+    """Who started it (the branch's login); others may have joined since."""
+    change: Literal["new", "edit", "delete"]
+    title: str | None = None
+    head: str
+    updated_at: str | None = None
+    pull: Pull | None = None
+
+
+REFS = """
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef { name }
+    refs(refPrefix: "refs/heads/edit/", first: 100) {
+      nodes {
+        name
+        target { ... on Commit { oid committedDate } }
+        associatedPullRequests(states: OPEN, first: 1) {
+          nodes {
+            number title url isDraft updatedAt headRefName
+            commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+ROLLUP: dict[str, Literal["pending", "success", "failure"]] = {
+    "SUCCESS": "success",
+    "PENDING": "pending",
+    "EXPECTED": "pending",
+    "FAILURE": "failure",
+    "ERROR": "failure",
+}
+
+
+def forget_pending(state: State) -> None:
+    _pending.pop(str(state.db.path), None)
+
+
+async def pending(state: State) -> list[Pending]:
+    """Every open edit in the site repo, by anyone: two GraphQL calls with the installation token (the branches with
+    their pull requests, then each one's Markdown and whether the default branch has it), cached briefly."""
+    key = str(state.db.path)
+    cached = _pending.get(key)
+    if cached and time.monotonic() - cached[0] < PENDING_TTL:
+        return cached[1]
+    github = await installation_client(state)
+    if github is None:
+        raise HTTPException(503, "the GitHub App is not configured or not installed")
+    owner, name = repo_of(state).split("/", 1)
+    data = await github.graphql(REFS, {"owner": owner, "name": name})
+    repo = data["repository"]
+    base = str((repo.get("defaultBranchRef") or {}).get("name") or "main")
+    found: list[tuple[str, str, Entry, dict[str, Any]]] = []
+    for node in repo["refs"]["nodes"]:
+        branch = f"edit/{node['name']}"
+        if (hit := entry_of_branch(branch)) is not None:
+            found.append((branch, hit[0], hit[1], node))
+    items: list[Pending] = []
+    if found:
+        aliases = []
+        for i, (_, _, target, node) in enumerate(found):
+            oid = node["target"]["oid"]
+            aliases.append(f'b{i}: object(expression: "{oid}:{target.path}") {{ ... on Blob {{ text }} }}')
+            aliases.append(f'm{i}: object(expression: "{base}:{target.path}") {{ oid }}')
+        query = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { %s } }"
+        files = (await github.graphql(query % " ".join(aliases), {"owner": owner, "name": name}))["repository"]
+        for i, (branch, login, target, node) in enumerate(found):
+            text = (files.get(f"b{i}") or {}).get("text")
+            live = files.get(f"m{i}") is not None
+            if text is None and not live:
+                continue  # an edit branch of something that exists nowhere: nothing to show
+            raw = (node.get("associatedPullRequests") or {}).get("nodes") or []
+            pull = None
+            if raw:
+                pr = raw[0]
+                commits = (pr.get("commits") or {}).get("nodes") or []
+                rollup = ((commits[0]["commit"].get("statusCheckRollup") or {}) if commits else {}).get("state")
+                pull = Pull(
+                    number=int(pr["number"]),
+                    title=str(pr["title"]),
+                    url=str(pr["url"]),
+                    branch=branch,
+                    draft=bool(pr.get("isDraft")),
+                    checks=ROLLUP.get(str(rollup)) if rollup else None,
+                    updated_at=pr.get("updatedAt"),
+                )
+            items.append(
+                Pending(
+                    path=target.path,
+                    kind=target.kind,
+                    key=target.key,
+                    branch=branch,
+                    owner=login,
+                    change="delete" if text is None else "edit" if live else "new",
+                    title=_title(text) or (pull.title if pull else None),
+                    head=str(node["target"]["oid"]),
+                    updated_at=(node["target"] or {}).get("committedDate"),
+                    pull=pull,
+                )
+            )
+    items.sort(key=lambda p: p.updated_at or "", reverse=True)
+    _pending[key] = (time.monotonic(), items)
+    return items
 
 
 # -- reads --------------------------------------------------------------------------------------------------------
 
 
 class Status(BaseModel):
-    """What the editor needs before it opens: who, whether they authorised it, whether GitHub lets them push,
-    and their open edits. Anonymous visitors get `authenticated: false`, never a 401."""
+    """What the site needs to know about the visitor: whether to show the editing buttons (`can_edit`) and whether
+    the editor still has to be authorised. Anonymous visitors get `authenticated: false`, never a 401."""
 
     authenticated: bool
     member: bool = False
     login: str | None = None
+    can_edit: bool = False
     authorized: bool = False
-    can_push: bool = False
     repo: str
-    base: str | None = None
-    edits: list[Pull] = Field(default_factory=list)
+    base: str = "main"
 
 
 @router.get("/api/editor/status")
@@ -463,89 +637,104 @@ async def status(request: Request) -> Status:
     if user is None:
         return Status(authenticated=False, repo=repo)
     user, _ = await auth.refresh_if_stale(state, user)
-    answer = Status(authenticated=True, member=user.member, login=user.login, repo=repo)
     if not user.member:
-        return answer
-    token = await user_token(state, user.login)
-    if token is None:
-        return answer
-    github = GitHub(state.http, token)
-    try:
-        meta = await github.get_json(f"/repos/{repo}")
-        pulls = await github.get_json(f"/repos/{repo}/pulls", {"state": "open", "per_page": 100})
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 401:
-            drop(state, user.login)
-            return answer
-        raise _github_error(state, user.login, exc) from exc
-    edits: list[Pull] = []
-    for raw in pulls:
-        head = raw["head"]
-        if (head.get("repo") or {}).get("full_name") == repo and entry_of_branch(str(head["ref"]), user.login):
-            edit = _pull(raw, user.login)
-            edit.checks = await _checks(github, repo, str(head["sha"]))
-            edits.append(edit)
-    return answer.model_copy(
-        update={
-            "authorized": True,
-            "can_push": bool((meta.get("permissions") or {}).get("push")),
-            "base": str(meta.get("default_branch") or "main"),
-            "edits": edits,
-        }
+        return Status(authenticated=True, login=user.login, repo=repo)
+    verdict = await can_edit(state, user.login)
+    authorized = await user_token(state, user.login) is not None
+    return Status(
+        authenticated=True,
+        member=True,
+        login=user.login,
+        can_edit=user.member if verdict is None else verdict,
+        authorized=authorized,
+        repo=repo,
     )
 
 
+class PendingPage(BaseModel):
+    edits: list[Pending]
+
+
+@router.get("/api/editor/pending")
+async def pending_route(request: Request) -> PendingPage:
+    """Open edits for the site's pages to show beside what they change: one list, filtered by the page."""
+    state = state_of(request)
+    await _member(request)
+    try:
+        return PendingPage(edits=await pending(state))
+    except (httpx.HTTPError, GraphQLError) as exc:
+        log.exception("reading open edits failed")
+        raise HTTPException(502, f"GitHub did not list the open edits: {exc}") from exc
+
+
 class EntryPage(BaseModel):
-    """One docs page or post as the editor opens it: from the member's edit branch when there is one."""
+    """One docs page or post as the editor opens it, from an edit branch when there is one."""
 
     path: str
     kind: Literal["doc", "post"]
     key: str
     exists: bool
-    """Whether the file is on the branch it was read from; false for a new entry."""
+    """Whether the file is on the branch it was read from; false for a new entry (or one this edit deletes)."""
     published: bool
     """Whether the file is on the default branch, i.e. live on the site."""
     content: str
     branch: str
-    """The member's edit branch for this entry (it may not exist yet)."""
+    """The edit branch saves go to: the one asked for, or the member's own (which may not exist yet)."""
+    owner: str
+    """Who started that branch."""
     on_branch: bool
     """Whether `content` came from that branch rather than the default branch."""
     base: str
     head: str
     """The commit the content was read at: send it back with the save, which refuses if the branch moved."""
     images: list[str]
-    """Image files in the entry's folder at `head`, for the preview and the picker."""
+    """Images beside the entry at `head`, for the preview and the pickers."""
+    media: list[str]
+    """Videos in the entry's media folder at `head`."""
+    media_url: str
+    """The site path the entry's videos are served at: `<media_url><name>`."""
     raw_base: str
-    """Where the preview loads those images from: `<raw_base><name>`."""
+    """Where the preview loads the entry's committed images: `<raw_base><name>`."""
+    raw_root: str
+    """The repo at `head`, for root-relative files (`/media/…` is `<raw_root>public/media/…`)."""
+    others: list[str]
+    """Other open edit branches of this entry, which the member could join instead."""
     pull: Pull | None = None
 
 
 @router.get("/api/editor/entry")
-async def entry(request: Request, path: str) -> EntryPage:
+async def entry(request: Request, path: str, branch: str | None = None) -> EntryPage:
     state = state_of(request)
     user = await _member(request)
     target = entry_of(path)
     repo = repo_of(state)
     github = await _client(state, user.login)
-    branch = target.branch(user.login)
+    work = branch_for(target, user.login, branch)
     try:
         meta = await github.get_json(f"/repos/{repo}")
         base = str(meta.get("default_branch") or "main")
-        branch_head = await _head(github, repo, branch)
-        pull = await _open_pull(github, repo, branch) if branch_head else None
-        if branch_head and pull is None and await _merged(github, repo, branch, branch_head):
+        branch_head = await _head(github, repo, work)
+        pull = await _open_pull(github, repo, work) if branch_head else None
+        if branch_head and pull is None and await _merged(github, repo, work, branch_head):
             # Published already and the branch was kept: start the next edit from the default branch.
-            await github.delete(f"/repos/{repo}/git/refs/heads/{quote(branch)}")
+            await github.delete(f"/repos/{repo}/git/refs/heads/{quote(work)}")
             branch_head = None
+            forget_pending(state)
         on_branch = branch_head is not None
         head = branch_head or await _head(github, repo, base)
         if head is None:
             raise HTTPException(502, f"{repo} has no {base} branch")
         content = await _file(github, repo, target.path, head)
         published = content is not None if not on_branch else await _file(github, repo, target.path, base) is not None
-        images = await _images(github, repo, target.folder, head)
+        images = [n for n in await _listing(github, repo, target.folder, head) if SHOWN.fullmatch(n)]
+        media = [n for n in await _listing(github, repo, target.media, head) if VIDEO.fullmatch(n)]
     except httpx.HTTPStatusError as exc:
         raise _github_error(state, user.login, exc) from exc
+    try:
+        others = [p.branch for p in await pending(state) if p.key == target.key and p.branch != work]
+    except (httpx.HTTPError, GraphQLError, HTTPException):
+        others = []
+    owner = (entry_of_branch(work) or (user.login, target))[0]
     return EntryPage(
         path=target.path,
         kind=target.kind,
@@ -553,23 +742,135 @@ async def entry(request: Request, path: str) -> EntryPage:
         exists=content is not None,
         published=published,
         content=content or "",
-        branch=branch,
+        branch=work,
+        owner=owner,
         on_branch=on_branch,
         base=base,
         head=head,
         images=images,
+        media=media,
+        media_url=f"/{target.media.removeprefix('public/')}/",
         raw_base=f"https://raw.githubusercontent.com/{repo}/{head}/{target.folder}/",
+        raw_root=f"https://raw.githubusercontent.com/{repo}/{head}/",
+        others=others,
         pull=pull,
     )
+
+
+def _referenced(name: str, markdown: str) -> bool:
+    return re.search(rf"(?:^|[\s(\[\"'/]){re.escape(name)}(?:[?#)\]\"'\s]|$)", markdown) is not None
+
+
+async def _removal(github: GitHub, repo: str, target: Entry, head: str) -> list[str]:
+    """What deleting an entry removes at a commit: a post's whole folder; a docs page and the images beside it that
+    no other page in its folder uses; either one's media folder."""
+    files = await _tree(github, repo, head)
+    media = [f for f in files if f.startswith(f"{target.media}/")]
+    if target.kind == "post":
+        return sorted([f for f in files if f.startswith(f"{target.folder}/")] + media)
+    if target.path not in files:
+        return sorted(media)
+    beside = [f for f in files if f.rsplit("/", 1)[0] == target.folder]
+    pages = {f: await _file(github, repo, f, head) or "" for f in beside if f.endswith(".md")}
+    mine = pages.pop(target.path, "")
+    assets = [
+        f
+        for f in beside
+        if not f.endswith(".md")
+        and _referenced(f.rsplit("/", 1)[1], mine)
+        and not any(_referenced(f.rsplit("/", 1)[1], other) for other in pages.values())
+    ]
+    return sorted([target.path, *assets, *media])
+
+
+class Removal(BaseModel):
+    path: str
+    branch: str
+    title: str | None
+    files: list[str]
+    """What the delete removes, as of now."""
+
+
+@router.get("/api/editor/removal")
+async def removal(request: Request, path: str, branch: str | None = None) -> Removal:
+    """What deleting an entry would remove, for the confirmation."""
+    state = state_of(request)
+    user = await _member(request)
+    target = entry_of(path)
+    repo = repo_of(state)
+    github = await _client(state, user.login)
+    work = branch_for(target, user.login, branch)
+    try:
+        head = await _head(github, repo, work) or await _head(github, repo, "main")
+        if head is None:
+            raise HTTPException(502, f"{repo} has no main branch")
+        files = await _removal(github, repo, target, head)
+        title = _title(await _file(github, repo, target.path, head))
+    except httpx.HTTPStatusError as exc:
+        raise _github_error(state, user.login, exc) from exc
+    return Removal(path=target.path, branch=work, title=title, files=files)
 
 
 # -- writes -------------------------------------------------------------------------------------------------------
 
 
-class Asset(BaseModel):
+class UploadRequest(BaseModel):
+    path: str
+    """The entry the file belongs to."""
     name: str
     data: str
     """The file, base64."""
+
+
+class Uploaded(BaseModel):
+    name: str
+    kind: Literal["image", "video"]
+    sha: str
+    """The git blob; name it in the next save."""
+    target: str
+    """Where the save puts it in the repo."""
+    url: str
+    """How the Markdown refers to it: `./<name>` beside the entry, or the site path of a video."""
+
+
+def _placed(target: Entry, name: str) -> tuple[Literal["image", "video"], str, str]:
+    """(kind, repo path, Markdown reference) of a file added to an entry, or 400 for a name or type we refuse."""
+    if IMAGE.fullmatch(name):
+        return "image", f"{target.folder}/{name}", f"./{name}"
+    if VIDEO.fullmatch(name):
+        return "video", f"{target.media}/{name}", f"/{target.media.removeprefix('public/')}/{name}"
+    raise HTTPException(
+        400, f"{name!r}: png, jpg, gif or webp images and mp4 or webm videos, named with a-z, 0-9, . _ -"
+    )
+
+
+@router.post("/api/editor/upload")
+async def upload(request: Request, body: UploadRequest) -> Uploaded:
+    """One file up as a git blob, before any save names it. Unreferenced blobs are garbage-collected by GitHub."""
+    state = state_of(request)
+    actor = await manage.require_member(request, request.headers.get("X-CSRF-Token"), editing=True)
+    target = entry_of(body.path)
+    kind, where, url = _placed(target, body.name)
+    try:
+        data = base64.b64decode(body.data, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(400, f"{body.name}: not base64") from exc
+    limit = IMAGE_MAX if kind == "image" else VIDEO_MAX
+    if len(data) > limit:
+        raise HTTPException(413, f"{body.name} is over {limit // (1024 * 1024)} MiB")
+    github = await _client(state, actor.login)
+    try:
+        blob = await github.post(
+            f"/repos/{repo_of(state)}/git/blobs", {"content": base64.b64encode(data).decode(), "encoding": "base64"}
+        )
+    except httpx.HTTPStatusError as exc:
+        raise _github_error(state, actor.login, exc) from exc
+    return Uploaded(name=body.name, kind=kind, sha=str(blob.json()["sha"]), target=where, url=url)
+
+
+class FileRef(BaseModel):
+    name: str
+    sha: str
 
 
 class SaveRequest(BaseModel):
@@ -577,8 +878,11 @@ class SaveRequest(BaseModel):
     content: str
     head: str
     """The `head` the editor loaded (or last saved): the branch must still point there."""
+    branch: str | None = None
+    """An edit branch of this entry to save onto (joining it); the member's own when absent."""
     message: str | None = None
-    assets: list[Asset] = Field(default_factory=list)
+    files: list[FileRef] = Field(default_factory=list)
+    """Files uploaded since the last save."""
 
 
 class SaveResult(BaseModel):
@@ -592,8 +896,10 @@ class SaveResult(BaseModel):
 
 class PathRequest(BaseModel):
     path: str
+    branch: str | None = None
     title: str | None = None
-    """For publishing: the entry's title, which names the pull request."""
+    """For publishing and deleting: the entry's title, which names the pull request."""
+    message: str | None = None
 
 
 class PublishResult(BaseModel):
@@ -603,42 +909,58 @@ class PublishResult(BaseModel):
     pull: Pull | None = None
 
 
-COMMIT = """
-mutation($input: CreateCommitOnBranchInput!) {
-  createCommitOnBranch(input: $input) { commit { oid url } }
-}
-"""
-
-
 def _headline(message: str | None, fallback: str) -> str:
     line = (message or "").strip().splitlines()[0].strip() if (message or "").strip() else ""
     return line[:100] if line else fallback
 
 
-def _files(request: SaveRequest, target: Entry) -> list[dict[str, str]]:
-    """The commit's additions, base64: the Markdown (LF, one final newline) and the images beside it."""
-    content = request.content.replace("\r\n", "\n").rstrip("\n") + "\n"
-    markdown = content.encode()
-    if len(markdown) > MARKDOWN_MAX:
-        raise HTTPException(413, f"the Markdown is over {MARKDOWN_MAX // 1024} KiB")
-    if len(request.assets) > ASSETS_MAX:
-        raise HTTPException(413, f"at most {ASSETS_MAX} images per save")
-    files = [{"path": target.path, "contents": base64.b64encode(markdown).decode()}]
-    total = len(markdown)
-    for asset in request.assets:
-        if not ASSET.fullmatch(asset.name) or asset.name.lower() == "index.md":
-            raise HTTPException(400, f"{asset.name!r}: images are png, jpg, gif or webp, named with a-z, 0-9, . _ -")
+async def _commit(
+    github: GitHub, repo: str, branch: str, head: str, message: str, changes: list[tuple[str, str | None]]
+) -> tuple[str, str]:
+    """One commit on `branch` from `head` that sets each path to a blob (None removes it); (oid, url). The branch
+    moves only as a fast-forward, so a save made elsewhere in between is a 409, never overwritten."""
+    base = await github.get_json(f"/repos/{repo}/git/commits/{head}")
+    entries = [{"path": p, "mode": "100644", "type": "blob", "sha": sha} for p, sha in changes]
+    tree = (await github.post(f"/repos/{repo}/git/trees", {"base_tree": base["tree"]["sha"], "tree": entries})).json()
+    commit = (
+        await github.post(f"/repos/{repo}/git/commits", {"message": message, "tree": tree["sha"], "parents": [head]})
+    ).json()
+    try:
+        await github.patch(f"/repos/{repo}/git/refs/heads/{quote(branch)}", {"sha": commit["sha"], "force": False})
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 422:
+            raise HTTPException(
+                409, f"{branch} moved since you loaded it (saved elsewhere?); reload to see it"
+            ) from exc
+        raise
+    return str(commit["sha"]), str(commit["html_url"])
+
+
+async def _branch_at(github: GitHub, repo: str, branch: str, head: str) -> str:
+    """The branch's head, after creating it at `head` when it does not exist; 409 when it moved past `head`."""
+    current = await _head(github, repo, branch)
+    if current is None:
         try:
-            data = base64.b64decode(asset.data, validate=True)
-        except (binascii.Error, ValueError) as exc:
-            raise HTTPException(400, f"{asset.name}: not base64") from exc
-        if len(data) > ASSET_MAX:
-            raise HTTPException(413, f"{asset.name} is over {ASSET_MAX // (1024 * 1024)} MiB")
-        total += len(data)
-        files.append({"path": f"{target.folder}/{asset.name}", "contents": base64.b64encode(data).decode()})
-    if total > SAVE_MAX:
-        raise HTTPException(413, f"one save carries at most {SAVE_MAX // (1024 * 1024)} MiB")
-    return files
+            await github.post(f"/repos/{repo}/git/refs", {"ref": f"refs/heads/{branch}", "sha": head})
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 422:
+                raise HTTPException(409, "the commit you loaded is gone; reload the entry") from exc
+            raise
+        return head
+    if current != head:
+        raise HTTPException(409, f"{branch} moved since you loaded it (saved elsewhere?); reload to see it")
+    return current
+
+
+async def _open_or_reuse(github: GitHub, repo: str, branch: str, title: str, text: str) -> tuple[Pull, bool]:
+    if (existing := await _open_pull(github, repo, branch)) is not None:
+        return existing, False
+    meta = await github.get_json(f"/repos/{repo}")
+    base = str(meta.get("default_branch") or "main")
+    raw = (
+        await github.post(f"/repos/{repo}/pulls", {"title": title, "head": branch, "base": base, "body": text})
+    ).json()
+    return _pull(raw), True
 
 
 @dataclass
@@ -667,8 +989,8 @@ async def _logged(state: State, login: str, action: str, target: str, work: Any)
         error = _github_error(state, login, exc)
         ok, detail, status = False, str(error.detail), error.status_code
     except GraphQLError as exc:
-        # createCommitOnBranch refuses a moved branch with "Expected branch to point to ..."
-        ok, detail, status = False, str(exc), 409 if "expected branch" in str(exc).lower() else None
+        ok, detail, status = False, str(exc), None
+    forget_pending(state)
     action_id = state.model.add_action(login, action, target, "ok" if ok else "error", detail)
     state.stream.publish("actions", action_id)
     log.info("%s %s %s by %s: %s", action, target, "ok" if ok else "error", login, detail)
@@ -684,44 +1006,32 @@ def _answer(state: State, actor: manage.Actor, model: BaseModel) -> JSONResponse
 
 @router.post("/api/editor/save")
 async def save(request: Request, body: SaveRequest) -> JSONResponse:
-    """One commit on the member's edit branch, created from the commit they loaded when it does not exist yet
-    (so a change made on the default branch meanwhile shows as a conflict in the PR, never silently lost)."""
+    """One commit on the edit branch with the Markdown and the files uploaded since the last save. A new branch
+    starts at the commit the editor loaded, so a change made on the default branch meanwhile shows as a conflict in
+    the pull request instead of being lost."""
     state = state_of(request)
     actor = await manage.require_member(request, request.headers.get("X-CSRF-Token"), editing=True)
     target = entry_of(body.path)
-    files = _files(body, target)
+    content = body.content.replace("\r\n", "\n").rstrip("\n") + "\n"
+    if len(content.encode()) > MARKDOWN_MAX:
+        raise HTTPException(413, f"the Markdown is over {MARKDOWN_MAX // 1024} KiB")
+    if len(body.files) > FILES_MAX:
+        raise HTTPException(413, f"at most {FILES_MAX} files per save")
+    placed = [(_placed(target, f.name)[1], f.sha) for f in body.files]
+    if any(not re.fullmatch(r"[0-9a-f]{40}", sha) for _, sha in placed):
+        raise HTTPException(400, "files must name the blobs /api/editor/upload returned")
     repo = repo_of(state)
     github = await _client(state, actor.login)
-    branch = target.branch(actor.login)
+    branch = branch_for(target, actor.login, body.branch)
 
     async def work() -> tuple[str, dict[str, str]]:
-        head = await _head(github, repo, branch)
-        if head is None:
-            try:
-                await github.post(f"/repos/{repo}/git/refs", {"ref": f"refs/heads/{branch}", "sha": body.head})
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 422:
-                    raise HTTPException(409, "the commit you loaded is gone; reload the entry") from exc
-                raise
-            head = body.head
-        elif head != body.head:
-            raise HTTPException(409, f"{branch} moved since you loaded it (saved elsewhere?); reload to see it")
+        head = await _branch_at(github, repo, branch, body.head)
         new = await _file(github, repo, target.path, head) is None
-        fallback = f"{'Add' if new else 'Update'} {target.label}"
-        data = await github.graphql(
-            COMMIT,
-            {
-                "input": {
-                    "branch": {"repositoryNameWithOwner": repo, "branchName": branch},
-                    "expectedHeadOid": head,
-                    "message": {"headline": _headline(body.message, fallback)},
-                    "fileChanges": {"additions": files},
-                }
-            },
-        )
-        commit = data["createCommitOnBranch"]["commit"]
-        images = f" with {len(files) - 1} image{'s' if len(files) > 2 else ''}" if len(files) > 1 else ""
-        return f"saved {target.key} to {branch}{images}", {"oid": str(commit["oid"]), "url": str(commit["url"])}
+        markdown = (await github.post(f"/repos/{repo}/git/blobs", {"content": content, "encoding": "utf-8"})).json()
+        message = _headline(body.message, f"{'Add' if new else 'Update'} {target.label}")
+        oid, url = await _commit(github, repo, branch, head, message, [(target.path, str(markdown["sha"])), *placed])
+        extra = f" with {len(placed)} file{'s' if len(placed) > 1 else ''}" if placed else ""
+        return f"saved {target.key} to {branch}{extra}", {"oid": oid, "url": url}
 
     done = await _logged(state, actor.login, "edit-save", target.key, work())
     if done.status == 409:
@@ -740,47 +1050,76 @@ async def save(request: Request, body: SaveRequest) -> JSONResponse:
 
 @router.post("/api/editor/publish")
 async def publish(request: Request, body: PathRequest) -> JSONResponse:
-    """Open the pull request for the member's edit (or return the open one). Merging it publishes."""
+    """Open the pull request for an edit (or return the open one). Merging it publishes."""
     state = state_of(request)
     actor = await manage.require_member(request, request.headers.get("X-CSRF-Token"), editing=True)
     target = entry_of(body.path)
     repo = repo_of(state)
     github = await _client(state, actor.login)
-    branch = target.branch(actor.login)
+    branch = branch_for(target, actor.login, body.branch)
 
     async def work() -> tuple[str, Pull]:
         if await _head(github, repo, branch) is None:
             raise HTTPException(404, "nothing saved yet: save first")
-        if (existing := await _open_pull(github, repo, branch)) is not None:
-            return f"pull request #{existing.number} is already open", existing
-        meta = await github.get_json(f"/repos/{repo}")
-        base = str(meta.get("default_branch") or "main")
-        new = await _file(github, repo, target.path, base) is None
+        new = await _file(github, repo, target.path, "main") is None
         title = (body.title or "").strip().splitlines()[0][:80] if (body.title or "").strip() else target.key
-        noun = "docs page" if target.kind == "doc" else "post"
         text = (
-            f"{'A new' if new else 'An edit to the'} {noun} `{target.path}`, written in the website editor.\n\n"
+            f"{'A new' if new else 'An edit to the'} {target.noun} `{target.path}`, written in the website editor.\n\n"
             "Merging this pull request publishes it; the site's checks build it first. "
             "Further saves in the editor add commits here."
         )
-        raw = (
-            await github.post(
-                f"/repos/{repo}/pulls",
-                {
-                    "title": f'{"Add" if new else "Update"} the {noun} "{title}"',
-                    "head": branch,
-                    "base": base,
-                    "body": text,
-                },
-            )
-        ).json()
-        pull = _pull(raw, actor.login)
+        pull, opened = await _open_or_reuse(
+            github, repo, branch, f'{"Add" if new else "Update"} the {target.noun} "{title}"', text
+        )
+        if not opened:
+            return f"pull request #{pull.number} is already open", pull
         return f"opened pull request #{pull.number} for {target.key}", pull
 
     done = await _logged(state, actor.login, "edit-publish", target.key, work())
-    return _answer(
-        state, actor, PublishResult(ok=done.ok, action_id=done.action_id, detail=done.detail, pull=done.value)
-    )
+    answer = PublishResult(ok=done.ok, action_id=done.action_id, detail=done.detail, pull=done.value)
+    return _answer(state, actor, answer)
+
+
+@router.post("/api/editor/delete")
+async def delete(request: Request, body: PathRequest) -> JSONResponse:
+    """Propose deleting an entry: one commit that removes it and its files, and its pull request (on the entry's open
+    edit when it is joined, else the member's own branch from the default branch). Nothing redirects: after the merge
+    the address is simply gone."""
+    state = state_of(request)
+    actor = await manage.require_member(request, request.headers.get("X-CSRF-Token"), editing=True)
+    target = entry_of(body.path)
+    repo = repo_of(state)
+    github = await _client(state, actor.login)
+    branch = branch_for(target, actor.login, body.branch)
+
+    async def work() -> tuple[str, Pull]:
+        head = await _head(github, repo, branch)
+        if head is None:
+            main = await _head(github, repo, "main")
+            if main is None:
+                raise HTTPException(502, f"{repo} has no main branch")
+            head = await _branch_at(github, repo, branch, main)
+        files = await _removal(github, repo, target, head)
+        if not files:
+            raise HTTPException(404, f"{target.key} has nothing to delete")
+        title = (body.title or "").strip().splitlines()[0][:80] if (body.title or "").strip() else target.key
+        message = _headline(body.message, f"Delete {target.label}")
+        await _commit(github, repo, branch, head, message, [(f, None) for f in files])
+        listed = "\n".join(f"- `{f}`" for f in files)
+        text = f"Deletes the {target.noun} `{target.path}`, from the website editor. Merging it removes:\n\n{listed}\n"
+        heading = f'Delete the {target.noun} "{title}"'
+        pull, opened = await _open_or_reuse(github, repo, branch, heading, text)
+        if not opened:
+            # The edit it joined becomes a deletion: say so where reviewers look.
+            await github.patch(f"/repos/{repo}/pulls/{pull.number}", {"title": heading, "body": text})
+            pull = pull.model_copy(update={"title": heading})
+        return f"proposed deleting {target.key} ({len(files)} files) in pull request #{pull.number}", pull
+
+    done = await _logged(state, actor.login, "edit-delete", target.key, work())
+    if done.status == 409:
+        raise HTTPException(409, done.detail)
+    answer = PublishResult(ok=done.ok, action_id=done.action_id, detail=done.detail, pull=done.value)
+    return _answer(state, actor, answer)
 
 
 @router.post("/api/editor/discard")
@@ -791,7 +1130,7 @@ async def discard(request: Request, body: PathRequest) -> JSONResponse:
     target = entry_of(body.path)
     repo = repo_of(state)
     github = await _client(state, actor.login)
-    branch = target.branch(actor.login)
+    branch = branch_for(target, actor.login, body.branch)
 
     async def work() -> tuple[str, None]:
         if await _head(github, repo, branch) is None:
@@ -801,7 +1140,7 @@ async def discard(request: Request, body: PathRequest) -> JSONResponse:
             await github.patch(f"/repos/{repo}/pulls/{pull.number}", {"state": "closed"})
             closed = f", closed #{pull.number}"
         await github.delete(f"/repos/{repo}/git/refs/heads/{quote(branch)}")
-        return f"discarded the edit of {target.key}{closed}", None
+        return f"discarded {branch}{closed}", None
 
     done = await _logged(state, actor.login, "edit-discard", target.key, work())
     return _answer(state, actor, PublishResult(ok=done.ok, action_id=done.action_id, detail=done.detail))

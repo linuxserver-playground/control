@@ -91,9 +91,11 @@ Every page is server-rendered and also available as JSON (pydantic models in `co
 | `GET /login`, `/login/callback`, `POST /logout` | | Member sign-in (below). `POST /api/logout` with `X-CSRF-Token` is the website's sign-out: `204`, cookie cleared. |
 | `POST /manage/{rerun,cancel,dispatch,packages,skip,unskip,reconcile}` | `POST /api/actions/{same}` | Member actions (below): the HTML form, or a JSON body with the same fields plus the `X-CSRF-Token` header, answering `{ok, action_id, detail}`. |
 | `GET /edit/authorize`            |                                   | The website editor's own authorisation (below): a signed-in member only, through the GitHub App's OAuth client, back to `next`. |
-|                                  | `GET /api/editor/status`          | The editor's state for the visitor: `{authenticated, member, login, authorized, can_push, repo, base, edits}`, `edits` being their open edit PRs with check status; never 401. |
-|                                  | `GET /api/editor/entry?path=`     | One docs page or post as the editor opens it (from the member's edit branch when there is one): content, `head`, images, the open PR. `428` until the editor is authorised. |
-|                                  | `POST /api/editor/{save,publish,discard}` | Commit to the member's edit branch, open its PR, or close it and delete the branch; `X-CSRF-Token`, answering `{ok, action_id, detail, …}`. `POST /api/editor/revoke` forgets the authorisation. |
+|                                  | `GET /api/editor/status`          | The visitor as an editor: `{authenticated, member, login, can_edit, authorized, repo, base}`. `can_edit` (push access to the site repo, read with the installation token) decides the site's buttons; never 401. |
+|                                  | `GET /api/editor/pending`         | Every open edit in the site repo, by anyone: `{edits: [{path, kind, key, branch, owner, change: new/edit/delete, title, head, updated_at, pull}]}`. Members only; cached 30 s. |
+|                                  | `GET /api/editor/entry?path=&branch=` | One docs page or post as the editor opens it, from the named edit branch (anyone's: joining it) or the member's own: content, `head`, images, videos, the PR, other open edits. `428` until the editor is authorised. |
+|                                  | `GET /api/editor/removal?path=&branch=` | What deleting an entry would remove, for the confirmation. |
+|                                  | `POST /api/editor/{upload,save,publish,delete,discard}` | Upload a file as a blob; commit to the edit branch; open its PR; delete the entry in a commit and PR; or close the PR and delete the branch. `X-CSRF-Token`; writes answer `{ok, action_id, detail, …}`. `POST /api/editor/revoke` forgets the authorisation. |
 | `GET /badge/{name}/{tag}.svg`    |                                   | Shields-style `CI | passing / failing / unknown` from the latest live build publishing that release tag (`latest`, `develop`…). Cached 5 minutes. |
 | `GET /healthz`                   |                                   | `{"status":"ok","db":true}`                                                            |
 | `GET /setup`                     |                                   | Start the GitHub App manifest flow, or show the app's status once it exists.           |
@@ -211,8 +213,10 @@ uses these; see below); both route families run one `prepare_*` function per act
 
 ## The website editor
 
-Members edit the documentation and the blog on the website (`/edit/` on the site): Markdown on the left, a
-preview on the right. Control does the GitHub side in `control/editor.py`, as the member:
+People who may push to the site repo edit the documentation and the blog on the website: the pages
+themselves carry the buttons (edit and delete on a page or post, new post on the blog, new page on a docs
+section), and `/edit/` is the editor they open. Control does the GitHub side in `control/editor.py`, as the
+member:
 
 - **Authorisation.** Sign-in keeps nothing of the user's. Editing needs a second, one-off step,
   `GET /edit/authorize?next=<site url>`: the GitHub App's own OAuth client (never the classic OAuth App,
@@ -222,19 +226,26 @@ preview on the right. Control does the GitHub side in `control/editor.py`, as th
   from `CONTROL_SESSION_SECRET` (a new secret makes old tokens unreadable, and they are dropped), refreshed
   before it expires, dropped when GitHub answers 401, and revoked (`DELETE /applications/{client_id}/token`)
   on sign-out or `POST /api/editor/revoke`. It never leaves control and is only used on `SITE_REPO`.
-- **Paths.** Only `src/content/docs/<section>/<slug>.md` and `src/content/posts/<slug>/index.md`, plus
-  png, jpg, gif or webp images in the same folder (no SVG); 512 KiB of Markdown, 5 MiB an image, 20 MiB a save.
-- **Branches and PRs.** Every entry has one branch per member, `edit/<login>/docs/<section>/<slug>` or
-  `edit/<login>/posts/<slug>`, created from the commit the editor loaded. A save is one
-  `createCommitOnBranch` commit (signed by GitHub, authored by the member) with the Markdown and its images,
-  refused with `409` when the branch moved since the editor loaded it. Publishing opens the PR into the
-  default branch; the site's `check.yml` builds it; merging it publishes. An entry whose branch was merged
-  (and kept) starts again from the default branch the next time it opens. Discarding closes the PR and
-  deletes the branch.
+- **Paths.** Only `src/content/docs/<section>/<slug>.md` and `src/content/posts/<slug>/index.md`; png, jpg,
+  gif or webp images (5 MiB) beside the Markdown, and mp4 or webm videos (50 MiB, served as uploaded, never
+  transcoded) in `public/media/<slug>/` for a post or `public/media/docs/<section>/<slug>/` for a page.
+- **Branches and joining.** An edit is a branch, `edit/<login>/docs/<section>/<slug>` or
+  `edit/<login>/posts/<slug>`, created from the commit the editor loaded. `/api/editor/pending` lists every
+  open one with its PR and check state (two GraphQL calls with the installation token, cached 30 s), so the
+  site shows them beside what they change; anyone who opens one joins it (`branch=`), and their saves go onto
+  it, keeping one change in one pull request.
+- **Commits.** Files go up one at a time as blobs (`upload`); a save is one commit with the git data API (a
+  tree on the loaded commit, then a fast-forward of the branch), so a save made elsewhere in between is a
+  `409`, never overwritten. Publishing opens the PR into the default branch; the site's `check.yml` builds it;
+  merging it publishes. An entry whose branch was merged (and kept) starts again from the default branch the
+  next time it opens. Discarding closes the PR and deletes the branch.
+- **Deleting.** `delete` removes a post's whole folder, or a docs page and the images beside it that no other
+  page in the folder uses, plus either one's media folder, in one commit and its PR (on the open edit when one
+  is joined, retitled as a deletion). No redirects: after the merge the address is gone.
 - **Limits and the log.** Reads need a member; writes need the CSRF token too. Edits have their own rate
   limit (120 an hour, apart from the 30 member actions) and every attempt is an `actions` row
-  (`edit-authorize`, `edit-save`, `edit-publish`, `edit-discard`). GitHub's own permissions still apply: a
-  member without write access to the site repo is told so (`can_push: false`).
+  (`edit-authorize`, `edit-save`, `edit-publish`, `edit-delete`, `edit-discard`). GitHub's own permissions
+  still apply: the site only shows the buttons to people with push access (`can_edit`).
 
 ## Driving control from the website
 
