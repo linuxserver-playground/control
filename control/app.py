@@ -15,7 +15,7 @@ import httpx
 from fastapi import FastAPI, Request
 from starlette.middleware.cors import CORSMiddleware
 
-from . import auth, events, heal, manage, publish, scheduler, setup, views, webhooks
+from . import auth, editor, events, heal, manage, publish, scheduler, setup, views, webhooks
 from .backfill import backfill_once
 from .config import Settings
 from .db import Database
@@ -94,6 +94,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(setup.router)
     app.include_router(auth.router)
     app.include_router(manage.router)
+    app.include_router(editor.router)
     app.include_router(views.router)
 
     @app.get("/healthz")

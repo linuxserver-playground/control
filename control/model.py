@@ -1134,10 +1134,12 @@ class Model:
             rows = conn.execute("SELECT * FROM actions ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [Action(**dict(row)) for row in rows]
 
-    def count_actions_since(self, actor: str, since: str) -> int:
+    def count_actions_since(self, actor: str, since: str, editing: bool = False) -> int:
+        """Member actions, or with `editing` the website editor's (`edit-*`): each has its own rate limit."""
         with self.db.connect() as conn:
             row = conn.execute(
-                "SELECT COUNT(*) AS n FROM actions WHERE actor = ? AND at >= ?", (actor, since)
+                "SELECT COUNT(*) AS n FROM actions WHERE actor = ? AND at >= ? AND (action LIKE 'edit-%') = ?",
+                (actor, since, editing),
             ).fetchone()
         return int(row["n"])
 

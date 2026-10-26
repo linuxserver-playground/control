@@ -27,6 +27,7 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 RATE_LIMIT = 30
+EDIT_RATE_LIMIT = 120
 RATE_WINDOW = datetime.timedelta(hours=1)
 REASONS = ("manual", "rebuild", "packages", "upstream")
 """The `reason` choices build.yml's workflow_dispatch accepts."""
@@ -83,8 +84,9 @@ class Outcome:
         self.detail = detail
 
 
-async def require_member(request: Request, csrf: str | None) -> Actor:
-    """401 for nobody, 403 for a non-member or a bad CSRF token, 429 over the rate limit."""
+async def require_member(request: Request, csrf: str | None, editing: bool = False) -> Actor:
+    """401 for nobody, 403 for a non-member or a bad CSRF token, 429 over the rate limit (the website editor's
+    saves, `editing`, count against their own, larger one)."""
     state = state_of(request)
     user = auth.current_user(request)
     if user is None:
@@ -95,8 +97,9 @@ async def require_member(request: Request, csrf: str | None) -> Actor:
     if not auth.csrf_ok(user, csrf):
         raise HTTPException(403, "bad CSRF token; reload the page and try again")
     since = (datetime.datetime.now(datetime.UTC) - RATE_WINDOW).isoformat(timespec="seconds")
-    if state.model.count_actions_since(user.login, since) >= RATE_LIMIT:
-        raise HTTPException(429, f"more than {RATE_LIMIT} actions in an hour; wait a while")
+    limit = EDIT_RATE_LIMIT if editing else RATE_LIMIT
+    if state.model.count_actions_since(user.login, since, editing) >= limit:
+        raise HTTPException(429, f"more than {limit} {'edits' if editing else 'actions'} in an hour; wait a while")
     return Actor(user, refreshed)
 
 

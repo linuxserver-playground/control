@@ -20,7 +20,8 @@ fleet, and lets org members act (re-run, cancel, dispatch, skip). Python 3.12+, 
   commit; `tests/test_vendor.py` fails on drift); `control/auth.py` GitHub OAuth sign-in, the signed session
   cookie and the membership check; `control/manage.py` the member POST actions; `control/webhooks.py`
   signature check and intake; `control/setup.py` the manifest bootstrap flow; `control/notify.py` Discord;
-  `control/templating.py` Jinja filters; `control/app.py` wires it together; `control/__main__.py` serve /
+  `control/editor.py` the website editor (the member's own GitHub App token, commits and PRs on the site
+repo's content); `control/templating.py` Jinja filters; `control/app.py` wires it together; `control/__main__.py` serve /
   replay / backfill / discover / schedule.
 - `control/templates/` one template per page extending `base.html` (nav with sign-in state, CSS,
   live-refresh script); `_jobs.html` holds the shared job and step macros, `_actions.html` the member forms.
@@ -66,12 +67,15 @@ setting needs a default that works without it, plus a line in `deploy/n97/README
 - Every scheduler outcome is a `scheduler_decisions` row with a JSON detail; dispatch is always
   `workflow_dispatch` on `build.yml` with the branch as `ref`. Member dispatches go through the same
   `Scheduler.dispatch`, so the cooldown and the log see them.
-- Mutating routes live in `control/manage.py` only: POST, CSRF token from the session, `require_member`
+- Mutating routes live in `control/manage.py` only, apart from the website editor's in `control/editor.py`: POST, CSRF token from the session, `require_member`
   (401 anonymous, 403 for anyone else), rate limited, and an `actions` row whatever the outcome. Each action
   is one `prepare_*` function in `ACTIONS`; `POST /manage/{action}` (form, `csrf` field, redirect) and
   `POST /api/actions/{action}` (JSON body, `X-CSRF-Token` header, JSON result) both run it, so never add
-  logic to one route family only. The user's OAuth token is used once for `GET /user` and never stored;
-  membership is read with the installation token.
+  logic to one route family only. The sign-in token is used once for `GET /user` and never stored;
+  membership is read with the installation token. The one token of a user control keeps is the website
+  editor's (`control/editor.py`): asked for separately, encrypted at rest, used only on `SITE_REPO`'s content
+  paths, never sent to a browser, revoked on sign-out. Editor writes go through `manage.require_member`
+  (`editing=True`) and log an `edit-*` row like any action.
 - The website on `CONTROL_ALLOWED_ORIGINS` drives the JSON API with the session cookie (CORS with
   credentials, `SameSite=None`); every new page needs its `/api/*.json` twin and a README row, and anything
   the site must know about the visitor goes through `/api/me`, never a token in a URL.

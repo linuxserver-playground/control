@@ -24,6 +24,12 @@ def headers_for(token: str) -> dict[str, str]:
     }
 
 
+class GraphQLError(Exception):
+    def __init__(self, errors: list[dict[str, Any]]) -> None:
+        self.errors = errors
+        super().__init__("; ".join(str(e.get("message", e)) for e in errors))
+
+
 class GitHub:
     def __init__(self, http: httpx.AsyncClient, token: str) -> None:
         self.http = http
@@ -43,6 +49,23 @@ class GitHub:
         response = await self.http.post(f"{API}{path}", json=json, headers=self.headers)
         response.raise_for_status()
         return response
+
+    async def patch(self, path: str, json: dict[str, Any] | None = None) -> httpx.Response:
+        response = await self.http.patch(f"{API}{path}", json=json, headers=self.headers)
+        response.raise_for_status()
+        return response
+
+    async def delete(self, path: str) -> httpx.Response:
+        response = await self.http.delete(f"{API}{path}", headers=self.headers)
+        response.raise_for_status()
+        return response
+
+    async def graphql(self, query: str, variables: dict[str, Any]) -> Any:
+        """The `data` of a GraphQL answer; GitHub reports failures with 200 and `errors`, which raise here."""
+        body = (await self.post("/graphql", {"query": query, "variables": variables})).json()
+        if body.get("errors"):
+            raise GraphQLError(body["errors"])
+        return body.get("data")
 
     async def paginate(
         self, path: str, params: dict[str, Any], key: str | None = None, limit: int | None = None

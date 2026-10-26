@@ -3,7 +3,8 @@ Member sign-in. Preferably with a classic OAuth App (OAUTH_CLIENT_ID/SECRET, sco
 its consent screen lists those two scopes, and the user's token is used for two calls, `GET /user` and
 `GET /user/memberships/orgs/{org}`, then dropped. Without an OAuth App the GitHub App's own OAuth client is
 used and membership is read with the installation token (`GET /orgs/{org}/memberships/{login}`, which needs
-the App's organisation permission Members: read). Either way nothing of the user's is stored. What we
+the App's organisation permission Members: read). Either way nothing of the user's is stored (the website
+editor, editor.py, keeps a token only for members who authorise it separately, and sign-out revokes it). What we
 keep is a signed cookie: login, avatar, the member verdict and when it was reached (re-checked hourly),
 and a CSRF token every management form carries. The secret comes from CONTROL_SESSION_SECRET or is random
 per process, in which case everyone is signed out by a restart.
@@ -306,6 +307,11 @@ async def login_callback(request: Request, code: str, state: str) -> RedirectRes
     pending = unsign(app_state.session_secret, request.cookies.get(OAUTH_COOKIE), OAUTH_TTL)
     if pending is None or not secrets.compare_digest(str(pending.get("state", "")), state):
         raise HTTPException(400, "unknown or expired sign-in state; start again at /login")
+    if pending.get("purpose") == "edit":
+        # The website editor's authorisation shares the App's one registered callback (editor.py).
+        from . import editor
+
+        return await editor.finish(request, pending, code)
     try:
         exchange = await app_state.http.post(
             f"{GITHUB}/login/oauth/access_token",
@@ -354,7 +360,15 @@ async def logout(request: Request) -> RedirectResponse:
     response = RedirectResponse(target, status_code=303)
     if user and csrf_ok(user, str(form.get("csrf") or "")):
         clear_session(response, state)
+        await _forget_editor(state, user.login)
     return response
+
+
+async def _forget_editor(state: State, login: str) -> None:
+    """Signing out also revokes the website editor's token, the one thing of the user's control keeps."""
+    from . import editor
+
+    await editor.revoke(state, login)
 
 
 @router.get("/api/me")
@@ -380,7 +394,7 @@ async def me(request: Request) -> Response:
 
 
 @router.post("/api/logout", status_code=204)
-def logout_json(request: Request) -> Response:
+async def logout_json(request: Request) -> Response:
     """Sign-out for the website: the CSRF token from `/api/me` as `X-CSRF-Token`; 401 anonymous, 403 bad token."""
     state = state_of(request)
     user = current_user(request)
@@ -390,4 +404,5 @@ def logout_json(request: Request) -> Response:
         raise HTTPException(403, "bad CSRF token; read it again from /api/me")
     response = Response(status_code=204)
     clear_session(response, state)
+    await _forget_editor(state, user.login)
     return response

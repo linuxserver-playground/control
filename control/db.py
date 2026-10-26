@@ -219,6 +219,18 @@ MIGRATIONS: list[str] = [
     ALTER TABLE builds ADD COLUMN publish_note TEXT;
     CREATE INDEX builds_publish_state ON builds (publish_state);
     """,
+    # Members who authorised the website editor: their GitHub App user token, encrypted (editor.py).
+    """
+    CREATE TABLE editor_tokens (
+        login TEXT PRIMARY KEY,
+        token TEXT NOT NULL,
+        refresh_token TEXT,
+        expires_at TEXT,
+        refresh_expires_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """,
 ]
 
 
