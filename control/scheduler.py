@@ -708,6 +708,39 @@ class Scheduler:
             await self.sleep(TICK_SECONDS)
 
 
+def mod_followup(state: State, payload: dict[str, Any]) -> ModManifest | None:
+    """The mod with version lines whose build just finished (`workflow_run` completed on a docker-mods branch), or
+    None. Its lines build one at a time, so the next missing one goes out now rather than at the next hourly check."""
+    run = payload.get("workflow_run")
+    repository = payload.get("repository")
+    if payload.get("action") != "completed" or not isinstance(run, dict) or not isinstance(repository, dict):
+        return None
+    if repository.get("full_name") != mods.repo_of(state.settings.github_org) or not state.settings.scheduler:
+        return None
+    if run.get("event") not in ("push", "workflow_dispatch"):
+        return None
+    mod = state.model.mod_manifest(str(run.get("head_branch") or ""))
+    return mod if mod is not None and mod.scheduled and len(mod.lines) > 1 else None
+
+
+async def check_mod_now(state: State, mod: ModManifest) -> Decision | None:
+    """One mod check outside the hourly slot, as the hourly one records it. Never raises."""
+    try:
+        github = await installation_client(state)
+        if github is None:
+            return None
+        return await Scheduler(state, github).check_mod(mod)
+    except Exception:
+        log.exception("mod check after the build of %s failed", mod.branch)
+        return None
+
+
+def schedule_mod_followup(state: State, payload: dict[str, Any]) -> asyncio.Task[Any] | None:
+    """Fire-and-forget from the webhook handler, after handlers.process stored the run as completed."""
+    mod = mod_followup(state, payload)
+    return state.spawn(check_mod_now(state, mod)) if mod is not None else None
+
+
 async def run(state: State) -> None:
     """The background task the app starts; it waits for the installation itself."""
     await Scheduler(state, None).run_forever()

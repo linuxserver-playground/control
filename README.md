@@ -204,8 +204,10 @@ A mod with `upstream.lines` (Go's previous release and its release candidate bes
 line. The check resolves every line, the default one first, and dispatches the first whose tag is missing with
 `inputs: {mod_version, line}` (`line` empty for the default line; only such a branch's `build.yml` has that
 input). A version two lines share is the earlier line's. A run in progress holds the whole branch, so one build of a
-mod runs at a time and a second missing line goes out an hour later. The cooldown and the daily retry are per
-version. Each check is still one decision: the dispatched line's (`line`), else the first error, skip, or the
+mod runs at a time (the branch's `build.yml` concurrency group would cancel a second pending run); when that run
+completes, the `workflow_run` webhook checks a mod with lines again at once, so the next missing line goes out
+within a minute rather than at the next hourly slot. The cooldown and the daily retry are per version, so per
+line. Each check is still one decision: the dispatched line's (`line`), else the first error, skip, or the
 default line's, with every line's `{line, upstream, state}` under `lines`.
 
 **Skip flags** (`skips` table, `/api/skips.json`) replace the old `SKIP_EXTERNAL_TRIGGER` org variables. A

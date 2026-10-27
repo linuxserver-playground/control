@@ -72,4 +72,7 @@ async def github_webhook(
         from .events import schedule_pr_report_refresh  # events imports this module
 
         schedule_pr_report_refresh(state, payload)  # Discord links the report comment a PR report run wrote
+        from .scheduler import schedule_mod_followup  # scheduler imports events, which imports this module
+
+        schedule_mod_followup(state, payload)  # a mod with version lines builds its next missing line at once
     return Response(status_code=202)

@@ -541,3 +541,38 @@ async def test_a_deleted_branch_is_dropped_without_asking_github(state: State) -
     store(state)
     assert await mods.refresh_on_push(state, "universal-cloudflared", deleted=True) is None
     assert state.model.mod_manifests() == []
+
+
+def run_completed(branch: str, event: str = "workflow_dispatch", repo: str = MODS_REPO) -> dict[str, Any]:
+    run = {"head_branch": branch, "event": event, "status": "completed", "conclusion": "success"}
+    return {"action": "completed", "workflow_run": run, "repository": {"full_name": repo}}
+
+
+def test_a_finished_build_of_a_mod_with_lines_checks_it_again(state: State) -> None:
+    store(state, "code-server-golang", GOLANG)
+    store(state)
+    golang = scheduler.mod_followup(state, run_completed("code-server-golang"))
+    assert golang is not None and golang.branch == "code-server-golang"
+    assert scheduler.mod_followup(state, run_completed("code-server-golang", "push")) is not None
+    # Single-line mods wait for their hourly check; pull requests, other repos and runs still going do nothing.
+    assert scheduler.mod_followup(state, run_completed("universal-cloudflared")) is None
+    assert scheduler.mod_followup(state, run_completed("code-server-golang", "pull_request")) is None
+    assert scheduler.mod_followup(state, run_completed("code-server-golang", repo="example-org/docker-x")) is None
+    assert scheduler.mod_followup(state, {**run_completed("code-server-golang"), "action": "in_progress"}) is None
+
+
+@pytest.mark.anyio
+async def test_the_next_line_goes_out_when_the_last_build_finishes(state: State) -> None:
+    mod = store(state, "code-server-golang", GOLANG)
+    registry = Registry({"code-server-golang-1.27.3"})
+    first, _ = await check(state, mod, LineResolver(VERSIONS), registry)
+    assert first.detail["line"] == "previous"
+    # Ten minutes later its build has passed: the follow-up check (outside the hourly slot) sends the next line.
+    golang_run(state, 12, NOW + datetime.timedelta(minutes=1))
+    registry.tags.add("code-server-golang-1.26.10")
+    later = NOW + datetime.timedelta(minutes=10)
+    second, github = await check(state, mod, LineResolver(VERSIONS), registry, later)
+    assert second.outcome == "dispatch" and github.posts[0][1]["inputs"] == {
+        "mod_version": "1.28rc1",
+        "line": "unstable",
+    }
