@@ -264,7 +264,8 @@ async def test_live_project_is_dispatched_with_the_free_width(state: State, monk
 
 
 @pytest.mark.anyio
-async def test_projects_not_live_are_dry_runs(state: State) -> None:
+async def test_projects_not_live_are_dry_runs(state: State, monkeypatch: pytest.MonkeyPatch) -> None:
+    live(state, monkeypatch, "wheelie")
     github = FakeGitHub()
     now = [SLOT + datetime.timedelta(minutes=1)]
     async with mock_client(github) as http:
@@ -560,7 +561,8 @@ def test_overdue_threshold() -> None:
 # -- the page -----------------------------------------------------------------------------------------------------
 
 
-def test_batch_page_and_json(client: TestClient, state: State) -> None:
+def test_batch_page_and_json(client: TestClient, state: State, monkeypatch: pytest.MonkeyPatch) -> None:
+    live(state, monkeypatch, "wheelie")
     state.model.add_decision(
         "selkies-layers",
         "main",
