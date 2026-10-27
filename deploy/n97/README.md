@@ -18,6 +18,7 @@ for `*.thelamer.duckdns.org` and proxies by container name. Nothing here publish
    CONTROL_ALLOWED_ORIGINS=https://linuxserver-playground.github.io  # the default; the website origin(s) that may drive the JSON API
    CONTROL_BACKFILL_ON_START=true
    CONTROL_SCHEDULER=true                         # the default; false stops dispatching builds
+   CONTROL_BATCH_LIVE=wheelie                     # the default; batch projects control dispatches (csv), the rest are dry runs
    EOF
    chmod 600 /home/thelamer/control/.env
    ```

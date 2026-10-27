@@ -45,6 +45,13 @@ class GitHub:
     async def get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
         return (await self.get(path, params)).json()
 
+    async def get_text(self, path: str, params: dict[str, Any] | None = None) -> str:
+        """A file's raw bytes from the contents API (`/repos/{repo}/contents/{path}`), as text."""
+        headers = {**self.headers, "Accept": "application/vnd.github.raw+json"}
+        response = await self.http.get(f"{API}{path}", params=params, headers=headers)
+        response.raise_for_status()
+        return response.text
+
     async def post(self, path: str, json: dict[str, Any] | None = None) -> httpx.Response:
         response = await self.http.post(f"{API}{path}", json=json, headers=self.headers)
         response.raise_for_status()

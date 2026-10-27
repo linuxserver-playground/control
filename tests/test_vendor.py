@@ -32,3 +32,23 @@ def test_vendored_module_is_the_resolver() -> None:
     assert rv.sanitize("1.2.3~beta+1") == "1.2.3beta1"
     assert rv.derive_semver("v4.0.20.3014") == "4.0.20"
     assert issubclass(rv.AssetsNotReady, rv.ResolveError)
+
+
+GAPS_VENDORED = Path(__file__).resolve().parents[1] / "control" / "vendor" / "wheelie_gaps.py"
+GAPS_SOURCE = Path(__file__).resolve().parents[2] / "wheelie" / "scripts" / "gaps.py"
+
+
+def test_vendored_gap_check_header_names_source_and_commit() -> None:
+    header, _, _ = GAPS_VENDORED.read_text().partition(HEADER_END)
+    assert "linuxserver-playground/wheelie scripts/gaps.py" in header
+    assert any(len(word.strip(".")) == 40 for word in header.split()), "header names no 40-hex commit"
+
+
+@pytest.mark.skipif(not GAPS_SOURCE.exists(), reason="wheelie checkout not beside control")
+def test_vendored_gap_check_equals_source() -> None:
+    _, found, body = GAPS_VENDORED.read_text().partition(HEADER_END)
+    assert found, "vendoring header marker missing"
+    assert body == GAPS_SOURCE.read_text(), (
+        "control/vendor/wheelie_gaps.py drifted from wheelie/scripts/gaps.py; copy it back and update the commit "
+        "in the header"
+    )

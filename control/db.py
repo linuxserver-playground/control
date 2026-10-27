@@ -231,6 +231,39 @@ MIGRATIONS: list[str] = [
         updated_at TEXT NOT NULL
     );
     """,
+    # Batch build projects (batch.py): every finished run control has looked at, and the last state of each
+    # unit (a job of the run: a layer, an app, a distro and arch), so Discord hears when one starts failing or
+    # recovers rather than every night it stays red.
+    """
+    CREATE TABLE batch_runs (
+        run_id INTEGER NOT NULL,
+        attempt INTEGER NOT NULL,
+        repo TEXT NOT NULL,
+        workflow TEXT,
+        conclusion TEXT,
+        html_url TEXT,
+        completed_at TEXT NOT NULL,
+        failed TEXT NOT NULL,
+        newly_failing TEXT NOT NULL,
+        recovered TEXT NOT NULL,
+        alerted INTEGER NOT NULL,
+        evaluated_at TEXT NOT NULL,
+        PRIMARY KEY (run_id, attempt)
+    );
+    CREATE INDEX batch_runs_repo ON batch_runs (repo, completed_at DESC);
+    CREATE TABLE batch_units (
+        repo TEXT NOT NULL,
+        workflow TEXT NOT NULL,
+        unit TEXT NOT NULL,
+        state TEXT NOT NULL,
+        since TEXT NOT NULL,
+        run_id INTEGER NOT NULL,
+        run_created_at TEXT NOT NULL,
+        html_url TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (repo, workflow, unit)
+    );
+    """,
 ]
 
 

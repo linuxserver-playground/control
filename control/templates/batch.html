@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Batch projects · control{% endblock %}
+{% block body %}
+<h1>Batch build projects</h1>
+{% if not page.enabled %}<p class="note">The scheduler loop is off (<code>CONTROL_SCHEDULER=false</code>); nothing below is started.</p>{% endif %}
+{% set c = page.capacity %}
+<p class="muted">Repositories that build wide matrices on the org's runners. Control starts each run with <code>parallel</code> = what is free of the {{ c.limit }} job slots after a reserve of {{ c.reserve }} for image, hub and site builds, between {{ c.minimum }} and {{ c.maximum }}. Jobs a batch run holds back with <code>max-parallel</code> show as queued on GitHub and are not counted.</p>
+<div class="cards">
+  <div class="card"><div class="label">Free for a batch run</div><div class="value">{{ c.free if c.free > 0 else 0 }} <span class="muted">/ {{ c.limit - c.reserve }}</span></div></div>
+  <div class="card"><div class="label">Other jobs running / waiting</div><div class="value">{{ c.running }} <span class="muted">/ {{ c.waiting }}</span></div></div>
+  <div class="card"><div class="label">Held by batch runs</div><div class="value">{{ c.batch.values() | sum }} <span class="muted">· {{ c.held }} queued behind max-parallel</span></div></div>
+</div>
+
+<h2>Projects</h2>
+<table>
+  <thead><tr><th>Project</th><th>Schedule</th><th>Mode</th><th class="num">Parallel now</th><th>Last decision</th><th>Last dispatch</th><th>Failing</th></tr></thead>
+  <tbody>
+  {% for p in page.projects %}
+    <tr>
+      <td><a href="https://github.com/{{ settings.github_org }}/{{ p.repo }}">{{ p.repo }}</a> <span class="muted"><code>{{ p.workflow }}</code> on <code>{{ p.ref }}</code></span>
+        {% if p.active_run %}<br><a href="/runs/{{ p.active_run.id }}">{{ p.active_run.workflow_name }} #{{ p.active_run.run_number }}</a> <span class="pill {{ kind(p.active_run.status, p.active_run.conclusion) }}">{{ p.active_run.status }}</span>{% endif %}</td>
+      <td>{{ p.schedule }}<br><span class="muted" title="{{ p.next_at | timestamp }}">next {{ p.next_at | until }}</span></td>
+      <td>{% if p.live %}<span class="ok">live</span>{% else %}<span class="muted">dry run</span>{% endif %}</td>
+      <td class="num">{{ p.parallel_now }} <span class="muted">(cap {{ p.cap }})</span></td>
+      <td>{% if p.last_decision %}{% set d = p.last_decision.decision %}<span class="pill {{ d.outcome | kind }}">{{ d.outcome }}</span> <span class="muted" title="{{ d.at | timestamp }}">{{ d.at | ago }}</span>{% if p.last_decision.info.reason %}<br>{{ p.last_decision.info.reason }}{% endif %}{% if p.last_decision.info.message %}<br><span class="bad">{{ p.last_decision.info.message }}</span>{% endif %}{% else %}<span class="muted">none yet</span>{% endif %}</td>
+      <td>{% if p.last_dispatch %}{% set d = p.last_dispatch.decision %}<span class="muted" title="{{ d.at | timestamp }}">{{ d.at | ago }}</span>, parallel {{ p.last_dispatch.info.parallel }}{% if p.last_dispatch.info.dry_run %} <span class="muted">(dry run)</span>{% endif %}{% if p.last_dispatch.run %}<br><a href="/runs/{{ p.last_dispatch.run.id }}">run #{{ p.last_dispatch.run.run_number }}</a> <span class="pill {{ kind(p.last_dispatch.run.status, p.last_dispatch.run.conclusion) }}">{{ p.last_dispatch.run.conclusion or p.last_dispatch.run.status }}</span>{% endif %}{% else %}<span class="muted">never</span>{% endif %}</td>
+      <td>{% if p.failing %}{% for u in p.failing %}<a href="{{ u.html_url }}"><code>{{ u.unit }}</code></a> <span class="muted">since {{ u.since | ago }}</span><br>{% endfor %}{% else %}<span class="muted">none</span>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Decisions</h2>
+{% if page.decisions %}
+<table>
+  <thead><tr><th>When</th><th>Project</th><th>Outcome</th><th>Detail</th></tr></thead>
+  <tbody>
+  {% for v in page.decisions %}
+    {% set d = v.decision %}
+    <tr>
+      <td class="muted" title="{{ d.at | timestamp }}">{{ d.at | ago }}</td>
+      <td>{{ d.image }}</td>
+      <td><span class="pill {{ d.outcome | kind }}">{{ d.outcome }}</span></td>
+      <td>
+        {% if v.info.reason %}{{ v.info.reason }}{% endif %}
+        {% if v.info.parallel %}<span class="muted"> · parallel {{ v.info.parallel }}{% if v.info.capacity %} (free {{ v.info.capacity.free }}){% endif %}</span>{% endif %}
+        {% if v.info.message %}<span class="{{ 'bad' if d.outcome == 'error' else 'muted' }}">{{ v.info.message }}</span>{% endif %}
+        {% if v.info.run_url %} · <a href="{{ v.info.run_url }}">run</a>{% endif %}
+        {% if v.run %} · <a href="/runs/{{ v.run.id }}">run #{{ v.run.run_number }}</a> <span class="pill {{ kind(v.run.status, v.run.conclusion) }}">{{ v.run.conclusion or v.run.status }}</span>{% endif %}
+        {% if v.info.retry_at %}<span class="muted"> · again {{ v.info.retry_at | until }}</span>{% endif %}
+        {% if v.info.dry_run %}<span class="muted"> (dry run)</span>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="muted">No batch decisions recorded yet.</p>{% endif %}
+{% endblock %}

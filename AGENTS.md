@@ -16,6 +16,9 @@ fleet, and lets org members act (re-run, cancel, dispatch, skip). Python 3.12+, 
   file, JWT and installation tokens; `control/github.py` the authenticated REST client the scheduler, fleet
   and actions share; `control/fleet.py` live-branch discovery from `image.yml` into `manifests`;
   `control/scheduler.py` the hourly upstream and release checks, the weekly package schedule, decisions and dispatch;
+  `control/batch.py` the batch build projects (selkies-layers, proot-apps, wheelie): sizing `parallel` from the
+  jobs running, their slots, and the per-unit failure alerts; `control/vendor/wheelie_gaps.py` wheelie's gap
+  check, copied verbatim like the resolver;
   `control/vendor/resolve_version.py` the workflows repo's resolver, copied verbatim (header names the
   commit; `tests/test_vendor.py` fails on drift); `control/auth.py` GitHub OAuth sign-in, the signed session
   cookie and the membership check; `control/manage.py` the member POST actions; `control/webhooks.py`
@@ -65,7 +68,8 @@ setting needs a default that works without it, plus a line in `deploy/n97/README
   to change it, change `workflows/scripts/resolve_version.py`, copy the file back and update the commit in
   the header. The scheduler never runs `command` or `deb_repo` sources (shell from a repo, docker).
 - Every scheduler outcome is a `scheduler_decisions` row with a JSON detail; dispatch is always
-  `workflow_dispatch` on `build.yml` with the branch as `ref`. Member dispatches go through the same
+  `workflow_dispatch` on `build.yml` with the branch as `ref` (a batch project: the workflow and ref its
+  `PROJECTS` entry names). Member dispatches go through the same
   `Scheduler.dispatch`, so the cooldown and the log see them.
 - Mutating routes live in `control/manage.py` only, apart from the website editor's in `control/editor.py`: POST, CSRF token from the session, `require_member`
   (401 anonymous, 403 for anyone else), rate limited, and an `actions` row whatever the outcome. Each action

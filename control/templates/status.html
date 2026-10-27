@@ -3,6 +3,7 @@
 {% block body %}
 <h1>Status</h1>
 <dl>
+  <dt>Version</dt><dd>{{ page.version }}{% if page.revision %} · image built from <a href="https://github.com/{{ page.org }}/control/commit/{{ page.revision }}"><code>{{ page.revision }}</code></a>{% endif %}</dd>
   <dt>Organisation</dt><dd><a href="https://github.com/{{ page.org }}">{{ page.org }}</a></dd>
   <dt>GitHub App</dt>
   <dd>

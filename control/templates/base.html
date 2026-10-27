@@ -53,7 +53,7 @@
 <body>
 <nav>
   <a class="brand" href="/">control</a>
-  {% set nav = [("/", "Fleet"), ("/runs", "Runs"), ("/queue", "Queue"), ("/pulls", "Pull requests"), ("/issues", "Issues"), ("/releases", "Releases"), ("/scheduler", "Scheduler"), ("/management", "Management"), ("/status", "Status")] %}
+  {% set nav = [("/", "Fleet"), ("/runs", "Runs"), ("/queue", "Queue"), ("/pulls", "Pull requests"), ("/issues", "Issues"), ("/releases", "Releases"), ("/scheduler", "Scheduler"), ("/batch", "Batch"), ("/management", "Management"), ("/status", "Status")] %}
   {% set path = path | default("") %}
   {% for href, label in nav %}
     <a href="{{ href }}" {% if path == href or (href != "/" and path.startswith(href)) %}class="current"{% endif %}>{{ label }}</a>

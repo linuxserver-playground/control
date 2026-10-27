@@ -460,6 +460,45 @@ class SchedulerDecision(BaseModel):
         return loaded if isinstance(loaded, dict) else {"message": self.detail}
 
 
+class BatchRun(BaseModel):
+    """A finished run of a batch build project, as control evaluated it (batch.py)."""
+
+    run_id: int
+    attempt: int
+    repo: str
+    workflow: str | None
+    conclusion: str | None
+    html_url: str | None
+    completed_at: str
+    failed: list[str]
+    """Every unit (job name) that failed in this run."""
+    newly_failing: list[str]
+    """The failed units that passed (or were unknown) before: what Discord was told about."""
+    recovered: list[str]
+    alerted: bool
+    """Whether a Discord message went out; runs from before control watched are evaluated silently."""
+    evaluated_at: str
+
+    @field_validator("failed", "newly_failing", "recovered", mode="before")
+    @classmethod
+    def _units(cls, value: Any) -> list[str]:
+        return [str(v) for v in _json_list(value)]
+
+
+class BatchUnit(BaseModel):
+    """The last known state of one unit of a batch project: `pass` or `fail`, and since when."""
+
+    repo: str
+    workflow: str
+    unit: str
+    state: str
+    since: str
+    run_id: int
+    run_created_at: str
+    html_url: str | None
+    updated_at: str
+
+
 class Manifest(BaseModel):
     """One live branch's image.yml, as fleet discovery last read it."""
 
@@ -773,6 +812,91 @@ class Model:
             end = datetime.datetime.fromisoformat(row["completed_at"])
             durations.append(max(0.0, (end - start).total_seconds()))
         return durations
+
+    def open_jobs(self, in_progress_since: str, queued_since: str) -> list[Job]:
+        """Jobs holding or waiting for a runner right now: in progress (started after `in_progress_since`) or
+        queued (created after `queued_since`), in runs that have not completed. The age limits and the run check
+        drop jobs whose completion webhook was lost, so they never count against the org's slots for ever."""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT jobs.* FROM jobs LEFT JOIN runs ON runs.id = jobs.run_id "
+                "WHERE (runs.status IS NULL OR runs.status != 'completed') AND ("
+                "(jobs.status = 'in_progress' AND COALESCE(jobs.started_at, jobs.created_at) >= ?) "
+                "OR (jobs.status = 'queued' AND jobs.created_at >= ?))",
+                (in_progress_since, queued_since),
+            ).fetchall()
+        return [_job_row(row) for row in rows]
+
+    # -- batch projects -------------------------------------------------------------------------------------------
+
+    def completed_runs(self, repo: str, workflows: tuple[str, ...], since: str) -> list[Run]:
+        """Finished non-PR runs of these workflows that completed after `since`, oldest first."""
+        marks = ", ".join("?" for _ in workflows)
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM runs WHERE repo = ? AND status = 'completed' AND workflow_name IN ({marks}) "
+                "AND (event IS NULL OR event != 'pull_request') AND updated_at >= ? ORDER BY updated_at, id",
+                (repo, *workflows, since),
+            ).fetchall()
+        return [Run(**dict(row)) for row in rows]
+
+    def run_durations(self, repo: str, workflow: str, limit: int = 20) -> list[float]:
+        """Wall seconds of the newest successful runs of a workflow, for the overdue check."""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT COALESCE(started_at, created_at) AS start, updated_at FROM runs WHERE repo = ? "
+                "AND workflow_name = ? AND status = 'completed' AND conclusion = 'success' "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (repo, workflow, limit),
+            ).fetchall()
+        return [
+            max(
+                0.0,
+                (
+                    datetime.datetime.fromisoformat(r["updated_at"]) - datetime.datetime.fromisoformat(r["start"])
+                ).total_seconds(),
+            )
+            for r in rows
+        ]
+
+    def batch_run_seen(self, run_id: int, attempt: int) -> bool:
+        with self.db.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM batch_runs WHERE run_id = ? AND attempt = ?", (run_id, attempt)
+            ).fetchone()
+        return row is not None
+
+    def add_batch_run(self, run: BatchRun) -> None:
+        with self.db.connect() as conn:
+            _upsert(conn, "batch_runs", run.model_dump(), ("run_id", "attempt"))
+
+    def batch_runs(self, repo: str, limit: int = 10) -> list[BatchRun]:
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM batch_runs WHERE repo = ? ORDER BY completed_at DESC LIMIT ?", (repo, limit)
+            ).fetchall()
+        return [BatchRun(**dict(row)) for row in rows]
+
+    def batch_unit(self, repo: str, workflow: str, unit: str) -> BatchUnit | None:
+        with self.db.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM batch_units WHERE repo = ? AND workflow = ? AND unit = ?", (repo, workflow, unit)
+            ).fetchone()
+        return BatchUnit(**dict(row)) if row else None
+
+    def upsert_batch_unit(self, unit: BatchUnit) -> None:
+        with self.db.connect() as conn:
+            _upsert(conn, "batch_units", unit.model_dump(), ("repo", "workflow", "unit"))
+
+    def batch_units(self, repo: str, state: str | None = None) -> list[BatchUnit]:
+        sql = "SELECT * FROM batch_units WHERE repo = ?"
+        params: list[Any] = [repo]
+        if state:
+            sql += " AND state = ?"
+            params.append(state)
+        with self.db.connect() as conn:
+            rows = conn.execute(sql + " ORDER BY workflow, unit", params).fetchall()
+        return [BatchUnit(**dict(row)) for row in rows]
 
     # -- pull requests --------------------------------------------------------------------------------------------
 

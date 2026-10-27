@@ -56,6 +56,15 @@ class Settings(BaseModel):
     """Run one GitHub API backfill in the background after boot, once the app is configured and installed."""
     concurrency_limit: int = 20
     """GitHub's concurrent job limit for the org, which the queue page measures in-progress jobs against."""
+    batch_reserve: int = 4
+    """Job slots a batch build project (batch.py) never sizes into: kept free for image, hub and site builds."""
+    batch_min_parallel: int = 2
+    """The narrowest batch run control starts, so a batch always progresses even on a busy fleet."""
+    batch_max_parallel: int = 16
+    """The widest batch run control starts, whatever is free; each project's workflow may cap it lower."""
+    batch_live: tuple[str, ...] = ("wheelie",)
+    """Batch projects control dispatches for real. The others are sized and recorded as dry runs, because their
+    own cron still fires until the repo's `SCHEDULED_BY_CONTROL` variable is set. Env CONTROL_BATCH_LIVE (csv)."""
     scheduler: bool = True
     """Run the fleet discovery and scheduler loop beside the server (once the app is configured and installed)."""
     session_secret: str | None = None
@@ -123,6 +132,14 @@ class Settings(BaseModel):
             fields["backfill_on_start"] = backfill.strip().lower() in ("1", "true", "yes", "on")
         if limit := env("CONTROL_CONCURRENCY_LIMIT"):
             fields["concurrency_limit"] = int(limit)
+        if reserve := env("CONTROL_BATCH_RESERVE"):
+            fields["batch_reserve"] = int(reserve)
+        if minimum := env("CONTROL_BATCH_MIN_PARALLEL"):
+            fields["batch_min_parallel"] = int(minimum)
+        if maximum := env("CONTROL_BATCH_MAX_PARALLEL"):
+            fields["batch_max_parallel"] = int(maximum)
+        if (batch_live := env("CONTROL_BATCH_LIVE")) is not None:
+            fields["batch_live"] = tuple(p.strip() for p in batch_live.split(",") if p.strip())
         if scheduler := env("CONTROL_SCHEDULER"):
             fields["scheduler"] = scheduler.strip().lower() in ("1", "true", "yes", "on")
         if session_secret := env("CONTROL_SESSION_SECRET"):

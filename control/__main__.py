@@ -11,6 +11,10 @@ Usage: python -m control            serve
                                     by default, the release check, or a package check (--image required,
                                     so a typo cannot rebuild the fleet); --dry-run resolves and prints but
                                     records and dispatches nothing
+       python -m control batch --once [--project x] [--dry-run]
+                                    check every (or one) batch build project now: size it against the jobs
+                                    running and dispatch it if it is live (CONTROL_BATCH_LIVE); --dry-run
+                                    records and dispatches nothing
 """
 
 import argparse
@@ -22,7 +26,7 @@ from collections.abc import Awaitable, Callable
 import httpx
 import uvicorn
 
-from . import handlers, scheduler
+from . import batch, handlers, scheduler
 from .app import build_state
 from .backfill import backfill_once
 from .config import Settings
@@ -62,6 +66,8 @@ def main(argv: list[str]) -> int:
         return 1 if record.get("error") else 0
     if command == "schedule":
         return _schedule(settings, db, argv[1:])
+    if command == "batch":
+        return _batch(settings, db, argv[1:])
     print(__doc__, file=sys.stderr)
     return 2
 
@@ -90,6 +96,22 @@ def _schedule(settings: Settings, db: Database, argv: list[str]) -> int:
         print(("would " if args.dry_run and decision.outcome == "dispatch" else "") + decision.line())
     if not decisions:
         print("no live branches matched; run `python -m control discover` or check --image/--branch")
+    return 1 if any(d.outcome == "error" for d in decisions) else 0
+
+
+def _batch(settings: Settings, db: Database, argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="python -m control batch")
+    parser.add_argument("--once", action="store_true", required=True, help="run the check now and exit")
+    parser.add_argument("--project", choices=[p.repo for p in batch.PROJECTS], help="only this project")
+    parser.add_argument("--dry-run", action="store_true", help="size and print; record and dispatch nothing")
+    args = parser.parse_args(argv)
+
+    async def once(state: State) -> list[scheduler.Decision]:
+        return await scheduler.run_batch_once(state, args.project, args.dry_run)
+
+    decisions = asyncio.run(_with_state(settings, db, once))
+    for decision in decisions:
+        print(decision.line())
     return 1 if any(d.outcome == "error" for d in decisions) else 0
 
 

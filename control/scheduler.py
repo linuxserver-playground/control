@@ -12,6 +12,9 @@ discovery found:
 - package check, once a week per branch with `build.package_check` on, spread across the week's hours. A
   branch that was never checked waits for its slot too, so a fresh start does not fire the whole fleet.
 
+The same loop starts the batch build projects (selkies-layers, proot-apps, wheelie), sized to the runner slots
+the fleet leaves free and watched for failures; see batch.py.
+
 Every decision lands in `scheduler_decisions` (`unchanged`, `skipped`, `dispatch`, `error`) with a JSON
 detail, and the page and the fleet board read from there. Dispatching is always `workflow_dispatch` on
 `build.yml` with the branch as `ref`: `repository_dispatch` would only ever run the default branch.
@@ -30,7 +33,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel
 
-from . import events, relay
+from . import batch, events, relay
 from .fleet import discover_once, discovery_due
 from .github import GitHub, installation_client
 from .model import Manifest, Model, Release
@@ -43,7 +46,8 @@ KIND_UPSTREAM = "upstream"
 KIND_RELEASE = "release"
 KIND_PACKAGES = "packages"
 KIND_MANUAL = "manual"
-KINDS = (KIND_UPSTREAM, KIND_RELEASE, KIND_PACKAGES, KIND_MANUAL)
+KIND_BATCH = batch.KIND_BATCH
+KINDS = (KIND_UPSTREAM, KIND_RELEASE, KIND_PACKAGES, KIND_MANUAL, KIND_BATCH)
 COOLDOWN = datetime.timedelta(hours=2)
 """No second dispatch for a branch within this long of the last one, whatever triggered it."""
 INITIAL_RETRY = datetime.timedelta(hours=24)
@@ -530,6 +534,7 @@ class Scheduler:
             since = last.at if last else manifest.created_at
             if due(last_package_slot(manifest.repo, manifest.branch, at), since):
                 decisions.append(await self.check_packages(manifest))
+        decisions.extend(await batch.Batch(self).tick())
         return decisions
 
     async def run_forever(self) -> None:
@@ -582,6 +587,14 @@ async def run_once(
         else:
             decisions.append(await scheduler.check_upstream(manifest, KIND_MANUAL))
     return decisions
+
+
+async def run_batch_once(state: State, project: str | None = None, dry_run: bool = False) -> list[Decision]:
+    """`python -m control batch --once`: check every (or one) batch project now, slots ignored and no waiting for
+    a busy fleet. A live project is dispatched unless `dry_run`, which records and dispatches nothing."""
+    github = await installation_client(state)
+    runner = batch.Batch(Scheduler(state, github, dry_run=dry_run))
+    return [await runner.check(p, forced=True) for p in batch.PROJECTS if project in (None, p.repo)]
 
 
 def upcoming(

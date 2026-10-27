@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 import pytest
 
-from control import events, scheduler
+from control import batch, events, scheduler
 from control.__main__ import main
 from control.fleet import manifest_row
 from control.github import GitHub
@@ -581,7 +581,8 @@ async def test_package_check(state: State) -> None:
 
 
 @pytest.mark.anyio
-async def test_tick_runs_each_check_once_per_slot(state: State) -> None:
+async def test_tick_runs_each_check_once_per_slot(state: State, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(batch, "PROJECTS", ())  # test_batch.py covers the batch projects
     manifest = live(state, seen=NOW - datetime.timedelta(weeks=2))  # long enough known for the weekly slot
     seed(state, "release.published")
     state.db.set("last_discovery", json.dumps({"started": NOW.isoformat()}))  # discovery not due
@@ -620,9 +621,10 @@ async def test_tick_runs_each_check_once_per_slot(state: State) -> None:
 
 
 @pytest.mark.anyio
-async def test_first_package_check_waits_for_the_branch_slot(state: State) -> None:
+async def test_first_package_check_waits_for_the_branch_slot(state: State, monkeypatch: pytest.MonkeyPatch) -> None:
     """A branch nobody checked yet is due at its weekly slot, counted from when discovery stored it, not at
     the first tick: on a fresh start the fleet's package checks spread over the week like every later one."""
+    monkeypatch.setattr(batch, "PROJECTS", ())
     seen = NOW - datetime.timedelta(minutes=5)
     manifest = live(state, seen=seen)
     state.db.set("last_discovery", json.dumps({"started": NOW.isoformat()}))

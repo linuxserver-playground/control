@@ -62,6 +62,9 @@ docker run --rm -p 8080:8080 -e PUID=1000 -e PGID=1000 -e CONTROL_PUBLIC_URL=htt
 | `CONTROL_BACKFILL_ON_START` | `false`                 | `true` runs one GitHub API backfill in the background after boot (once the app is configured and installed). |
 | `CONTROL_CONCURRENCY_LIMIT` | `20`                    | GitHub's concurrent job limit for the org; the queue page measures in-progress jobs against it. |
 | `CONTROL_SCHEDULER`   | `true`                        | Run fleet discovery and the scheduler loop beside the server. `false` keeps the pages and member actions and stops dispatching. |
+| `CONTROL_BATCH_LIVE`  | `wheelie`                     | Batch build projects control dispatches for real (csv; empty for none). The others are sized and recorded as dry runs while their own cron still fires. |
+| `CONTROL_BATCH_RESERVE` | `4`                         | Job slots a batch run never sizes into, kept for image, hub and site builds. |
+| `CONTROL_BATCH_MIN_PARALLEL`, `CONTROL_BATCH_MAX_PARALLEL` | `2`, `16` | The narrowest and widest batch run control starts. |
 | `CONTROL_SESSION_SECRET` | unset                      | Signs the sign-in cookie (HMAC-SHA256). **Set it** (`openssl rand -hex 32`): unset means a random secret per process, logged as a warning, and every restart signs everyone out. |
 | `CONTROL_ALLOWED_ORIGINS` | `https://linuxserver-playground.github.io` | Comma-separated web origins (`scheme://host[:port]`, never `*`) allowed to drive the JSON API from the browser: CORS with credentials, `next` after sign-in may point there, and the session cookie becomes `SameSite=None; Secure`. Empty turns all three off. |
 
@@ -86,7 +89,8 @@ Every page is server-rendered and also available as JSON (pydantic models in `co
 |                                  | `/api/skips.json`                 | Active skip flags.                                                                     |
 |                                  | `/api/actions.json`               | The public member-action log (last 100), newest first.                                 |
 |                                  | `GET /api/me`                     | Who is signed in, for the website: `{authenticated, login, avatar_url, member, checked_at, csrf}`; never 401, anonymous is `authenticated: false`. Re-checks a stale membership. |
-| `GET /status`                    | `/api/status.json`                | App configured/installed, Discord, `/events`, scheduler, row counts, last backfill and discovery, last 20 deliveries. |
+| `GET /batch`                     | `/api/batch.json`                 | Batch build projects: runner capacity now (`running`, `waiting`, `held`, the slots each batch run holds, `free`), and per project its schedule, live or dry run, the `parallel` a run started now would get, the active run, the last decision and dispatch (with its run), the last 10 evaluated runs and the units failing now; the last 50 `batch` decisions. Live-refreshing. |
+| `GET /status`                    | `/api/status.json`                | Version and the commit the running image was built from (`revision`), app configured/installed, Discord, `/events`, scheduler, row counts, last backfill and discovery, last 20 deliveries. |
 | `GET /api/stream`                |                                   | Server-sent events: `{"type": "<table>", "key": ...}` whenever a handler changes a row, including `scheduler_decisions`, `actions`, `skips` and `manifests`. |
 | `GET /login`, `/login/callback`, `POST /logout` | | Member sign-in (below). `POST /api/logout` with `X-CSRF-Token` is the website's sign-out: `204`, cookie cleared. |
 | `POST /manage/{rerun,cancel,dispatch,packages,skip,unskip,reconcile}` | `POST /api/actions/{same}` | Member actions (below): the HTML form, or a JSON body with the same fields plus the `X-CSRF-Token` header, answering `{ok, action_id, detail}`. |
@@ -180,6 +184,47 @@ scope is `image` (every branch), `image/branch`, or `image/branch/version` (only
 that sanitised version; the next version builds again). Members set and clear them on `/management`, the
 fleet board and image pages; each flag keeps who set it and why. The fleet board shows `upstream`,
 `released`, `drift` (`ahead`, `same`, `unknown`), `next_check` and the matching flags per branch.
+
+## Batch build projects
+
+`control/batch.py` starts the org's batch build projects from the same loop: repositories that are not images
+but run wide matrices on the same 20 job slots. The list is code (`PROJECTS`), not discovered:
+
+| Project | Workflow | Slot | `parallel` cap |
+| --- | --- | --- | --- |
+| `proot-apps` | `package-check.yml` on `master` (it dispatches `build-on-commit.yml` with the same `parallel`) | daily 00:00 UTC | 16 |
+| `selkies-layers` | `build.yml` on `main` | daily 04:30 UTC | 10 |
+| `wheelie` | `build.yml` on `main`, only when the gap check finds a missing wheel | hourly at :20 | 12 |
+
+**Sizing.** `parallel = clamp(CONCURRENCY_LIMIT - BATCH_RESERVE - busy, MIN_PARALLEL, min(MAX_PARALLEL, cap))`.
+`busy` is the jobs in progress outside the batch projects, the jobs queued outside them (an image build waiting
+for a runner), and for each batch project with a run going the width it was started with or its jobs in
+progress, whichever is more (a fresh dispatch holds its width for 15 minutes before its run appears). Queued
+jobs of the batch projects are never counted: a run holds most of its matrix back with `max-parallel`, and
+GitHub shows those as queued. Jobs come from the `workflow_job` webhooks; open jobs older than GitHub's limits
+(6 hours running, 24 hours queued) or in finished runs are lost webhooks and are ignored.
+
+**Slots.** At its slot a project is skipped while a run of its own is still going, and deferred while fewer than
+`MIN_PARALLEL` slots are free; both look again every 10 minutes for up to 3 hours (30 minutes for wheelie). When
+that window closes a busy fleet still gets a run at the minimum, so a batch always progresses; a run of its own
+still going skips the slot. A slot missed by more than half a period (control down) waits for the next one.
+wheelie's gap check is `control/vendor/wheelie_gaps.py`, wheelie's `scripts/gaps.py` copied verbatim (the header
+names the commit; `tests/test_vendor.py` fails on drift), fed `distros.json`, `packages.txt` and the index pages
+from the repo at `main` and PyPI over HTTP. No gap records `unchanged`; the same gaps whose build failed wait a
+day. Every outcome is a `batch` decision (`image` is the repo, `branch` the ref), with `parallel`, the capacity
+snapshot, the gaps and `retry_at` in its detail. Only projects in `CONTROL_BATCH_LIVE` are dispatched; the
+others record `dispatch` with `dry_run: true`. `python -m control batch --once [--project X] [--dry-run]` checks
+now, without waiting for a busy fleet.
+
+**Discord.** Every finished batch run (push, cron or dispatch) is evaluated once into `batch_runs`; each job is
+a unit (a selkies `<distro>-<layer>-<arch>`, a proot-apps app, a wheelie `<distro> <arch>` with the packages its
+gap check found) with its last state in `batch_units`. A red embed names the units that went from passing (or
+unknown) to failing, with links to their jobs and how many were already red; a green one names the units that
+pass again. A unit that stays red is silent, and successful runs post nothing. Runs that finished before control
+first watched are learnt silently. Also reported, once each: a dispatch GitHub refused (red, at once) or gap
+checks failing 6 times in a row (red), a dispatched run that never appeared within 15 minutes (red), a run still
+queued after an hour or running past twice its usual length (p95 of recent successes, at least 3 hours; 12 hours
+without history) (amber). Deferrals for a busy fleet post nothing.
 
 ## Member sign-in and actions
 
@@ -279,7 +324,7 @@ script can read. The contract:
 6. **Data**: `/api/fleet.json`, `/api/runs.json`, `/api/runs/{id}.json`, `/api/queue.json`, `/api/pulls.json`,
    `/api/issues.json`, `/api/releases.json`, `/api/builds/{owner}/{repo}/{run_id}.json`,
    `/api/images/{name}.json`, `/api/images/{name}/{tag}.json`, `/api/scheduler.json?kind=&image=&outcome=`,
-   `/api/skips.json`, `/api/actions.json`, `/api/status.json`; `/api/stream` for refreshes. Models are the
+   `/api/batch.json`, `/api/skips.json`, `/api/actions.json`, `/api/status.json`; `/api/stream` for refreshes. Models are the
    pydantic classes in `control/views.py`.
 
 Local development of the site against a local control: run control with `CONTROL_PUBLIC_URL=http://…`

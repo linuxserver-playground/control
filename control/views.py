@@ -8,6 +8,7 @@ set up in app.py). `/api/stream` is the server-sent events feed the live pages r
 import contextlib
 import datetime
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -15,6 +16,7 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from . import auth, badge
+from . import batch as batches
 from . import scheduler as sched
 from .backfill import last_backfill
 from .db import Delivery
@@ -22,6 +24,8 @@ from .fleet import helper_repos, last_discovery
 from .manage import REASONS
 from .model import (
     Action,
+    BatchRun,
+    BatchUnit,
     Build,
     Issue,
     Job,
@@ -41,6 +45,8 @@ from .templating import package_version, render
 router = APIRouter()
 
 KEEPALIVE_SECONDS = 15.0
+BUILD_VERSION = Path("/build_version")
+"""Written by the Dockerfile: `Linuxserver.io version: <sha7>`, the commit the running image was built from."""
 
 
 def now_utc() -> datetime.datetime:
@@ -245,8 +251,41 @@ class ActionsPage(BaseModel):
     """The public member-action log, newest first."""
 
 
+class BatchProjectView(BaseModel):
+    repo: str
+    workflow: str
+    ref: str
+    schedule: str
+    cap: int
+    """The most `parallel` the workflow accepts."""
+    live: bool
+    """Dispatched for real (CONTROL_BATCH_LIVE); otherwise decisions are dry runs beside the repo's own cron."""
+    note: str
+    next_at: str
+    parallel_now: int
+    """The width a run started now would get."""
+    active_run: Run | None
+    last_decision: DecisionView | None
+    last_dispatch: DecisionView | None
+    """The newest dispatch, dry runs included, with the run it started."""
+    runs: list[BatchRun]
+    """The newest evaluated runs, with the units that failed."""
+    failing: list[BatchUnit]
+    """Units whose newest result is a failure."""
+
+
+class BatchPage(BaseModel):
+    enabled: bool
+    capacity: batches.Capacity
+    projects: list[BatchProjectView]
+    decisions: list[DecisionView]
+    generated_at: str
+
+
 class StatusPage(BaseModel):
     version: str
+    revision: str | None
+    """The commit the running image was built from, when it runs from the published image."""
     org: str
     app_slug: str | None
     app_id: int | None
@@ -560,11 +599,59 @@ OUTCOMES = ["unchanged", "skipped", "dispatch", "error"]
 
 def decision_view(state: State, decision: SchedulerDecision) -> DecisionView:
     run = None
-    if decision.outcome == "dispatch":
-        repo = state.model.repo_by_name(f"docker-{decision.image}")
-        if repo:
-            run = state.model.run_after(repo.full_name, decision.branch, "workflow_dispatch", decision.at)
+    if decision.outcome == "dispatch" and not decision.info.get("dry_run"):
+        if decision.kind == batches.KIND_BATCH:
+            full_name: str | None = f"{state.settings.github_org}/{decision.image}"
+        else:
+            repo = state.model.repo_by_name(f"docker-{decision.image}")
+            full_name = repo.full_name if repo else None
+        if full_name:
+            run = state.model.run_after(full_name, decision.branch, "workflow_dispatch", decision.at)
     return DecisionView(decision=decision, info=decision.info, run=run)
+
+
+def batch_page(state: State) -> BatchPage:
+    now = now_utc()
+    org = state.settings.github_org
+    projects: list[BatchProjectView] = []
+    for project in batches.PROJECTS:
+        full_name = f"{org}/{project.repo}"
+        last = state.model.last_decision(project.repo, project.ref, batches.KIND_BATCH)
+        dispatches = state.model.recent_decisions(1, project.repo, "dispatch", batches.KIND_BATCH)
+        active = batches.active_runs(state.model, org, project, now)
+        projects.append(
+            BatchProjectView(
+                repo=project.repo,
+                workflow=project.workflow,
+                ref=project.ref,
+                schedule=project.schedule,
+                cap=project.cap,
+                live=project.repo in state.settings.batch_live,
+                note=project.note,
+                next_at=project.next_slot(now).isoformat(timespec="seconds"),
+                parallel_now=batches.capacity(state, now, exclude=project.repo).width(project.cap),
+                active_run=active[0] if active else None,
+                last_decision=decision_view(state, last) if last else None,
+                last_dispatch=decision_view(state, dispatches[0]) if dispatches else None,
+                runs=state.model.batch_runs(full_name, 10),
+                failing=state.model.batch_units(full_name, "fail"),
+            )
+        )
+    return BatchPage(
+        enabled=state.settings.scheduler,
+        capacity=batches.capacity(state, now),
+        projects=projects,
+        decisions=[decision_view(state, d) for d in state.model.recent_decisions(50, kind=batches.KIND_BATCH)],
+        generated_at=now.isoformat(timespec="seconds"),
+    )
+
+
+def running_revision(path: Path = BUILD_VERSION) -> str | None:
+    try:
+        first = path.read_text().splitlines()[0]
+    except (OSError, IndexError):
+        return None
+    return first.rpartition(":")[2].strip() or None
 
 
 def scheduler_page(
@@ -600,6 +687,7 @@ def status_page(state: State) -> StatusPage:
     credentials = state.credentials.load()
     return StatusPage(
         version=package_version(),
+        revision=running_revision(),
         org=state.settings.github_org,
         app_slug=credentials.slug if credentials else None,
         app_id=credentials.id if credentials else None,
@@ -694,6 +782,11 @@ def scheduler(
     return html(request, "scheduler.html", scheduler_page(state_of(request), image, outcome, kind), live=True)
 
 
+@router.get("/batch", response_class=HTMLResponse)
+def batch(request: Request) -> HTMLResponse:
+    return html(request, "batch.html", batch_page(state_of(request)), live=True)
+
+
 @router.get("/status", response_class=HTMLResponse)
 def status(request: Request) -> HTMLResponse:
     return html(request, "status.html", status_page(state_of(request)))
@@ -771,6 +864,11 @@ def scheduler_json(
     request: Request, image: str | None = None, outcome: str | None = None, kind: str | None = None
 ) -> SchedulerPage:
     return scheduler_page(state_of(request), image, outcome, kind)
+
+
+@router.get("/api/batch.json")
+def batch_json(request: Request) -> BatchPage:
+    return batch_page(state_of(request))
 
 
 @router.get("/api/skips.json")
