@@ -537,6 +537,14 @@ class Manifest(BaseModel):
         return str(kind) if kind else None
 
 
+class ModLine(BaseModel):
+    """One version line of a mod: the default one (name None, the one `:<branch>` follows) or a named
+    `upstream.lines` entry, dispatched with that name as the build's `line` input."""
+
+    name: str | None
+    source: dict[str, Any]
+
+
 class ModManifest(BaseModel):
     """One docker-mods branch's mod.yml, as the last mod discovery read it (mods.py)."""
 
@@ -562,6 +570,18 @@ class ModManifest(BaseModel):
     def version_source(self) -> dict[str, Any]:
         source = self.upstream.get("version")
         return source if isinstance(source, dict) else {}
+
+    @property
+    def lines(self) -> list["ModLine"]:
+        """The version lines the mod check resolves: the default line (`upstream.version`, name None), then
+        `upstream.lines` in mod.yml's order."""
+        if not self.version_source:
+            return []
+        lines = [ModLine(name=None, source=self.version_source)]
+        for line in self.upstream.get("lines") or []:
+            if isinstance(line, dict) and isinstance(line.get("version"), dict) and line.get("name"):
+                lines.append(ModLine(name=str(line["name"]), source=line["version"]))
+        return lines
 
     @property
     def platforms(self) -> list[str]:
@@ -1198,6 +1218,11 @@ class Model:
         mods = [ModManifest(**dict(row)) for row in rows]
         return [m for m in mods if m.scheduled] if scheduled else mods
 
+    def delete_mod(self, branch: str) -> bool:
+        with self.db.connect() as conn:
+            cursor = conn.execute("DELETE FROM mod_manifests WHERE branch = ?", (branch,))
+        return cursor.rowcount > 0
+
     def prune_mods(self, keep: list[str]) -> int:
         """Drop the branches the last discovery no longer found (deleted, or mod.yml gone or invalid)."""
         with self.db.connect() as conn:
@@ -1293,6 +1318,21 @@ class Model:
         with self.db.connect() as conn:
             row = conn.execute(sql, params).fetchone()
         return SchedulerDecision(**dict(row)) if row else None
+
+    def branch_decisions(
+        self, image: str, branch: str, outcome: str | None = None, limit: int = 50
+    ) -> list[SchedulerDecision]:
+        """The newest decisions of one branch, newest first."""
+        sql = "SELECT * FROM scheduler_decisions WHERE image = ? AND branch = ?"
+        params: list[Any] = [image, branch]
+        if outcome:
+            sql += " AND outcome = ?"
+            params.append(outcome)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with self.db.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [SchedulerDecision(**dict(row)) for row in rows]
 
     def consecutive_errors(self, image: str, branch: str, kind: str = "upstream") -> int:
         """How many of the newest decisions of a branch are errors, counting back to the last non-error."""

@@ -16,8 +16,8 @@ fleet, and lets org members act (re-run, cancel, dispatch, skip). Python 3.12+, 
   file, JWT and installation tokens; `control/github.py` the authenticated REST client the scheduler, fleet
   and actions share; `control/fleet.py` live-branch discovery from `image.yml` into `manifests`;
   `control/scheduler.py` the hourly upstream and release checks, the weekly package schedule, decisions and dispatch;
-  `control/mods.py` the docker-mods side: every branch's `mod.yml` into `mod_manifests` (GraphQL) and the GHCR
-  tag check behind the hourly mod check of mods with an `upstream` block;
+  `control/mods.py` the docker-mods side: every branch's `mod.yml` into `mod_manifests` (GraphQL, and one branch on
+  a push that touches it) and the GHCR tag check behind the hourly mod check of mods with an `upstream` block;
   `control/batch.py` the batch build projects (selkies-layers, proot-apps, wheelie): sizing `parallel` from the
   jobs running, their slots, and the per-unit failure alerts; `control/vendor/wheelie_gaps.py` wheelie's gap
   check, copied verbatim like the resolver;
@@ -71,7 +71,7 @@ setting needs a default that works without it, plus a line in `deploy/n97/README
   the header. The scheduler never runs `command` or `deb_repo` sources (shell from a repo, docker).
 - Every scheduler outcome is a `scheduler_decisions` row with a JSON detail; dispatch is always
   `workflow_dispatch` on `build.yml` with the branch as `ref` (a batch project: the workflow and ref its
-  `PROJECTS` entry names; a mod: `inputs: {mod_version}` instead of `reason`, which its build.yml lacks). Member dispatches go through the same
+  `PROJECTS` entry names; a mod: `inputs: {mod_version}` instead of `reason`, which its build.yml lacks, plus `line` for a mod with version lines). Member dispatches go through the same
   `Scheduler.dispatch`, so the cooldown and the log see them.
 - Mutating routes live in `control/manage.py` only, apart from the website editor's in `control/editor.py`: POST, CSRF token from the session, `require_member`
   (401 anonymous, 403 for anyone else), rate limited, and an `actions` row whatever the outcome. Each action

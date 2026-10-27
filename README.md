@@ -185,7 +185,9 @@ appeared on the branch within 15 minutes.
 **Mod check** (`control/mods.py`): the Jenkins External-Triggers jobs, which looked up a mod's tool version every
 hour and started its build when Docker Hub had no `mods:<branch>-<version>` tag. Discovery also reads every
 `docker-mods` branch's `mod.yml` in one GraphQL query into `mod_manifests` (a head that has not moved keeps its
-row; an invalid file is skipped with a warning). A mod is scheduled when its `mod.yml` has an `upstream` block,
+row; an invalid file is skipped with a warning). A `push` webhook to a docker-mods branch that creates or deletes
+it, or changes its `mod.yml`, re-reads that one branch at once (a GraphQL query for the ref), as a push does for an
+image's `image.yml`: a new branch appears, a deleted one or one whose `mod.yml` went away disappears. A mod is scheduled when its `mod.yml` has an `upstream` block,
 it is not deprecated, and the branch is the one that publishes it (`<target>-<name>`). Once an hour, at the
 minute `sha256(<org>/docker-mods/<branch>)` gives it, the check resolves `upstream.version` with the same
 vendored resolver (mod.yml reshaped as `{upstream, build.platforms}`, as the build's plan job does) and asks
@@ -197,6 +199,14 @@ not run (`os`, `command`, `deb_repo`, also inside `combined`), or a dispatch of 
 ago whose build failed (retried daily); `error` for the resolver or the registry. The build itself passes the
 version as `MOD_VERSION` and tags `<branch>-<version>` (CONVENTIONS §3, "Mods"), so a push that already built
 the version leaves the next check `unchanged`.
+
+A mod with `upstream.lines` (Go's previous release and its release candidate beside the newest) has a version per
+line. The check resolves every line, the default one first, and dispatches the first whose tag is missing with
+`inputs: {mod_version, line}` (`line` empty for the default line; only such a branch's `build.yml` has that
+input). A version two lines share is the earlier line's. A run in progress holds the whole branch, so one build of a
+mod runs at a time and a second missing line goes out an hour later. The cooldown and the daily retry are per
+version. Each check is still one decision: the dispatched line's (`line`), else the first error, skip, or the
+default line's, with every line's `{line, upstream, state}` under `lines`.
 
 **Skip flags** (`skips` table, `/api/skips.json`) replace the old `SKIP_EXTERNAL_TRIGGER` org variables. A
 scope is `image` (every branch), `image/branch`, or `image/branch/version` (only while upstream resolves to

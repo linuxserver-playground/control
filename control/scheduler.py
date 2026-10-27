@@ -39,7 +39,7 @@ from pydantic import BaseModel
 from . import batch, events, mods, relay
 from .fleet import discover_once, discovery_due
 from .github import GitHub, installation_client
-from .model import Manifest, Model, ModManifest, Release
+from .model import Manifest, Model, ModLine, ModManifest, Release, SchedulerDecision
 from .state import State
 from .vendor import resolve_version as rv
 
@@ -345,73 +345,120 @@ class Scheduler:
         return await self.dispatch(manifest.repo, branch, image, kind, "upstream", detail)
 
     async def _check_mod(self, mod: ModManifest, kind: str = KIND_MOD) -> Decision:
-        """Dispatch the mod branch's build with the resolved version when GHCR has no `<branch>-<version>` tag:
-        the Jenkins External-Triggers check, with the build's own resolver."""
+        """Dispatch the mod branch's build when GHCR has no `<branch>-<version>` tag: the Jenkins External-Triggers
+        check, with the build's own resolver. Every version line (the default one, then mod.yml's `upstream.lines`
+        in order) is resolved and looked up, and the first one missing is dispatched with its version and name.
+        A run in progress holds the whole branch back, so one build of a mod runs at a time and a second missing
+        line goes out at the next hourly check. One decision per check: the dispatched line's, else the first
+        error, skip or the default line's, with every line's outcome under `lines` when there are several."""
         image, branch = mods.IMAGE, mod.branch
         repo = mods.repo_of(self.state.settings.github_org)
         now = self.clock()
         if blocked := self.blocked_branch(repo, branch, image):
             return self.record(image, branch, kind, "skipped", blocked)
-        types = set(mods.source_types(mod.version_source))
-        if not mod.version_source or types & mods.UNSCHEDULED:
+        lines = mod.lines
+        types = {t for line in lines for t in mods.source_types(line.source)}
+        if not lines or types & mods.UNSCHEDULED:
             why = {"reason": "source not resolvable by control", "source": mod.version_source.get("type")}
             return self.record(image, branch, kind, "skipped", why)
-        if dispatched_at := self.in_cooldown(image, branch, now):
-            return self.record(image, branch, kind, "skipped", {"reason": "cooldown", "dispatched_at": dispatched_at})
 
+        seen: dict[str, str | None] = {}
+        results = [await self._check_mod_line(mod, line, repo, kind, now, seen) for line in lines]
+        several = len(lines) > 1
+        summary = [{"line": r["line"], "upstream": r.get("upstream"), "state": r["state"]} for r in results]
+
+        def detail_of(result: dict[str, Any]) -> dict[str, Any]:
+            hidden = {"state", "mod_version", "alert"} | (set() if several else {"line"})
+            detail = {k: v for k, v in result.items() if k not in hidden}
+            return {**detail, "lines": summary} if several else detail
+
+        if missing := next((r for r in results if r["state"] == "missing"), None):
+            inputs = {"mod_version": str(missing["mod_version"])}
+            if several:
+                inputs["line"] = missing["line"] or ""
+            return await self.dispatch(repo, branch, image, kind, "upstream", detail_of(missing), inputs)
+        if error := next((r for r in results if r["state"] == "error"), None):
+            decision = self.record(image, branch, kind, "error", detail_of(error))
+            if error.get("alert"):
+                await self.alert_on_errors(image, branch, str(error["message"]), kind)
+            return decision
+        if skipped := next((r for r in results if r["state"] == "skipped"), None):
+            return self.record(image, branch, kind, "skipped", detail_of(skipped))
+        return self.record(image, branch, kind, "unchanged", detail_of(results[0]))
+
+    async def _check_mod_line(
+        self, mod: ModManifest, line: ModLine, repo: str, kind: str, now: datetime.datetime, seen: dict[str, str | None]
+    ) -> dict[str, Any]:
+        """One version line: resolved, looked up on GHCR and weighed against skip flags, the cooldown and a failed
+        build of that version. `state` is missing (dispatch it), built, same (an earlier line has this version
+        and builds it), skipped or error."""
+        image, branch = mods.IMAGE, mod.branch
+        result: dict[str, Any] = {"line": line.name}
         try:
             resolver = self.resolver or resolve_in_thread
-            resolved = await resolver(mods.resolver_manifest(mod), self.github.token if self.github else None)
+            resolved = await resolver(mods.resolver_manifest(mod, line), self.github.token if self.github else None)
         except rv.AssetsNotReady as exc:
-            return self.record(image, branch, kind, "skipped", {"reason": "assets not ready", "message": str(exc)})
+            return {**result, "state": "skipped", "reason": "assets not ready", "message": str(exc)}
         except Exception as exc:
-            message = f"{type(exc).__name__}: {exc}"
-            decision = self.record(image, branch, kind, "error", {"message": message})
-            await self.alert_on_errors(image, branch, message, kind)
-            return decision
+            return {**result, "state": "error", "message": f"{type(exc).__name__}: {exc}", "alert": True}
 
         upstream = str(resolved["upstream_clean"])
         tag = mods.version_tag(branch, upstream)
-        detail: dict[str, Any] = {"upstream": upstream, "tag": tag, "source_url": resolved.get("source_url")}
+        result.update(upstream=upstream, tag=tag, source_url=resolved.get("source_url"))
+        result["mod_version"] = str(resolved["upstream"])
+        if upstream in seen:
+            return {**result, "state": "same", "reason": f"same version as the {seen[upstream] or 'default'} line"}
+        seen[upstream] = line.name
         try:
             exists = self.mod_tag_exists or self._mod_tag_exists
             built = await exists(tag)
         except httpx.HTTPError as exc:
-            detail["message"] = f"registry: {type(exc).__name__}: {exc}"
-            return self.record(image, branch, kind, "error", detail)
-        detail["released"] = upstream if built else self.last_built_mod(branch, kind)
+            return {**result, "state": "error", "message": f"registry: {type(exc).__name__}: {exc}"}
+        result["released"] = upstream if built else self.last_built_mod(branch, line.name, kind)
         if skips := self.model.skips_for(image, branch, upstream):
-            detail.update(reason="skip", scope=skips[0].scope, note=skips[0].reason)
-            return self.record(image, branch, kind, "skipped", detail)
+            return {**result, "state": "skipped", "reason": "skip", "scope": skips[0].scope, "note": skips[0].reason}
         if built:
-            return self.record(image, branch, kind, "unchanged", detail)
-        if failed := self.failed_mod_build(repo, branch, upstream, now):
-            return self.record(image, branch, kind, "skipped", {**detail, **failed})
-        detail["reason"] = "upstream changed" if detail["released"] else "version not built yet"
-        inputs = {"mod_version": str(resolved["upstream"])}
-        return await self.dispatch(repo, branch, image, kind, "upstream", detail, inputs)
+            return {**result, "state": "built"}
+        last = self.last_mod_dispatch(branch, upstream)
+        if last and now - datetime.datetime.fromisoformat(last.at) < COOLDOWN:
+            return {**result, "state": "skipped", "reason": "cooldown", "dispatched_at": last.at}
+        if failed := self.failed_mod_build(repo, branch, last, now):
+            return {**result, "state": "skipped", **failed}
+        result["reason"] = "upstream changed" if result["released"] else "version not built yet"
+        return {**result, "state": "missing"}
 
     async def _mod_tag_exists(self, tag: str) -> bool:
         return await mods.tag_exists(self.state.http, self.state.settings.github_org, tag)
 
-    def last_built_mod(self, branch: str, kind: str = KIND_MOD) -> str | None:
-        """The version the branch's newest `unchanged` mod check found built, for the decision log."""
+    def last_built_mod(self, branch: str, line: str | None = None, kind: str = KIND_MOD) -> str | None:
+        """The version of a line the branch's newest `unchanged` mod check found built, for the decision log."""
         last = self.model.last_decision(mods.IMAGE, branch, kind, "unchanged")
-        upstream = last.info.get("upstream") if last else None
-        return str(upstream) if upstream else None
-
-    def failed_mod_build(self, repo: str, branch: str, upstream: str, now: datetime.datetime) -> dict[str, Any] | None:
-        """Why not to dispatch again yet: this version was dispatched less than a day ago and the build that
-        followed did not pass. A broken mod is retried daily rather than at every cooldown."""
-        last = self.model.last_decision(mods.IMAGE, branch, outcome="dispatch")
-        if (
-            not last
-            or last.info.get("upstream") != upstream
-            or now - datetime.datetime.fromisoformat(last.at) >= INITIAL_RETRY
-        ):
+        if not last:
             return None
-        run = self.model.latest_run_for_branch(repo, branch)
-        if not run or run.status != "completed" or run.conclusion not in FAILED_CONCLUSIONS or run.created_at < last.at:
+        if line is None:
+            upstream = last.info.get("upstream")
+            return str(upstream) if upstream else None
+        for entry in last.info.get("lines") or []:
+            if isinstance(entry, dict) and entry.get("line") == line and entry.get("state") == "built":
+                return str(entry.get("upstream") or "") or None
+        return None
+
+    def last_mod_dispatch(self, branch: str, upstream: str) -> SchedulerDecision | None:
+        """The newest dispatch of this version of the mod, whichever line it came from."""
+        for decision in self.model.branch_decisions(mods.IMAGE, branch, "dispatch"):
+            if decision.info.get("upstream") == upstream:
+                return decision
+        return None
+
+    def failed_mod_build(
+        self, repo: str, branch: str, last: SchedulerDecision | None, now: datetime.datetime
+    ) -> dict[str, Any] | None:
+        """Why not to dispatch a version again yet: it was dispatched less than a day ago (`last`) and the run that
+        followed that dispatch did not pass. A broken mod is retried daily rather than at every check."""
+        if not last or now - datetime.datetime.fromisoformat(last.at) >= INITIAL_RETRY:
+            return None
+        run = self.model.run_after(repo, branch, "workflow_dispatch", last.at)
+        if not run or run.status != "completed" or run.conclusion not in FAILED_CONCLUSIONS:
             return None
         return {
             "reason": "build of this version did not pass, retried daily",
