@@ -20,11 +20,13 @@ ruff check . && ruff format --check . && mypy control tests && pytest
 
 `python -m control replay` reprocesses every stored webhook delivery and control event through the handlers
 (after a migration, or to rebuild the model); `python -m control backfill` fills the model from the GitHub API
-once (see Backfill); `python -m control discover` reads every live branch's `image.yml` once (see Scheduler);
-`python -m control schedule --once [--image x] [--branch y] [--kind upstream|release|packages] [--dry-run]`
+once (see Backfill); `python -m control discover` reads every live branch's `image.yml` and every mod's
+`mod.yml` once (see Scheduler);
+`python -m control schedule --once [--image x] [--branch y] [--kind upstream|release|packages|mod] [--dry-run]`
 runs one check now and prints one line per branch: the upstream check by default (recorded as `manual`, so
 the hourly slot is untouched), the release check, or `--kind packages`, which forces a package check and is
-recorded as one, so it resets that branch's weekly slot (`--image` is required for it). `--dry-run` resolves
+recorded as one, so it resets that branch's weekly slot (`--image` is required for it); `--kind mod` (or
+`--image mods`) runs the mod check of every scheduled mod, or of `--branch`, as `manual`. `--dry-run` resolves
 but records and dispatches nothing. All read the same environment as the server.
 
 The Alpine base image ships Python 3.12, so the package allows 3.12 and up; develop on 3.12 or 3.13. The
@@ -118,7 +120,8 @@ Webhooks are stored whole in `deliveries` first, then `control/handlers.py` upse
 `pull_requests` (+ `pull_request_review` for the review state), `issues`, `releases`, `builds` (from
 `/events`). Upserts are keyed by GitHub ids and guarded so a late or replayed delivery never moves a row
 backwards; unknown events are stored and ignored; a handler failure is logged and never fails the webhook
-response. The scheduler owns `manifests` (one row per live branch), `scheduler_decisions` and `skips`;
+response. The scheduler owns `manifests` (one row per live branch), `mod_manifests` (one row per docker-mods
+branch), `scheduler_decisions` and `skips`;
 member actions write `actions`.
 
 ## Scheduler
@@ -178,6 +181,22 @@ Dispatch is always `POST /repos/{repo}/actions/workflows/build.yml/dispatches` w
 `inputs: {reason}`: `repository_dispatch` only ever runs the default branch, and one path is simpler. The run
 itself arrives by webhook; the scheduler page links a `dispatch` decision to the `workflow_dispatch` run that
 appeared on the branch within 15 minutes.
+
+**Mod check** (`control/mods.py`): the Jenkins External-Triggers jobs, which looked up a mod's tool version every
+hour and started its build when Docker Hub had no `mods:<branch>-<version>` tag. Discovery also reads every
+`docker-mods` branch's `mod.yml` in one GraphQL query into `mod_manifests` (a head that has not moved keeps its
+row; an invalid file is skipped with a warning). A mod is scheduled when its `mod.yml` has an `upstream` block,
+it is not deprecated, and the branch is the one that publishes it (`<target>-<name>`). Once an hour, at the
+minute `sha256(<org>/docker-mods/<branch>)` gives it, the check resolves `upstream.version` with the same
+vendored resolver (mod.yml reshaped as `{upstream, build.platforms}`, as the build's plan job does) and asks
+GHCR, with an anonymous pull token, whether `ghcr.io/<org>/mods:<branch>-<version>` exists. It is recorded as
+image `mods`, branch `<branch>`, kind `mod`: `unchanged` when the tag exists; `dispatch` (`build.yml` on the
+branch with `inputs: {mod_version}`, the resolved version) when it does not; `skipped` for a skip flag
+(`mods`, `mods/<branch>`, `mods/<branch>/<version>`), a run in progress, the cooldown, a source control will
+not run (`os`, `command`, `deb_repo`, also inside `combined`), or a dispatch of the same version less than a day
+ago whose build failed (retried daily); `error` for the resolver or the registry. The build itself passes the
+version as `MOD_VERSION` and tags `<branch>-<version>` (CONVENTIONS §3, "Mods"), so a push that already built
+the version leaves the next check `unchanged`.
 
 **Skip flags** (`skips` table, `/api/skips.json`) replace the old `SKIP_EXTERNAL_TRIGGER` org variables. A
 scope is `image` (every branch), `image/branch`, or `image/branch/version` (only while upstream resolves to

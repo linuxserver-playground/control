@@ -537,6 +537,47 @@ class Manifest(BaseModel):
         return str(kind) if kind else None
 
 
+class ModManifest(BaseModel):
+    """One docker-mods branch's mod.yml, as the last mod discovery read it (mods.py)."""
+
+    branch: str
+    commit_sha: str
+    """The branch head the file was read at; an unchanged head only touches fetched_at."""
+    fetched_at: str
+    mod_json: str
+    created_at: str
+    updated_at: str
+
+    @property
+    def mod(self) -> dict[str, Any]:
+        loaded = json.loads(self.mod_json)
+        return loaded if isinstance(loaded, dict) else {}
+
+    @property
+    def upstream(self) -> dict[str, Any]:
+        upstream = self.mod.get("upstream")
+        return upstream if isinstance(upstream, dict) else {}
+
+    @property
+    def version_source(self) -> dict[str, Any]:
+        source = self.upstream.get("version")
+        return source if isinstance(source, dict) else {}
+
+    @property
+    def platforms(self) -> list[str]:
+        platforms = self.mod.get("platforms")
+        return [str(p) for p in platforms] if isinstance(platforms, list) and platforms else ["amd64", "arm64"]
+
+    @property
+    def scheduled(self) -> bool:
+        """An upstream block on the branch that publishes the mod (`<target>-<name>`), and not deprecated."""
+        mod = self.mod
+        deprecated = mod.get("deprecated")
+        if isinstance(deprecated, dict) and deprecated.get("status"):
+            return False
+        return bool(self.version_source) and self.branch == f"{mod.get('target')}-{mod.get('name')}"
+
+
 class Skip(BaseModel):
     """A flag that holds the scheduler back: scope is `image`, `image/branch` or `image/branch/version`."""
 
@@ -1135,6 +1176,38 @@ class Model:
     def delete_manifests(self, repo: str) -> None:
         self.prune_manifests(repo, [])
 
+    # -- mods -----------------------------------------------------------------------------------------------------
+
+    def upsert_mod(self, mod: ModManifest) -> bool:
+        with self.db.connect() as conn:
+            return _upsert(conn, "mod_manifests", mod.model_dump(), ("branch",))
+
+    def touch_mod(self, branch: str, fetched_at: str | None = None) -> None:
+        with self.db.connect() as conn:
+            conn.execute("UPDATE mod_manifests SET fetched_at = ? WHERE branch = ?", (fetched_at or utcnow(), branch))
+
+    def mod_manifest(self, branch: str) -> ModManifest | None:
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT * FROM mod_manifests WHERE branch = ?", (branch,)).fetchone()
+        return ModManifest(**dict(row)) if row else None
+
+    def mod_manifests(self, scheduled: bool = False) -> list[ModManifest]:
+        """Every mod branch, or only those the scheduler checks."""
+        with self.db.connect() as conn:
+            rows = conn.execute("SELECT * FROM mod_manifests ORDER BY branch").fetchall()
+        mods = [ModManifest(**dict(row)) for row in rows]
+        return [m for m in mods if m.scheduled] if scheduled else mods
+
+    def prune_mods(self, keep: list[str]) -> int:
+        """Drop the branches the last discovery no longer found (deleted, or mod.yml gone or invalid)."""
+        with self.db.connect() as conn:
+            if keep:
+                marks = ", ".join("?" * len(keep))
+                cursor = conn.execute(f"DELETE FROM mod_manifests WHERE branch NOT IN ({marks})", tuple(keep))
+            else:
+                cursor = conn.execute("DELETE FROM mod_manifests")
+        return int(cursor.rowcount)
+
     # -- skips ----------------------------------------------------------------------------------------------------
 
     def set_skip(self, scope: str, reason: str | None, set_by: str) -> None:
@@ -1279,6 +1352,7 @@ class Model:
             "releases",
             "builds",
             "manifests",
+            "mod_manifests",
             "skips",
             "actions",
             "scheduler_decisions",

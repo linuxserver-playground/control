@@ -233,7 +233,7 @@ def test_scheduler_page_reads_decisions(client: TestClient, state: State) -> Non
     state.model.add_decision("sonarr", "main", "unchanged", '{"head": "b" * 40, "released": "a" * 40}', "release")
     by_kind = views.SchedulerPage.model_validate(client.get("/api/scheduler.json?kind=release").json())
     assert [v.decision.kind for v in by_kind.decisions] == ["release"] and by_kind.kind == "release"
-    assert by_kind.kinds == ["upstream", "release", "packages", "manual", "batch"]
+    assert by_kind.kinds == ["upstream", "release", "packages", "manual", "batch", "mod"]
     assert 'name="kind"' in client.get("/scheduler?kind=release").text
 
 

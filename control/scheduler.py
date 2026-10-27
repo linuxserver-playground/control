@@ -10,7 +10,10 @@ discovery found:
   or a `rebuild` is dispatched. A package check commits `Update package versions` and then dispatches the
   build itself; when that dispatch fails the head would stay unreleased forever, since no version drifts;
 - package check, once a week per branch with `build.package_check` on, spread across the week's hours. A
-  branch that was never checked waits for its slot too, so a fresh start does not fire the whole fleet.
+  branch that was never checked waits for its slot too, so a fresh start does not fire the whole fleet;
+- mod check, once an hour per docker-mods branch with an `upstream` block in mod.yml, spread like the upstream
+  check: resolve the version the same way and dispatch the branch's build with it as `mod_version` when GHCR has
+  no `mods:<branch>-<version>` tag yet (mods.py). Recorded as image `mods`, kind `mod`.
 
 The same loop starts the batch build projects (selkies-layers, proot-apps, wheelie), sized to the runner slots
 the fleet leaves free and watched for failures; see batch.py.
@@ -33,10 +36,10 @@ from typing import Any
 import httpx
 from pydantic import BaseModel
 
-from . import batch, events, relay
+from . import batch, events, mods, relay
 from .fleet import discover_once, discovery_due
 from .github import GitHub, installation_client
-from .model import Manifest, Model, Release
+from .model import Manifest, Model, ModManifest, Release
 from .state import State
 from .vendor import resolve_version as rv
 
@@ -47,7 +50,8 @@ KIND_RELEASE = "release"
 KIND_PACKAGES = "packages"
 KIND_MANUAL = "manual"
 KIND_BATCH = batch.KIND_BATCH
-KINDS = (KIND_UPSTREAM, KIND_RELEASE, KIND_PACKAGES, KIND_MANUAL, KIND_BATCH)
+KIND_MOD = "mod"
+KINDS = (KIND_UPSTREAM, KIND_RELEASE, KIND_PACKAGES, KIND_MANUAL, KIND_BATCH, KIND_MOD)
 COOLDOWN = datetime.timedelta(hours=2)
 """No second dispatch for a branch within this long of the last one, whatever triggered it."""
 INITIAL_RETRY = datetime.timedelta(hours=24)
@@ -213,6 +217,8 @@ def resolve_with_token(manifest: dict[str, Any], token: str | None) -> dict[str,
 
 
 Resolver = Callable[[dict[str, Any], str | None], Awaitable[dict[str, Any]]]
+TagCheck = Callable[[str], Awaitable[bool]]
+"""Whether a tag of the mods package exists; mods.tag_exists against GHCR unless a test replaces it."""
 
 
 async def resolve_in_thread(manifest: dict[str, Any], token: str | None) -> dict[str, Any]:
@@ -231,11 +237,13 @@ class Scheduler:
         resolver: Resolver | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], datetime.datetime] = lambda: datetime.datetime.now(datetime.UTC),
+        mod_tag_exists: TagCheck | None = None,
     ) -> None:
         self.state = state
         self.github = github
         self.dry_run = dry_run
         self.resolver = resolver
+        self.mod_tag_exists = mod_tag_exists
         self.sleep = sleep
         self.clock = clock
         self.model: Model = state.model
@@ -253,10 +261,13 @@ class Scheduler:
 
     def blocked(self, manifest: Manifest, image: str) -> dict[str, Any] | None:
         """The skip flag or in-flight run that stops any dispatch for this branch, or None."""
-        skips = self.model.skips_for(image, manifest.branch)
+        return self.blocked_branch(manifest.repo, manifest.branch, image)
+
+    def blocked_branch(self, repo: str, branch: str, image: str) -> dict[str, Any] | None:
+        skips = self.model.skips_for(image, branch)
         if skips:
             return {"reason": "skip", "scope": skips[0].scope, "note": skips[0].reason}
-        run = self.model.active_run_for_branch(manifest.repo, manifest.branch)
+        run = self.model.active_run_for_branch(repo, branch)
         if run:
             return {"reason": "run in progress", "run_url": run.html_url, "run_id": run.id}
         return None
@@ -312,7 +323,7 @@ class Scheduler:
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
             decision = self.record(image, branch, kind, "error", {"message": message})
-            await self.alert_on_errors(image, branch, message)
+            await self.alert_on_errors(image, branch, message, kind)
             return decision
 
         upstream = str(resolved["upstream_clean"])
@@ -332,6 +343,82 @@ class Scheduler:
             return self.record(image, branch, kind, "skipped", {**detail, **failed})
         detail["reason"] = "no release yet" if released is None else "upstream changed"
         return await self.dispatch(manifest.repo, branch, image, kind, "upstream", detail)
+
+    async def _check_mod(self, mod: ModManifest, kind: str = KIND_MOD) -> Decision:
+        """Dispatch the mod branch's build with the resolved version when GHCR has no `<branch>-<version>` tag:
+        the Jenkins External-Triggers check, with the build's own resolver."""
+        image, branch = mods.IMAGE, mod.branch
+        repo = mods.repo_of(self.state.settings.github_org)
+        now = self.clock()
+        if blocked := self.blocked_branch(repo, branch, image):
+            return self.record(image, branch, kind, "skipped", blocked)
+        types = set(mods.source_types(mod.version_source))
+        if not mod.version_source or types & mods.UNSCHEDULED:
+            why = {"reason": "source not resolvable by control", "source": mod.version_source.get("type")}
+            return self.record(image, branch, kind, "skipped", why)
+        if dispatched_at := self.in_cooldown(image, branch, now):
+            return self.record(image, branch, kind, "skipped", {"reason": "cooldown", "dispatched_at": dispatched_at})
+
+        try:
+            resolver = self.resolver or resolve_in_thread
+            resolved = await resolver(mods.resolver_manifest(mod), self.github.token if self.github else None)
+        except rv.AssetsNotReady as exc:
+            return self.record(image, branch, kind, "skipped", {"reason": "assets not ready", "message": str(exc)})
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            decision = self.record(image, branch, kind, "error", {"message": message})
+            await self.alert_on_errors(image, branch, message, kind)
+            return decision
+
+        upstream = str(resolved["upstream_clean"])
+        tag = mods.version_tag(branch, upstream)
+        detail: dict[str, Any] = {"upstream": upstream, "tag": tag, "source_url": resolved.get("source_url")}
+        try:
+            exists = self.mod_tag_exists or self._mod_tag_exists
+            built = await exists(tag)
+        except httpx.HTTPError as exc:
+            detail["message"] = f"registry: {type(exc).__name__}: {exc}"
+            return self.record(image, branch, kind, "error", detail)
+        detail["released"] = upstream if built else self.last_built_mod(branch, kind)
+        if skips := self.model.skips_for(image, branch, upstream):
+            detail.update(reason="skip", scope=skips[0].scope, note=skips[0].reason)
+            return self.record(image, branch, kind, "skipped", detail)
+        if built:
+            return self.record(image, branch, kind, "unchanged", detail)
+        if failed := self.failed_mod_build(repo, branch, upstream, now):
+            return self.record(image, branch, kind, "skipped", {**detail, **failed})
+        detail["reason"] = "upstream changed" if detail["released"] else "version not built yet"
+        inputs = {"mod_version": str(resolved["upstream"])}
+        return await self.dispatch(repo, branch, image, kind, "upstream", detail, inputs)
+
+    async def _mod_tag_exists(self, tag: str) -> bool:
+        return await mods.tag_exists(self.state.http, self.state.settings.github_org, tag)
+
+    def last_built_mod(self, branch: str, kind: str = KIND_MOD) -> str | None:
+        """The version the branch's newest `unchanged` mod check found built, for the decision log."""
+        last = self.model.last_decision(mods.IMAGE, branch, kind, "unchanged")
+        upstream = last.info.get("upstream") if last else None
+        return str(upstream) if upstream else None
+
+    def failed_mod_build(self, repo: str, branch: str, upstream: str, now: datetime.datetime) -> dict[str, Any] | None:
+        """Why not to dispatch again yet: this version was dispatched less than a day ago and the build that
+        followed did not pass. A broken mod is retried daily rather than at every cooldown."""
+        last = self.model.last_decision(mods.IMAGE, branch, outcome="dispatch")
+        if (
+            not last
+            or last.info.get("upstream") != upstream
+            or now - datetime.datetime.fromisoformat(last.at) >= INITIAL_RETRY
+        ):
+            return None
+        run = self.model.latest_run_for_branch(repo, branch)
+        if not run or run.status != "completed" or run.conclusion not in FAILED_CONCLUSIONS or run.created_at < last.at:
+            return None
+        return {
+            "reason": "build of this version did not pass, retried daily",
+            "conclusion": run.conclusion,
+            "run_url": run.html_url,
+            "run_id": run.id,
+        }
 
     async def _check_release(self, manifest: Manifest, kind: str = KIND_RELEASE) -> Decision:
         """Dispatch a `rebuild` when the branch head is not the commit its newest Release tag points at."""
@@ -400,13 +487,24 @@ class Scheduler:
     async def check_release(self, manifest: Manifest, kind: str = KIND_RELEASE) -> Decision:
         return await self.announce(await self._check_release(manifest, kind))
 
+    async def check_mod(self, mod: ModManifest, kind: str = KIND_MOD) -> Decision:
+        return await self.announce(await self._check_mod(mod, kind))
+
     async def check_packages(self, manifest: Manifest, kind: str = KIND_PACKAGES) -> Decision:
         return await self.announce(await self._check_packages(manifest, kind))
 
     async def dispatch(
-        self, repo: str, branch: str, image: str, kind: str, reason: str, detail: dict[str, Any]
+        self,
+        repo: str,
+        branch: str,
+        image: str,
+        kind: str,
+        reason: str,
+        detail: dict[str, Any],
+        inputs: dict[str, str] | None = None,
     ) -> Decision:
-        """`workflow_dispatch` of build.yml on the branch; 204 means GitHub queued it (the run shows up by webhook)."""
+        """`workflow_dispatch` of build.yml on the branch; 204 means GitHub queued it (the run shows up by webhook).
+        An image build takes `reason`; a mod build has no such input and takes `mod_version` instead."""
         detail = {**detail, "dispatch_reason": reason, "dry_run": self.dry_run or None}
         if self.dry_run:
             return self.record(image, branch, kind, "dispatch", detail)
@@ -416,7 +514,7 @@ class Scheduler:
         try:
             await self.github.post(
                 f"/repos/{repo}/actions/workflows/{WORKFLOW_FILE}/dispatches",
-                {"ref": branch, "inputs": {"reason": reason}},
+                {"ref": branch, "inputs": inputs if inputs is not None else {"reason": reason}},
             )
         except httpx.HTTPError as exc:
             detail["message"] = f"{type(exc).__name__}: {exc}"
@@ -450,9 +548,12 @@ class Scheduler:
         settings = self.state.settings
         links = f"[scheduler]({events.site_scheduler_url(settings.site_url, image)}) \u00b7 "
         links += f"[control]({settings.public_url}/scheduler?image={image})"
+        page = events.site_image_url(settings.site_url, image)
+        if image == mods.IMAGE:
+            page = f"{settings.site_url}/mods/{branch}/"
         return events.within_limits(
             {
-                "author": {"name": image, "url": events.site_image_url(settings.site_url, image)},
+                "author": {"name": image, "url": page},
                 "title": f"{image} {branch} \u00b7 {events.DOT[color]} {headline}",
                 "url": events.site_scheduler_url(settings.site_url, image),
                 "color": color,
@@ -463,9 +564,9 @@ class Scheduler:
             }
         )
 
-    async def alert_on_errors(self, image: str, branch: str, message: str) -> None:
+    async def alert_on_errors(self, image: str, branch: str, message: str, kind: str = KIND_UPSTREAM) -> None:
         """One red embed when a branch's upstream check has failed ERROR_ALERT_AFTER times in a row."""
-        if self.dry_run or self.model.consecutive_errors(image, branch) != ERROR_ALERT_AFTER:
+        if self.dry_run or self.model.consecutive_errors(image, branch, kind) != ERROR_ALERT_AFTER:
             return
         embed = self.alert_embed(
             image,
@@ -534,6 +635,11 @@ class Scheduler:
             since = last.at if last else manifest.created_at
             if due(last_package_slot(manifest.repo, manifest.branch, at), since):
                 decisions.append(await self.check_packages(manifest))
+        mods_repo = mods.repo_of(self.state.settings.github_org)
+        for mod in self.model.mod_manifests(scheduled=True):
+            last = self.model.last_decision(mods.IMAGE, mod.branch, KIND_MOD)
+            if due(last_upstream_slot(mods_repo, mod.branch, at), last.at if last else None):
+                decisions.append(await self.check_mod(mod))
         decisions.extend(await batch.Batch(self).tick())
         return decisions
 
@@ -569,12 +675,18 @@ async def run_once(
 ) -> list[Decision]:
     """`python -m control schedule --once`: one check for every (or one) live branch, slots ignored. The
     upstream check is recorded as `manual` so the hourly slot stays untouched; a forced package or release
-    check is recorded under its own kind, which is how it resets the branch's slot."""
+    check is recorded under its own kind, which is how it resets the branch's slot. With `--kind mod` (or the
+    upstream kind and `--image mods`) it runs the mod check of every (or one) scheduled mod, as `manual` too."""
     github = await installation_client(state)
     scheduler = Scheduler(state, github, dry_run=dry_run)
     if github is not None and (discovery_due(state) or not state.model.manifests()):
         await discover_once(state)
     decisions: list[Decision] = []
+    if kind == KIND_MOD or (kind == KIND_UPSTREAM and image in (mods.IMAGE, mods.REPO_NAME)):
+        for mod in state.model.mod_manifests(scheduled=True):
+            if branch is None or mod.branch == branch:
+                decisions.append(await scheduler.check_mod(mod, KIND_MANUAL))
+        return decisions
     for manifest in state.model.manifests():
         if image and manifest.image != image and manifest.repo.rsplit("/", 1)[-1] != image:
             continue
@@ -598,10 +710,20 @@ async def run_batch_once(state: State, project: str | None = None, dry_run: bool
 
 
 def upcoming(
-    manifests: list[Manifest], now: datetime.datetime, horizon: datetime.timedelta = datetime.timedelta(hours=24)
+    manifests: list[Manifest],
+    now: datetime.datetime,
+    horizon: datetime.timedelta = datetime.timedelta(hours=24),
+    mod_manifests: list[ModManifest] | None = None,
+    org: str = "",
 ) -> list[dict[str, Any]]:
-    """The next upstream check of every live branch and any package check inside the horizon, soonest first."""
+    """The next upstream check of every live branch, any package check inside the horizon, and the next check of
+    every scheduled mod, soonest first."""
     rows: list[dict[str, Any]] = []
+    for mod in mod_manifests or []:
+        at = next_upstream_check(mods.repo_of(org), mod.branch, now)
+        rows.append(
+            {"image": mods.IMAGE, "branch": mod.branch, "kind": KIND_MOD, "at": at.isoformat(timespec="seconds")}
+        )
     for manifest in manifests:
         rows.append(
             {

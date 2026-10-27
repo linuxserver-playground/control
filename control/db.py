@@ -264,6 +264,18 @@ MIGRATIONS: list[str] = [
         PRIMARY KEY (repo, workflow, unit)
     );
     """,
+    # Docker mods (mods.py): every docker-mods branch's mod.yml as the last discovery read it. Those with an
+    # upstream block get the hourly mod check, recorded as decisions of image `mods`.
+    """
+    CREATE TABLE mod_manifests (
+        branch TEXT PRIMARY KEY,
+        commit_sha TEXT NOT NULL,
+        fetched_at TEXT NOT NULL,
+        mod_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """,
 ]
 
 

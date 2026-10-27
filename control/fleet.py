@@ -238,6 +238,13 @@ async def discover_once(state: State) -> dict[str, Any]:
     except Exception as exc:
         log.exception("fleet discovery failed")
         record["error"] = f"{type(exc).__name__}: {exc}"
+    from . import mods  # mods reads manifests with this module's loader
+
+    try:
+        record["mods"] = await mods.discover(github, state.settings.github_org, state.model, state.stream)
+    except Exception as exc:
+        log.exception("mod discovery failed")
+        record["mods_error"] = f"{type(exc).__name__}: {exc}"
     record["finished"] = utcnow()
     state.db.set(LAST_DISCOVERY, json.dumps(record))
     return record

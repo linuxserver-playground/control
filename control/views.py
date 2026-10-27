@@ -669,7 +669,12 @@ def scheduler_page(
         images=state.model.decision_images(),
         outcomes=OUTCOMES,
         kinds=list(sched.KINDS),
-        upcoming=[Upcoming(**row) for row in sched.upcoming(manifests, now)],
+        upcoming=[
+            Upcoming(**row)
+            for row in sched.upcoming(
+                manifests, now, mod_manifests=state.model.mod_manifests(scheduled=True), org=state.settings.github_org
+            )
+        ],
         live_branches=len(manifests),
         generated_at=now.isoformat(timespec="seconds"),
     )

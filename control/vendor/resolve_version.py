@@ -1,5 +1,5 @@
 # Vendored from linuxserver-playground/workflows scripts/resolve_version.py at commit
-# cbafa6342425d8c72924e6b623a0205d2a41c3a6.
+# f1d031d7764634666c8a1352418ddd2a8b58f074.
 # Do not edit here: change it in the workflows repo and copy it back. tests/test_vendor.py fails
 # when this file and the source checkout differ, so the build and the scheduler resolve alike.
 # End of vendoring header.
@@ -388,6 +388,23 @@ def _command(src: dict[str, Any]) -> tuple[str, str]:
     return lines[-1].strip(), "command"
 
 
+def _combined(src: dict[str, Any], platforms: list[str], manifest_dir: Path) -> tuple[str, str]:
+    """Several sources resolved independently, each with its own ``transform``, joined with ``separator``: a
+    version made of two upstreams (docker and compose), so a change to either is a new version."""
+    parts: list[str] = []
+    urls: list[str] = []
+    for sub in src["sources"]:
+        raw, url = resolve_raw(sub, platforms, manifest_dir)
+        raw = (raw or "").strip()
+        if not raw or raw == "null":
+            raise ResolveError(f"combined part {sub.get('type')} returned nothing")
+        parts.append(apply_transforms(raw, sub.get("transform")))
+        urls.append(url)
+    if not parts:
+        raise ResolveError("combined source has no sources")
+    return str(src.get("separator", "-")).join(parts), urls[0]
+
+
 # --------------------------------------------------------------------------------------------
 # Post-processing.
 
@@ -476,6 +493,8 @@ def resolve_raw(source: dict[str, Any], platforms: list[str], manifest_dir: Path
         return _os(manifest_dir)
     if kind == "command":
         return _command(source)
+    if kind == "combined":
+        return _combined(source, platforms, manifest_dir)
     raise ResolveError(f"unknown version source type {kind!r}")
 
 

@@ -5,11 +5,12 @@ proxy is fine because the port is never published outside the compose network.
 Usage: python -m control            serve
        python -m control replay     reprocess every stored delivery through the handlers
        python -m control backfill   fill the state tables from the GitHub API, once
-       python -m control discover   read every live branch's image.yml from GitHub, once
-       python -m control schedule --once [--image x] [--branch y] [--kind upstream|release|packages] [--dry-run]
+       python -m control discover   read every live branch's image.yml and every mod's mod.yml from GitHub, once
+       python -m control schedule --once [--image x] [--branch y] [--kind upstream|release|packages|mod] [--dry-run]
                                     run one check now for every (or one) live branch: the upstream check
                                     by default, the release check, or a package check (--image required,
-                                    so a typo cannot rebuild the fleet); --dry-run resolves and prints but
+                                    so a typo cannot rebuild the fleet), or the mod check of every (or one,
+                                    --branch) mod with an upstream block; --dry-run resolves and prints but
                                     records and dispatches nothing
        python -m control batch --once [--project x] [--dry-run]
                                     check every (or one) batch build project now: size it against the jobs
@@ -79,9 +80,9 @@ def _schedule(settings: Settings, db: Database, argv: list[str]) -> int:
     parser.add_argument("--branch", help="only this branch")
     parser.add_argument(
         "--kind",
-        choices=(scheduler.KIND_UPSTREAM, scheduler.KIND_RELEASE, scheduler.KIND_PACKAGES),
+        choices=(scheduler.KIND_UPSTREAM, scheduler.KIND_RELEASE, scheduler.KIND_PACKAGES, scheduler.KIND_MOD),
         default=scheduler.KIND_UPSTREAM,
-        help="which check: upstream (default), release, or packages (forces one and resets the weekly slot)",
+        help="which check: upstream (default), release, packages (forces one and resets the weekly slot) or mod",
     )
     parser.add_argument("--dry-run", action="store_true", help="resolve and print; record and dispatch nothing")
     args = parser.parse_args(argv)

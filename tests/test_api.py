@@ -246,7 +246,8 @@ def test_json_actions_share_the_form_code_path(client: TestClient, state: State,
     )
     assert client.post("/api/actions/dispatch", json={**dispatch, "reason": "yolo"}, headers=headers).status_code == 400
     assert client.post("/api/actions/skip", json={"scope": "a/b/c/d"}, headers=headers).status_code == 400
-    assert len(github.posts) == 4 and len(actions(client)) == 9
+    # The reconcile's discovery reads the mods over GraphQL; nothing else reached GitHub.
+    assert len([p for p in github.posts if p[0] != "/graphql"]) == 4 and len(actions(client)) == 9
 
 
 def test_json_action_rate_limit_and_stale_member(client: TestClient, state: State, github: FakeActions) -> None:
