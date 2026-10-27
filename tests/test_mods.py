@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from control import batch, mods, scheduler
-from control.github import GitHub
+from control.github import GitHub, GraphQLError
 from control.model import ModManifest, Run
 from control.state import State
 
@@ -61,7 +61,15 @@ class FakeRefs:
         index = int(body["variables"]["after"] or 0)
         more = index + 1 < len(self.pages)
         refs = {"pageInfo": {"hasNextPage": more, "endCursor": str(index + 1)}, "nodes": self.pages[index]}
-        return httpx.Response(200, json={"data": {"repository": {"refs": refs}}})
+        # GitHub answers a branch without the file with a NOT_FOUND error beside the data, as for master.
+        errors = [
+            {"type": "NOT_FOUND", "path": ["repository", "refs", "nodes", i, "target", "file"], "message": "no file"}
+            for i, n in enumerate(self.pages[index])
+            if n["target"]["file"] is None
+        ]
+        return httpx.Response(
+            200, json={"data": {"repository": {"refs": refs}}, **({"errors": errors} if errors else {})}
+        )
 
 
 async def discover(state: State, pages: list[list[dict[str, Any]]] | None) -> tuple[dict[str, int], FakeRefs]:
@@ -300,3 +308,13 @@ async def test_tick_checks_scheduled_mods_hourly_and_lists_them_upcoming(
     rows = scheduler.upcoming([], NOW, mod_manifests=state.model.mod_manifests(scheduled=True), org=ORG)
     assert [(r["image"], r["branch"], r["kind"]) for r in rows] == [("mods", "universal-cloudflared", "mod")]
     assert [d.kind for d in decisions(state)] == ["mod", "mod"]
+
+
+@pytest.mark.anyio
+async def test_other_graphql_errors_still_raise(state: State) -> None:
+    def broken(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": None, "errors": [{"type": "RATE_LIMITED", "message": "slow down"}]})
+
+    async with mock_client(broken) as http:
+        with pytest.raises(GraphQLError):
+            await mods.discover(GitHub(http, "ghs_token"), ORG, state.model, state.stream)

@@ -21,7 +21,7 @@ from contracts import ContractError, validate
 
 from .db import utcnow
 from .fleet import parse_manifest
-from .github import GitHub
+from .github import GitHub, GraphQLError
 from .model import Model, ModManifest
 from .stream import Broadcaster
 
@@ -95,6 +95,21 @@ async def tag_exists(http: httpx.AsyncClient, org: str, tag: str) -> bool:
     return True
 
 
+async def refs_page(github: GitHub, org: str, after: str | None) -> Any:
+    """One page of the refs query. A branch without mod.yml (master) comes back as a NOT_FOUND error on its `file`
+    beside the data of every other branch; those errors are expected, any other raises."""
+    variables = {"owner": org, "name": REPO_NAME, "after": after}
+    body = (await github.post("/graphql", {"query": REFS, "variables": variables})).json()
+    errors = [
+        e
+        for e in body.get("errors") or []
+        if not (isinstance(e, dict) and e.get("type") == "NOT_FOUND" and (e.get("path") or [None])[-1] == "file")
+    ]
+    if errors:
+        raise GraphQLError(errors)
+    return body.get("data")
+
+
 async def discover(github: GitHub, org: str, model: Model, stream: Broadcaster) -> dict[str, int]:
     """Store every mod branch's valid mod.yml and drop the rows of branches that are gone. Without a docker-mods
     repo in the org this keeps nothing."""
@@ -103,7 +118,7 @@ async def discover(github: GitHub, org: str, model: Model, stream: Broadcaster) 
     after: str | None = None
     found = False
     while True:
-        data = await github.graphql(REFS, {"owner": org, "name": REPO_NAME, "after": after})
+        data = await refs_page(github, org, after)
         repository = data.get("repository") if isinstance(data, dict) else None
         if not isinstance(repository, dict):
             break
