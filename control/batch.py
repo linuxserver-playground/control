@@ -150,10 +150,10 @@ PROJECTS: tuple[Project, ...] = (
         ref="main",
         every=DAY,
         offset=datetime.timedelta(hours=4, minutes=30),
-        cap=10,
+        cap=16,
         workflows=("Build Layers",),
         note="Daily rebuild of every layer, distro and arch (about 46 build jobs). The workflow clamps parallel "
-        "to 1-10.",
+        "to 1-16.",
     ),
     Project(
         repo="wheelie",

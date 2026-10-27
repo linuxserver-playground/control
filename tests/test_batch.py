@@ -252,15 +252,15 @@ async def test_live_project_is_dispatched_with_the_free_width(state: State, monk
         assert runner.due(SELKIES, now[0])
         decision = await runner.check(SELKIES)
         assert not runner.due(SELKIES, now[0])  # recorded: not again today
-    assert decision.outcome == "dispatch" and decision.detail["parallel"] == 10  # 20-4-4 = 12, capped at 10
+    assert decision.outcome == "dispatch" and decision.detail["parallel"] == 12  # 20-4-4
     assert decision.detail["reason"] == "scheduled" and decision.detail["capacity"]["running"] == 4
     assert github.posts == [
         (
             f"/repos/{ORG}/selkies-layers/actions/workflows/build.yml/dispatches",
-            {"ref": "main", "inputs": {"parallel": "10"}},
+            {"ref": "main", "inputs": {"parallel": "12"}},
         )
     ]
-    assert batch.capacity(state, now[0]).batch == {"selkies-layers": 10}  # held while its run starts
+    assert batch.capacity(state, now[0]).batch == {"selkies-layers": 12}  # held while its run starts
 
 
 @pytest.mark.anyio
@@ -271,7 +271,7 @@ async def test_projects_not_live_are_dry_runs(state: State, monkeypatch: pytest.
     async with mock_client(github) as http:
         decision = await make(state, http, now).check(SELKIES)
     assert decision.outcome == "dispatch" and decision.detail["dry_run"] is True and decision.id is not None
-    assert decision.detail["live"] is False and decision.detail["parallel"] == 10 and github.posts == []
+    assert decision.detail["live"] is False and decision.detail["parallel"] == 16 and github.posts == []
     assert batch.capacity(state, now[0]).batch == {}
 
 
@@ -573,7 +573,7 @@ def test_batch_page_and_json(client: TestClient, state: State, monkeypatch: pyte
     body = client.get("/api/batch.json").json()
     assert [p["repo"] for p in body["projects"]] == ["proot-apps", "selkies-layers", "wheelie"]
     selkies = body["projects"][1]
-    assert selkies["live"] is False and selkies["schedule"] == "daily at 04:30 UTC" and selkies["parallel_now"] == 10
+    assert selkies["live"] is False and selkies["schedule"] == "daily at 04:30 UTC" and selkies["parallel_now"] == 16
     assert selkies["last_dispatch"]["info"]["parallel"] == 6 and selkies["last_dispatch"]["run"] is None
     assert body["projects"][2]["live"] is True  # wheelie has no cron of its own
     assert body["capacity"]["free"] == 16 and body["capacity"]["reserve"] == 4
