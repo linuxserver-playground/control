@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM ghcr.io/linuxserver/baseimage-alpine:3.22
+FROM ghcr.io/linuxserver-playground/baseimage-alpine:3.22
 
 # set version label
 ARG BUILD_DATE
@@ -30,7 +30,6 @@ RUN \
     wheel && \
   # lsio-builder (the contracts package) declares python >=3.13 but runs on the 3.12 Alpine ships
   /lsiopy/bin/pip install -U --no-cache-dir --ignore-requires-python \
-    --find-links https://wheel-index.linuxserver.io/alpine-3.22/ \
     /tmp/app && \
   printf "Linuxserver.io version: ${VERSION}\nBuild-date: ${BUILD_DATE}\n" > /build_version && \
   echo "**** cleanup ****" && \
