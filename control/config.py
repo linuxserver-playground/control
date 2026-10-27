@@ -62,7 +62,7 @@ class Settings(BaseModel):
     """The narrowest batch run control starts, so a batch always progresses even on a busy fleet."""
     batch_max_parallel: int = 16
     """The widest batch run control starts, whatever is free; each project's workflow may cap it lower."""
-    batch_live: tuple[str, ...] = ("wheelie", "proot-apps")
+    batch_live: tuple[str, ...] = ("wheelie", "proot-apps", "selkies-layers")
     """Batch projects control dispatches for real. The others are sized and recorded as dry runs, because their
     own cron still fires until the repo's `SCHEDULED_BY_CONTROL` variable is set. Env CONTROL_BATCH_LIVE (csv)."""
     scheduler: bool = True
