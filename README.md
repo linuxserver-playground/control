@@ -207,7 +207,7 @@ GitHub shows those as queued. Jobs come from the `workflow_job` webhooks; open j
 **Slots.** At its slot a project is skipped while a run of its own is still going, and deferred while fewer than
 `MIN_PARALLEL` slots are free; both look again every 10 minutes for up to 3 hours (30 minutes for wheelie). When
 that window closes a busy fleet still gets a run at the minimum, so a batch always progresses; a run of its own
-still going skips the slot. A slot missed by more than half a period (control down) waits for the next one.
+still going skips the slot. A slot missed for longer than that window (control down or just deployed) waits for the next one.
 wheelie's gap check is `control/vendor/wheelie_gaps.py`, wheelie's `scripts/gaps.py` copied verbatim (the header
 names the commit; `tests/test_vendor.py` fails on drift), fed `distros.json`, `packages.txt` and the index pages
 from the repo at `main` and PyPI over HTTP. No gap records `unchanged`; the same gaps whose build failed wait a

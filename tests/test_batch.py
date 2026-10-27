@@ -315,9 +315,10 @@ async def test_previous_run_still_going_defers_then_skips_the_slot(state: State)
 async def test_a_missed_slot_is_not_run_late(state: State) -> None:
     async with mock_client(FakeGitHub()) as http:
         runner = make(state, http, [SLOT])
-        assert runner.due(SELKIES, SLOT + datetime.timedelta(hours=11))
-        assert not runner.due(SELKIES, SLOT + datetime.timedelta(hours=13))
-        assert not runner.due(PROOT, SLOT + datetime.timedelta(hours=13))  # 00:00 + 17h
+        assert runner.due(SELKIES, SLOT + datetime.timedelta(hours=2, minutes=59))
+        assert not runner.due(SELKIES, SLOT + datetime.timedelta(hours=3, minutes=1))
+        assert not runner.due(PROOT, SLOT)  # 00:00 + 4h30
+        assert runner.due(WHEELIE, SLOT.replace(minute=50)) and not runner.due(WHEELIE, SLOT.replace(minute=51))
 
 
 # -- wheelie ------------------------------------------------------------------------------------------------------

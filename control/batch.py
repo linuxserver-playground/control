@@ -326,12 +326,12 @@ class Batch:
         return self.scheduler.record(project.repo, project.ref, KIND_BATCH, outcome, detail)
 
     def due(self, project: Project, now: datetime.datetime) -> bool:
-        """Due once per slot, plus each `retry_at` a deferral or error left. A slot missed by more than half a
-        period (control was down) is left for the next one."""
+        """Due once per slot, plus each `retry_at` a deferral or error left. A slot missed for longer than its
+        deferral window (control was down, or just deployed) is left for the next one rather than run late."""
         slot = project.last_slot(now)
         last = self.model.last_decision(project.repo, project.ref, KIND_BATCH)
         if last is None or _at(last.at) < slot:
-            return now - slot <= project.every / 2
+            return now - slot <= project.defer_window
         retry = last.info.get("retry_at")
         return bool(retry) and now >= _at(str(retry))
 
