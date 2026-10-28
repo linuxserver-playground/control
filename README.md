@@ -286,9 +286,9 @@ cookie (`control_session`: login, avatar, member flag, when it was
 checked, a CSRF token) is HMAC-signed with `CONTROL_SESSION_SECRET`, `HttpOnly`, `Secure` when the public URL
 is https, `SameSite=None` when `CONTROL_ALLOWED_ORIGINS` names an external origin (else `Lax`), and lives 7
 days; the member flag is re-checked hourly on `/management`, on `/api/me` and before every action, with the
-installation token. Without Members: read that check answers 403 and the verdict taken at sign-in stands for the
-life of the session, so someone who leaves the org keeps member actions until their session expires or they sign
-in again. Sign-in never needs "Request user authorization (OAuth) during installation".
+installation token, which needs the App's Members: read: that is how someone who leaves the org loses member
+actions within the hour. Without it the check answers 403 and the verdict taken at sign-in stands for the life of
+the session. Sign-in never needs "Request user authorization (OAuth) during installation".
 
 **The GitHub App needs the callback URL**: `${CONTROL_PUBLIC_URL}/login/callback` under *Identifying and
 authorizing users → Callback URL* in the app's settings. New apps get it from the manifest
@@ -462,10 +462,11 @@ events keep the stored installation id current.
 > The run archive uploads Release assets with **Contents: write**, which the App has. The Pages check needs no
 > more than the metadata every App has: control never enables Pages or changes environments.
 
-> The manifest asks for no organisation permission: sign-in reads membership with the user's own token through the
-> classic OAuth App (see *Member sign-in*). Only without an OAuth App does sign-in need **Members: read** on the
-> App, granted by hand under the App's *Permissions & events* and accepted on the installation; until then every
-> user is treated as a non-member. With it, the hourly re-check also catches someone who has left the org.
+> The manifest asks for one organisation permission, **Members: read**, for the hourly membership re-check (see
+> *Member sign-in*): without it someone who has left the org keeps member actions until their session expires.
+> Sign-in itself reads membership with the user's own token through the classic OAuth App. On an app created
+> before the manifest asked for it, grant it under the App's *Permissions & events* and accept it on the
+> installation. The playground's installation has it.
 
 ## Publication hold
 

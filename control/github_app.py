@@ -29,6 +29,7 @@ PERMISSIONS: dict[str, str] = {
     "checks": "read",
     "contents": "write",
     "issues": "read",
+    "members": "read",
     "metadata": "read",
     "packages": "write",
     "pull_requests": "write",
