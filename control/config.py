@@ -74,10 +74,9 @@ class Settings(BaseModel):
     """Tries before control gives up on archiving a run (backing off from 5 minutes to 6 hours) and says so."""
     run_archive_max_logs_mb: int = 500
     """A run's log archive larger than this (compressed) is not attached; run.json still is."""
-    repo_pages: bool = True
-    """Enable GitHub Pages (`build_type=workflow`) on every `docker-*` repo once, and open its `github-pages`
-    environment to every branch, because each image's build deploys its heavy data to its own Pages (pages.py).
-    Needs the App's Pages and Administration write permissions; without them it logs once and skips."""
+    pages_check: bool = True
+    """Warn once (log and Discord) about every image repo without a GitHub Pages site, whose build files then never
+    reach the website, and list them in the discovery record (pages.py). Read-only: control never enables Pages."""
     scheduler: bool = True
     """Run the fleet discovery and scheduler loop beside the server (once the app is configured and installed)."""
     session_secret: str | None = None
@@ -161,8 +160,8 @@ class Settings(BaseModel):
             fields["run_archive_attempts"] = int(attempts)
         if max_logs := env("CONTROL_RUN_ARCHIVE_MAX_LOGS_MB"):
             fields["run_archive_max_logs_mb"] = int(max_logs)
-        if pages := env("CONTROL_REPO_PAGES"):
-            fields["repo_pages"] = pages.strip().lower() in ("1", "true", "yes", "on")
+        if pages := env("CONTROL_PAGES_CHECK"):
+            fields["pages_check"] = pages.strip().lower() in ("1", "true", "yes", "on")
         if scheduler := env("CONTROL_SCHEDULER"):
             fields["scheduler"] = scheduler.strip().lower() in ("1", "true", "yes", "on")
         if session_secret := env("CONTROL_SESSION_SECRET"):

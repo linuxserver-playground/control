@@ -105,8 +105,9 @@ class Discovery:
         self.stream = stream
         self.counts: dict[str, int] = {"repos": 0, "branches": 0, "fetched": 0, "unchanged": 0, "errors": 0}
         self.helpers: list[str] = []
-        self.found: list[Repo] = []
-        """The `docker-*` repos of this run that are not archived (pages.py sets them up)."""
+        self.has_pages: dict[str, bool] = {}
+        """`has_pages` of every image repo this run read (not archived, image.yml on its default branch), as the repos
+        list reports it; pages.py warns about the ones without a site."""
 
     async def run(self) -> dict[str, int]:
         repos = await self.github.paginate(
@@ -123,12 +124,14 @@ class Discovery:
                 self.model.delete_manifests(repo.full_name)
                 continue
             self.counts["repos"] += 1
-            self.found.append(repo)
             try:
                 await self.repo(repo)
             except Exception:
                 self.counts["errors"] += 1
                 log.exception("discovery failed for %s", repo.full_name)
+                continue
+            if repo.full_name not in self.helpers and isinstance(data.get("has_pages"), bool):
+                self.has_pages[repo.full_name] = data["has_pages"]
         # Repos that vanished from the org (deleted, transferred) take their branches with them.
         for known in self.model.repos(images_only=True):
             if known.full_name not in seen:
@@ -245,8 +248,8 @@ async def discover_once(state: State) -> dict[str, Any]:
         record["error"] = f"{type(exc).__name__}: {exc}"
     from . import mods  # mods reads manifests with this module's loader
 
-    if pages_counts := await pages.ensure(state, github, discovery.found):
-        record["pages"] = pages_counts
+    if state.settings.pages_check and record["counts"] is not None:
+        record["pages_missing"] = await pages.check(state, discovery.has_pages)
 
     try:
         record["mods"] = await mods.discover(github, state.settings.github_org, state.model, state.stream)
@@ -301,9 +304,8 @@ async def refresh_on_push(state: State, repo_full_name: str, branch: str) -> Man
         discovery = Discovery(github, state.settings.github_org, state.model, state.stream)
         if branch == repo.default_branch and not state.model.manifests(repo_full_name):
             # A repo with nothing live yet (new, or image.yml just added): find every live branch now rather
-            # than at the next 30-minute discovery, and give it Pages if nothing has yet.
+            # than at the next 30-minute discovery.
             await discovery.repo(repo)
-            await pages.ensure(state, github, [repo])
             return state.model.manifest(repo_full_name, branch)
         return await discovery.refresh_branch(repo, branch)
     except Exception:

@@ -1466,17 +1466,21 @@ class Model:
 
     # -- repo pages -----------------------------------------------------------------------------------------------
 
-    def repo_pages_done(self) -> set[str]:
+    def pages_missing(self) -> set[str]:
+        """Image repos already reported for having no Pages site (one row each, removed once the site exists)."""
         with self.db.connect() as conn:
             return {str(row["repo"]) for row in conn.execute("SELECT repo FROM repo_pages").fetchall()}
 
-    def set_repo_pages(self, repo: str, detail: str) -> None:
+    def report_pages_missing(self, repo: str, detail: str) -> None:
         with self.db.connect() as conn:
             conn.execute(
-                "INSERT INTO repo_pages (repo, detail, created_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(repo) DO UPDATE SET detail = excluded.detail",
+                "INSERT INTO repo_pages (repo, detail, created_at) VALUES (?, ?, ?) ON CONFLICT(repo) DO NOTHING",
                 (repo, detail, utcnow()),
             )
+
+    def clear_pages_missing(self, repo: str) -> None:
+        with self.db.connect() as conn:
+            conn.execute("DELETE FROM repo_pages WHERE repo = ?", (repo,))
 
     # -- status ---------------------------------------------------------------------------------------------------
 

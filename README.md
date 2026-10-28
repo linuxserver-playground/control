@@ -65,7 +65,7 @@ docker run --rm -p 8080:8080 -e PUID=1000 -e PGID=1000 -e CONTROL_PUBLIC_URL=htt
 | `CONTROL_CONCURRENCY_LIMIT` | `20`                    | GitHub's concurrent job limit for the org; the queue page measures in-progress jobs against it. |
 | `CONTROL_RUN_ARCHIVE` | `true`                        | Attach `run.json` and `logs.zip` to every live release once its run completes (see *Run archive*). |
 | `CONTROL_RUN_ARCHIVE_PER_PASS`, `CONTROL_RUN_ARCHIVE_ATTEMPTS`, `CONTROL_RUN_ARCHIVE_MAX_LOGS_MB` | `3`, `8`, `500` | Runs archived per minute at most; tries before giving up on one (backing off 5 minutes to 6 hours); the largest log archive attached. |
-| `CONTROL_REPO_PAGES`  | `true`                        | Enable GitHub Pages (`build_type=workflow`) once on every `docker-*` repo and open its `github-pages` environment to every branch (see *Pages on image repos*). |
+| `CONTROL_PAGES_CHECK` | `true`                        | Warn once about every image repo without a GitHub Pages site and list them in the discovery record (see *Pages on image repos*). Read-only. |
 | `CONTROL_SCHEDULER`   | `true`                        | Run fleet discovery and the scheduler loop beside the server. `false` keeps the pages and member actions and stops dispatching. |
 | `CONTROL_BATCH_LIVE`  | `wheelie`                     | Batch build projects control dispatches for real (csv; empty for none). The others are sized and recorded as dry runs while their own cron still fires. |
 | `CONTROL_BATCH_RESERVE` | `4`                         | Job slots a batch run never sizes into, kept for image, hub and site builds. |
@@ -126,7 +126,7 @@ backwards; unknown events are stored and ignored; a handler failure is logged an
 response. The scheduler owns `manifests` (one row per live branch), `mod_manifests` (one row per docker-mods
 branch), `scheduler_decisions` and `skips`;
 member actions write `actions`; the run archive writes `run_archives` (one row per released run it has tried) and
-the Pages setup `repo_pages` (one row per repo it has set up).
+the Pages check `repo_pages` (one row per image repo reported for having no Pages site, removed once it has one).
 
 ## Scheduler
 
@@ -452,11 +452,8 @@ missing header is `401`, and deliveries before the app exists are `503` so GitHu
 delivery is stored whole, keyed by `X-GitHub-Delivery` so redeliveries are ignored, and `installation`
 events keep the stored installation id current.
 
-> The run archive uploads Release assets with **Contents: write**, which the App has. Pages setup needs
-> **Pages: write** and **Administration: write** (both in the manifest for new apps); on an app created before
-> they were added, grant them under the App's *Permissions & events* and accept them on the installation. Until
-> then control logs and posts once that it skips the Pages setup, and resumes on its own: the
-> `installation` `new_permissions_accepted` webhook drops the cached token, whose successor carries the new set.
+> The run archive uploads Release assets with **Contents: write**, which the App has. The Pages check needs no
+> more than the metadata every App has: control never enables Pages or changes environments.
 
 > Sign-in needs the organisation permission **Members: read** on the App (it is in the manifest for new apps). On an app created before it was added, grant it under the App's *Permissions & events* and then accept the updated permissions on the installation; until then every user is treated as a non-member.
 
@@ -505,12 +502,13 @@ Release. The outcome per run is in `run_archives` (`done`, `retry`, `failed`, `s
 
 ## Pages on image repos
 
-Each image's build deploys its heavy data to its own repository's GitHub Pages, so every `docker-*` repo needs
-Pages enabled with `build_type=workflow` (`POST /repos/{repo}/pages`, or `PUT` to switch a branch-built site) and
-its `github-pages` environment open to every branch (`PUT /repos/{repo}/environments/github-pages` with
-`deployment_branch_policy: null`), since live branches are not all the default one. `control/pages.py` does it once
-per repo, recorded in `repo_pages`: on `repository` `created`, on the first push to a repo with nothing live yet,
-and on every fleet discovery for a repo not done yet (archived repos are skipped). It needs the App's Pages and
-Administration write permissions; without them it skips, logs and posts once which are missing, and tries again
-once a token carries them. The discovery record (`last_discovery` in `/api/status.json`) counts what it did
-(`pages`).
+Each image's build deploys its heavy files (file trees, package lists, test files) to its own repository's GitHub
+Pages, so an image repo without a Pages site builds and releases but those files never show on the website.
+Enabling Pages (source: GitHub Actions) and opening the `github-pages` environment to every branch is a
+maintainer's step of the new-image recipe; control holds no permission for it and changes nothing. Fleet discovery
+reads `has_pages` from the org's repository list it already fetches, and `control/pages.py` reports every image repo
+(not archived, `image.yml` on its default branch) without a site: one log line and one Discord post, "<repo> has no
+GitHub Pages site: its build files will not show on the website. Enable it as the new-image recipe says.",
+recorded in `repo_pages` so it is not repeated every 30 minutes. The row goes when `has_pages` turns true, so a
+repo that loses its site again is reported again. Every discovery lists the repos still without one in its record
+(`last_discovery.pages_missing` in `/api/status.json`). `CONTROL_PAGES_CHECK=false` turns it off.

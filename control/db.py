@@ -295,8 +295,8 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX run_archives_state ON run_archives (state, next_attempt_at);
     """,
-    # Pages on each docker-* repo (pages.py): enabled once with build_type=workflow, the github-pages environment
-    # open to every branch. A repo with a row here is done.
+    # Pages on each docker-* repo (pages.py). Since the next commit (control no longer enables Pages) a row is an
+    # image repo reported once for having no Pages site, removed when it has one.
     """
     CREATE TABLE repo_pages (
         repo TEXT PRIMARY KEY,

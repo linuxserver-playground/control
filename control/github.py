@@ -62,11 +62,6 @@ class GitHub:
         response.raise_for_status()
         return response
 
-    async def put(self, path: str, json: dict[str, Any] | None = None) -> httpx.Response:
-        response = await self.http.put(f"{API}{path}", json=json, headers=self.headers)
-        response.raise_for_status()
-        return response
-
     async def delete(self, path: str) -> httpx.Response:
         response = await self.http.delete(f"{API}{path}", headers=self.headers)
         response.raise_for_status()

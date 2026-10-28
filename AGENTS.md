@@ -19,8 +19,8 @@ fleet, and lets org members act (re-run, cancel, dispatch, skip). Python 3.12+, 
   `control/mods.py` the docker-mods side: every branch's `mod.yml` into `mod_manifests` (GraphQL, and one branch on
   a push that touches it) and the GHCR tag check behind the hourly mod check of mods with an `upstream` block;
   `control/archive.py` the run archive: `run.json` and `logs.zip` (after a credential pattern check) attached to each
-  live release once its run completes; `control/pages.py` GitHub Pages (`build_type=workflow`, `github-pages`
-  environment open to every branch) set up once per `docker-*` repo;
+  live release once its run completes; `control/pages.py` the read-only Pages check: one warning per image
+  repo whose `has_pages` is false (control never enables Pages);
   `control/batch.py` the batch build projects (selkies-layers, proot-apps, wheelie): sizing `parallel` from the
   jobs running, their slots, and the per-unit failure alerts; `control/vendor/wheelie_gaps.py` wheelie's gap
   check, copied verbatim like the resolver;
