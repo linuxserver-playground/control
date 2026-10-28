@@ -186,6 +186,18 @@ Dispatch is always `POST /repos/{repo}/actions/workflows/build.yml/dispatches` w
 itself arrives by webhook; the scheduler page links a `dispatch` decision to the `workflow_dispatch` run that
 appeared on the branch within 15 minutes.
 
+**Pages deploys are not builds.** `reason: pages` (a member dispatch, or `repository_dispatch` with
+`client_payload.reason`) runs only the image workflow's `pages` job, `build / Pages`, in its own concurrency group
+(`build-<ref>-pages`): it redeploys the repo's Pages site from its Releases, with Prepare, the arch builds and
+Publish skipped, no `/events` and no release. GitHub tells control neither a run's inputs nor its concurrency
+group, and its `display_title` is just `Build`, so control tells such a run by its jobs: a `Pages` job that is not
+skipped and no Prepare job that ran (a build is the other way round; a run whose jobs have not arrived counts as a
+build). The scheduler's in-flight, settle and failed-initial-build checks, the helper repos' branch health and the
+decision-to-run link leave Pages deploys out, and a pages dispatch neither starts nor resets a branch's cooldown.
+With no build event there is no builds row, so no fleet result, Discord build message, publication hold or run
+archive. A failed `Pages` job is a warning in the log (`pages deploy failed on <repo> run <id>: <job url>`) and
+a red run on the runs page, nothing more; its stuck threshold is the default hour, not its own short history.
+
 **Mod check** (`control/mods.py`): the Jenkins External-Triggers jobs, which looked up a mod's tool version every
 hour and started its build when Docker Hub had no `mods:<branch>-<version>` tag. Discovery also reads every
 `docker-mods` branch's `mod.yml` in one GraphQL query into `mod_manifests` (a head that has not moved keeps its
@@ -286,7 +298,7 @@ uses these; see below); both route families run one `prepare_*` function per act
 | ----------- | ------------------------ | --------------------------------------------------------------------------- |
 | `rerun`     | `run_id`                 | `POST …/actions/runs/{id}/rerun-failed-jobs`; on `/runs/{id}` for failed runs. |
 | `cancel`    | `run_id`                 | `POST …/actions/runs/{id}/cancel`; on `/runs/{id}` while a run is active.      |
-| `dispatch`  | `repo`, `branch`, `reason` (`manual`, `rebuild`, `packages`, `upstream`) | `workflow_dispatch` of `build.yml`; recorded as a `manual` scheduler decision (so the cooldown sees it). |
+| `dispatch`  | `repo`, `branch`, `reason` (`manual`, `rebuild`, `packages`, `upstream`, `pages`: redeploy the Pages site only) | `workflow_dispatch` of `build.yml`; recorded as a `manual` scheduler decision (so the cooldown sees it). |
 | `packages`  | `repo`, `branch`         | A package check now; recorded as a `packages` decision, which resets that branch's weekly slot (so does `python -m control schedule --once --kind packages`). |
 | `skip` / `unskip` | `scope`, `reason`  | Set or clear a skip flag.                                                   |
 | `reconcile` |                          | Run fleet discovery now, in the background; the outcome shows on `/status`. |

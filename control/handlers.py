@@ -9,7 +9,19 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from .model import Build, Issue, Job, Model, PullRequest, Release, Repo, Run, is_build_job, is_build_run
+from .model import (
+    Build,
+    Issue,
+    Job,
+    Model,
+    PullRequest,
+    Release,
+    Repo,
+    Run,
+    is_build_job,
+    is_build_run,
+    is_pages_job,
+)
 from .stream import Broadcaster
 
 log = logging.getLogger(__name__)
@@ -74,6 +86,10 @@ def workflow_job(model: Model, stream: Broadcaster, payload: dict[str, Any]) -> 
     if model.upsert_job(job):
         stream.publish("jobs", job.id)
         stream.publish("runs", job.run_id)
+        if payload.get("action") == "completed" and is_pages_job(job.name) and job.conclusion == "failure":
+            # A Pages deploy is not a build: no event, no Discord, no red branch. Its failure is this line and the
+            # run on the runs page; the next live release or `reason=pages` dispatch redeploys the site whole.
+            log.warning("pages deploy failed on %s run %s: %s", job.repo, job.run_id, job.html_url)
 
 
 def pull_request(model: Model, stream: Broadcaster, payload: dict[str, Any]) -> None:

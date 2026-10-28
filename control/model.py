@@ -92,6 +92,33 @@ def is_build_job(data: dict[str, Any]) -> bool:
     return data.get("workflow_name") not in IGNORED_WORKFLOW_NAMES
 
 
+PAGES_REASON = "pages"
+"""The dispatch reason that makes a Build run deploy the repository's Pages site and nothing else: one job, `Pages`
+(`build / Pages` in the caller's run), with Prepare, the arch builds and Publish skipped, no build event and no
+release. GitHub gives a run neither its inputs nor its concurrency group, so control tells such a run by its jobs."""
+PAGES_JOB = "Pages"
+
+
+def is_pages_job(name: str | None) -> bool:
+    """The image workflow's `pages` job, alone or inside the caller's run (`build / Pages`)."""
+    return bool(name) and (name == PAGES_JOB or str(name).endswith(f" / {PAGES_JOB}"))
+
+
+def pages_only_sql(alias: str) -> str:
+    """SQL true for a pages-only run (`alias` names the runs row): its Pages job is not skipped, and no Prepare job ran.
+    In a build it is the other way round. A run whose jobs control has not seen yet counts as a build."""
+    return (
+        f"(EXISTS (SELECT 1 FROM jobs pj WHERE pj.run_id = {alias}.id AND (pj.name = '{PAGES_JOB}' "
+        f"OR pj.name LIKE '% / {PAGES_JOB}') AND pj.conclusion IS NOT 'skipped') "
+        f"AND NOT EXISTS (SELECT 1 FROM jobs pp WHERE pp.run_id = {alias}.id AND (pp.name = 'Prepare' "
+        "OR pp.name LIKE '% / Prepare') AND pp.conclusion IS NOT 'skipped'))"
+    )
+
+
+BUILD_RUN_SQL = f"NOT {pages_only_sql('runs')}"
+"""Runs that are builds: the scheduler's in-flight and settle checks and branch health never see a Pages deploy."""
+
+
 class Run(BaseModel):
     id: int
     repo: str
@@ -777,7 +804,7 @@ class Model:
         with self.db.connect() as conn:
             row = conn.execute(
                 "SELECT * FROM runs WHERE repo = ? AND branch = ? AND (status IS NULL OR status != 'completed') "
-                "ORDER BY created_at DESC LIMIT 1",
+                f"AND {BUILD_RUN_SQL} ORDER BY created_at DESC LIMIT 1",
                 (repo, branch),
             ).fetchone()
         return Run(**dict(row)) if row else None
@@ -786,7 +813,8 @@ class Model:
         """The newest run of a branch, whatever its state: the release check waits for a young one to settle."""
         with self.db.connect() as conn:
             row = conn.execute(
-                "SELECT * FROM runs WHERE repo = ? AND branch = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+                f"SELECT * FROM runs WHERE repo = ? AND branch = ? AND {BUILD_RUN_SQL} "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
                 (repo, branch),
             ).fetchone()
         return Run(**dict(row)) if row else None
@@ -797,7 +825,8 @@ class Model:
             rows = conn.execute(
                 "SELECT * FROM runs r WHERE repo = ? AND event IN ('push', 'workflow_dispatch') AND id = ("
                 "SELECT id FROM runs WHERE repo = r.repo AND branch = r.branch "
-                "AND event IN ('push', 'workflow_dispatch') ORDER BY created_at DESC, id DESC LIMIT 1) ORDER BY branch",
+                f"AND event IN ('push', 'workflow_dispatch') AND {BUILD_RUN_SQL} "
+                "ORDER BY created_at DESC, id DESC LIMIT 1) ORDER BY branch",
                 (repo,),
             ).fetchall()
         return [Run(**dict(row)) for row in rows]
@@ -810,17 +839,19 @@ class Model:
         after: str,
         within_seconds: int = 900,
         exclude_run_id: int | None = None,
+        pages: bool = False,
     ) -> Run | None:
         """The first run of `event` on a branch created after `after`: how a dispatch decision finds its run,
         and how a package check finds the release build it dispatched (`exclude_run_id` keeps it from
-        matching itself)."""
+        matching itself). Builds only, or with `pages` the Pages deploys only."""
         limit = (datetime.datetime.fromisoformat(after) + datetime.timedelta(seconds=within_seconds)).isoformat(
             timespec="seconds"
         )
         with self.db.connect() as conn:
             row = conn.execute(
                 "SELECT * FROM runs WHERE repo = ? AND branch = ? AND event = ? AND created_at >= ? "
-                "AND created_at <= ? AND id IS NOT ? ORDER BY created_at LIMIT 1",
+                f"AND created_at <= ? AND id IS NOT ? AND {pages_only_sql('runs') if pages else BUILD_RUN_SQL} "
+                "ORDER BY created_at LIMIT 1",
                 (repo, branch, event, after, limit, exclude_run_id),
             ).fetchone()
         return Run(**dict(row)) if row else None
@@ -1324,7 +1355,7 @@ class Model:
         return [SchedulerDecision(**dict(row)) for row in rows]
 
     def last_decision(
-        self, image: str, branch: str, kind: str | None = None, outcome: str | None = None
+        self, image: str, branch: str, kind: str | None = None, outcome: str | None = None, pages: bool = False
     ) -> SchedulerDecision | None:
         sql = "SELECT * FROM scheduler_decisions WHERE image = ? AND branch = ?"
         params: list[Any] = [image, branch]
@@ -1334,6 +1365,10 @@ class Model:
         if outcome:
             sql += " AND outcome = ?"
             params.append(outcome)
+        if not pages:
+            # A Pages deploy builds nothing, so it never starts a build's cooldown or stands for its dispatch.
+            sql += " AND (CASE WHEN json_valid(detail) THEN json_extract(detail, '$.dispatch_reason') END) IS NOT ?"
+            params.append(PAGES_REASON)
         sql += " ORDER BY id DESC LIMIT 1"
         with self.db.connect() as conn:
             row = conn.execute(sql, params).fetchone()

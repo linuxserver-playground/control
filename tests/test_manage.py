@@ -263,3 +263,18 @@ def test_member_pages_show_the_buttons(client: TestClient, state: State, github:
     assert 'action="/manage/dispatch"' in fleet and 'name="scope" value="sonarr/main"' in fleet
     management = client.get("/management").text
     assert 'action="/manage/reconcile"' in management and 'action="/manage/packages"' in management
+
+
+def test_a_pages_dispatch_builds_nothing_so_it_starts_no_cooldown(
+    client: TestClient, state: State, github: FakeActions
+) -> None:
+    user = sign_in(client, state)
+    form = {"repo": "docker-sonarr", "branch": "main", "reason": "pages", "csrf": user.csrf}
+    assert client.post("/manage/dispatch", data=form, follow_redirects=False).status_code == 303
+    assert github.posts == [
+        (f"/repos/{REPO}/actions/workflows/build.yml/dispatches", {"ref": "main", "inputs": {"reason": "pages"}})
+    ]
+    assert "pages" in views.management_page(state, None).reasons
+    assert state.model.last_decision("sonarr", "main", outcome="dispatch") is None
+    pages = state.model.last_decision("sonarr", "main", outcome="dispatch", pages=True)
+    assert pages is not None and pages.info["dispatch_reason"] == "pages"

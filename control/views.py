@@ -23,6 +23,7 @@ from .db import Delivery
 from .fleet import helper_repos, last_discovery
 from .manage import REASONS
 from .model import (
+    PAGES_REASON,
     Action,
     BatchRun,
     BatchUnit,
@@ -36,6 +37,7 @@ from .model import (
     Run,
     SchedulerDecision,
     Skip,
+    is_pages_job,
     stuck_threshold,
 )
 from .state import State, state_of
@@ -324,7 +326,9 @@ def job_view(state: State, job: Job, now: datetime.datetime, run: Run | None = N
     threshold = None
     stuck = False
     if job.status == "in_progress":
-        threshold = stuck_threshold(state.model.job_durations(job.repo, job.name))
+        # A Pages deploy is short and rare, so its own history makes a twitchy p95; it waits the default hour.
+        samples = [] if is_pages_job(job.name) else state.model.job_durations(job.repo, job.name)
+        threshold = stuck_threshold(samples)
         stuck = elapsed is not None and elapsed > threshold
     return JobView(
         job=job,
@@ -606,7 +610,8 @@ def decision_view(state: State, decision: SchedulerDecision) -> DecisionView:
             repo = state.model.repo_by_name(f"docker-{decision.image}")
             full_name = repo.full_name if repo else None
         if full_name:
-            run = state.model.run_after(full_name, decision.branch, "workflow_dispatch", decision.at)
+            pages = decision.info.get("dispatch_reason") == PAGES_REASON
+            run = state.model.run_after(full_name, decision.branch, "workflow_dispatch", decision.at, pages=pages)
     return DecisionView(decision=decision, info=decision.info, run=run)
 
 

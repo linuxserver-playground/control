@@ -29,8 +29,8 @@ router = APIRouter()
 RATE_LIMIT = 30
 EDIT_RATE_LIMIT = 120
 RATE_WINDOW = datetime.timedelta(hours=1)
-REASONS = ("manual", "rebuild", "packages", "upstream")
-"""The `reason` choices build.yml's workflow_dispatch accepts."""
+REASONS = ("manual", "rebuild", "packages", "upstream", "pages")
+"""The `reason` choices build.yml's workflow_dispatch accepts. `pages` only redeploys the repo's Pages site."""
 
 Fields = dict[str, str]
 Operation = Callable[[State, GitHub, "Actor"], Awaitable[str]]
