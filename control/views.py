@@ -7,6 +7,7 @@ set up in app.py). `/api/stream` is the server-sent events feed the live pages r
 
 import contextlib
 import datetime
+import urllib.parse
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
@@ -102,6 +103,9 @@ class FleetRow(BaseModel):
     last_outcome: str | None = None
     source: str | None = None
     """The manifest's upstream.version.type."""
+    upstream_url: str | None = None
+    """Where to read the upstream release the board shows: its tag, commit or package version page when the source
+    names one, else the project's releases page or website."""
     package_check: bool = True
     skip: list[str] = []
     """Skip-flag scopes that hold the branch back, plus `archived`."""
@@ -380,6 +384,38 @@ def drift(upstream: str | None, released: str | None) -> str:
     return "same" if upstream == released else "ahead"
 
 
+def project_website(manifest: Manifest) -> str | None:
+    upstream = manifest.manifest.get("upstream")
+    url = upstream.get("url") if isinstance(upstream, dict) else None
+    return str(url) if url else None
+
+
+def upstream_url(source: dict[str, Any], version: str | None, website: str | None = None) -> str | None:
+    """The upstream release page for `version` from an image.yml `upstream.version` source. A `transform` means the
+    version is not the tag as upstream wrote it (a `v` dropped, say), so the link stops at the releases page rather
+    than guess a tag that 404s. Sources without a page of their own (os, command, json, …) fall back to `website`."""
+    exact = bool(version) and not source.get("transform")
+    v = urllib.parse.quote(version or "", safe="")
+    repo = str(source.get("repo") or "")
+    match source.get("type"):
+        case "github_release" if repo:
+            return f"https://github.com/{repo}/releases" + (f"/tag/{v}" if exact else "")
+        case "codeberg_release" if repo:
+            return f"https://codeberg.org/{repo}/releases" + (f"/tag/{v}" if exact else "")
+        case "gitea_release" if repo and source.get("base_url"):
+            return f"{str(source['base_url']).rstrip('/')}/{repo}/releases" + (f"/tag/{v}" if exact else "")
+        case "github_commit" if repo:
+            return f"https://github.com/{repo}/commit/{v}" if exact else f"https://github.com/{repo}/commits"
+        case "gitlab_commit" if source.get("web_url"):
+            base = str(source["web_url"]).rstrip("/")
+            return f"{base}/-/commit/{v}" if exact else f"{base}/-/commits"
+        case "npm" if source.get("package"):
+            return f"https://www.npmjs.com/package/{source['package']}" + (f"/v/{v}" if exact else "")
+        case "pip" if source.get("package"):
+            return f"https://pypi.org/project/{source['package']}/" + (f"{v}/" if exact else "")
+    return website
+
+
 # -- page builders -----------------------------------------------------------------------------------------------
 
 
@@ -434,6 +470,9 @@ def fleet_rows(state: State, repos: list[Repo]) -> list[FleetRow]:
                     last_check=decision.at if decision else None,
                     last_outcome=decision.outcome if decision else None,
                     source=manifest.source_type if manifest else None,
+                    upstream_url=upstream_url(manifest.version_source, upstream, project_website(manifest))
+                    if manifest
+                    else None,
                     package_check=manifest.package_check if manifest else True,
                     skip=(["archived"] if repo.archived else []) + flags,
                 )

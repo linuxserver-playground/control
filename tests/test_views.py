@@ -317,3 +317,41 @@ def test_stream_endpoint_headers(client: TestClient) -> None:
 def test_sse_format() -> None:
     assert sse({"type": "jobs", "key": 9001}) == 'data: {"type":"jobs","key":9001}\n\n'
     assert json.loads(sse({"type": "x", "key": [REPO, 7]})[6:]) == {"type": "x", "key": [REPO, 7]}
+
+
+def test_upstream_url() -> None:
+    gh = {"type": "github_release", "repo": "Sonarr/Sonarr"}
+    assert views.upstream_url(gh, "v4.0.1") == "https://github.com/Sonarr/Sonarr/releases/tag/v4.0.1"
+    # A transformed version is not upstream's tag: link the releases, not a guess.
+    assert (
+        views.upstream_url({**gh, "transform": {"strip_prefix": "v"}}, "4.0.1")
+        == "https://github.com/Sonarr/Sonarr/releases"
+    )
+    assert views.upstream_url(gh, None) == "https://github.com/Sonarr/Sonarr/releases"
+    assert (
+        views.upstream_url({"type": "github_commit", "repo": "a/b", "branch": "main"}, "ceb22cc0")
+        == "https://github.com/a/b/commit/ceb22cc0"
+    )
+    assert (
+        views.upstream_url({"type": "pip", "package": "flexget"}, "3.11.2")
+        == "https://pypi.org/project/flexget/3.11.2/"
+    )
+    assert (
+        views.upstream_url({"type": "npm", "package": "@scope/x"}, "1.0.0")
+        == "https://www.npmjs.com/package/@scope/x/v/1.0.0"
+    )
+    assert (
+        views.upstream_url({"type": "codeberg_release", "repo": "a/b"}, "1.2")
+        == "https://codeberg.org/a/b/releases/tag/1.2"
+    )
+    assert (
+        views.upstream_url(
+            {"type": "gitlab_commit", "project_id": 1, "branch": "m", "web_url": "https://gitlab.com/a/b/"}, "abc"
+        )
+        == "https://gitlab.com/a/b/-/commit/abc"
+    )
+    assert views.upstream_url({"type": "gitlab_commit", "project_id": 1, "branch": "m"}, "abc") is None
+    # Sources without a page of their own fall back to the project's website, else nothing.
+    assert views.upstream_url({"type": "os"}, "3.22", "https://example.org") == "https://example.org"
+    assert views.upstream_url({"type": "command"}, "1") is None
+    assert views.upstream_url(gh, "v1/2") == "https://github.com/Sonarr/Sonarr/releases/tag/v1%2F2"
