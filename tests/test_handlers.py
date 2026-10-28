@@ -99,6 +99,30 @@ def test_issues_track_labels_and_state(state: State) -> None:
     assert state.model.issue(REPO, 99) is None
 
 
+def test_comments_move_the_thread_forward(state: State) -> None:
+    seed(state, "issues.opened", "issue_comment.created")
+    issue = state.model.issue(REPO, 12)
+    assert issue and issue.updated_at == "2026-10-22T09:00:00+00:00"
+
+    seed(state, "pull_request.opened")
+    before = state.model.pull_request(REPO, 7)
+    assert before
+    payload = fixture("issue_comment.created")
+    payload["issue"].update(number=7, pull_request={"url": "x"}, updated_at="2030-01-01T00:00:00Z")
+    handlers.process(state.model, state.stream, "issue_comment", payload)
+    pr = state.model.pull_request(REPO, 7)
+    assert pr and pr.updated_at == "2030-01-01T00:00:00+00:00" and pr.head_sha == before.head_sha
+
+    # An older comment delivery never moves it back, and a comment on an unknown PR inserts nothing.
+    payload["issue"].update(updated_at="2029-01-01T00:00:00Z")
+    handlers.process(state.model, state.stream, "issue_comment", payload)
+    pr = state.model.pull_request(REPO, 7)
+    assert pr and pr.updated_at == "2030-01-01T00:00:00+00:00"
+    payload["issue"].update(number=8)
+    handlers.process(state.model, state.stream, "issue_comment", payload)
+    assert state.model.pull_request(REPO, 8) is None
+
+
 def test_release_published_then_deleted(state: State) -> None:
     seed(state, "release.published")
     release = state.model.release(REPO, "4.0.20.3014-ls1")

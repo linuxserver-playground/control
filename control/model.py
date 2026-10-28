@@ -1080,6 +1080,16 @@ class Model:
                 (review_state, norm_ts(at) or utcnow(), repo, number),
             )
 
+    def touch_pull_request(self, repo: str, number: int, at: str | None) -> bool:
+        """Move a known PR's `updated_at` forward (a comment on it); never backwards, never inserts."""
+        when = norm_ts(at) or utcnow()
+        with self.db.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE pull_requests SET updated_at = ? WHERE repo = ? AND number = ? AND updated_at < ?",
+                (when, repo, number, when),
+            )
+            return cursor.rowcount > 0
+
     def pull_request(self, repo: str, number: int) -> PullRequest | None:
         with self.db.connect() as conn:
             row = conn.execute("SELECT * FROM pull_requests WHERE repo = ? AND number = ?", (repo, number)).fetchone()

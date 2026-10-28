@@ -119,6 +119,21 @@ def issues(model: Model, stream: Broadcaster, payload: dict[str, Any]) -> None:
         stream.publish("issues", [issue.repo, issue.number])
 
 
+def issue_comment(model: Model, stream: Broadcaster, payload: dict[str, Any]) -> None:
+    """A comment moves its thread's `updated_at`, so a reader polling the open lists sees the reply (the triage bot
+    answers an author's follow-up this way). The comment itself is not stored."""
+    repo = _repo_name(payload)
+    data = payload["issue"]
+    if "pull_request" in data:
+        # The payload's issue object lacks the head and fork fields, so only the timestamp moves.
+        if model.touch_pull_request(repo, int(data["number"]), data.get("updated_at")):
+            stream.publish("pull_requests", [repo, data["number"]])
+        return
+    issue = Issue.from_github(repo, data)
+    if model.upsert_issue(issue):
+        stream.publish("issues", [issue.repo, issue.number])
+
+
 def release(model: Model, stream: Broadcaster, payload: dict[str, Any]) -> None:
     repo = _repo_name(payload)
     data = payload["release"]
@@ -158,6 +173,7 @@ HANDLERS: dict[str, Handler] = {
     "pull_request": pull_request,
     "pull_request_review": pull_request_review,
     "issues": issues,
+    "issue_comment": issue_comment,
     "release": release,
     "repository": repository,
     "push": push,
