@@ -10,12 +10,15 @@ attaches two assets to its Release:
   and masked by GitHub when written, so archiving them only makes them permanent. Before attaching them control
   still runs a cheap pattern check over the text for credential shapes (GitHub tokens, JWTs, `Authorization`
   headers, Discord webhook URLs) and its own events secret; on any match the logs stay off the Release, run.json
-  still goes, and the log line and a Discord post name the kind of match and the file, never the match itself.
+  still goes, and the log line names the kind of match and the file, never the match itself.
 
 This is work for control, not a runner. It runs in the background, a few runs a minute, newest first: woken when a
 run completes, and otherwise sweeping released runs not archived yet, which also covers older releases and a
 `workflow_run` webhook that never came. Assets already on the Release are left alone, so it is idempotent; a
 transient failure is retried with backoff, and after `run_archive_attempts` control gives up and says so.
+
+Discord hears of give-ups and withheld logs grouped (`report`): at most one summary an hour, so a systematic failure
+(every upload answering 403) is one message, not one per run. Each run still has its own log line.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ import logging
 import re
 import urllib.parse
 import zipfile
+from collections import Counter
 from collections.abc import Callable
 from typing import Any
 
@@ -64,6 +68,13 @@ PATTERNS: dict[str, re.Pattern[str]] = {
     "a Discord webhook URL": re.compile(r"discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]{20,}"),
 }
 SECRET_FINDING = "control's events secret"
+
+REPORT_EVERY = datetime.timedelta(hours=1)
+"""Give-ups and withheld logs go to Discord as one summary at most this often."""
+REPORTED_AT = "run_archive_reported_at"
+"""kv key: when the last summary was posted (or tried)."""
+REPORT_SHOWN = 5
+"""Runs named in a summary; the rest are counted."""
 
 
 class Transient(Exception):
@@ -307,7 +318,7 @@ async def archive_run(state: State, github: GitHub, repo: str, run_id: int, now:
             else:
                 if findings:
                     logs, note = "withheld", describe(findings)
-                    await report_withheld(state, build, run, tag, note)
+                    log.warning("run archive: the logs of %s run %s %s; logs.zip not attached", repo, run_id, note)
                 else:
                     logs = await _upload(github, release, LOGS_ZIP, content, "application/zip")
     state.model.upsert_run_archive(
@@ -327,19 +338,18 @@ async def archive_run(state: State, github: GitHub, repo: str, run_id: int, now:
 
 
 def describe(findings: list[tuple[str, str]]) -> str:
+    """`matched <kind>, <kind> in <file>, <file>`; `matched_kinds` reads the kinds back."""
     kinds = sorted({kind for kind, _ in findings})
     files = sorted({name for _, name in findings})
     shown = ", ".join(files[:5]) + (f" and {len(files) - 5} more" if len(files) > 5 else "")
     return f"matched {', '.join(kinds)} in {shown}"
 
 
-async def report_withheld(state: State, build: Build, run: dict[str, Any] | None, tag: str, note: str) -> None:
-    run_url = (run or {}).get("html_url") or build.run_url
-    log.warning("run archive: the logs of %s run %s %s; logs.zip not attached", build.repo, build.run_id, note)
-    await state.discord.post(
-        f"⚠️ **{build.image} {tag}**: the run's logs {note}, so `logs.zip` was not attached to the release "
-        f"(`run.json` was). Check the run before its logs expire: {run_url}"
-    )
+def matched_kinds(note: str | None) -> list[str]:
+    """The kinds of match in a `describe` note (no kind holds `, ` or ` in `)."""
+    if not note or not note.startswith("matched "):
+        return []
+    return [kind for kind in note.removeprefix("matched ").split(" in ", 1)[0].split(", ") if kind]
 
 
 async def failed(state: State, repo: str, run_id: int, error: str, now: Callable[[], str] = utcnow) -> None:
@@ -365,13 +375,72 @@ async def failed(state: State, repo: str, run_id: int, error: str, now: Callable
     )
     if final:
         log.error("run archive: gave up on %s run %s after %s attempts: %s", repo, run_id, attempts, error)
-        name = build.image if build else repo
-        await state.discord.post(
-            f"⚠️ **{name} {tag or ''}**: control could not archive run {run_id} on its release after {attempts} "
-            f"attempts ({error}). https://github.com/{repo}/actions/runs/{run_id}"
-        )
     else:
         log.warning("run archive: %s run %s attempt %s failed (%s), next in %s", repo, run_id, attempts, error, delay)
+
+
+# -- the Discord summary --------------------------------------------------------------------------------------------
+
+
+def _plural(count: int, word: str) -> str:
+    return f"{count} {word}" if count == 1 else f"{count} {word}s"
+
+
+def _runs(rows: list[RunArchive]) -> str:
+    named = [
+        f"[{row.repo.rsplit('/', 1)[-1]} {row.release_tag or f'run {row.run_id}'}]"
+        f"(<https://github.com/{row.repo}/actions/runs/{row.run_id}>)"
+        for row in rows[:REPORT_SHOWN]
+    ]
+    more = len(rows) - REPORT_SHOWN
+    return ", ".join(named) + (f" and {more} more" if more > 0 else "")
+
+
+def _most_common(values: list[str]) -> str:
+    return Counter(values).most_common(1)[0][0] if values else "unknown"
+
+
+def summary(rows: list[RunArchive], attempts: int) -> str:
+    """The grouped Discord post. Reasons are control's own notes (an HTTP status, an exception's class name, the
+    kinds of credential matched), never log text or a match."""
+    gave_up = [row for row in rows if row.state == "failed"]
+    withheld = [row for row in rows if row.state != "failed" and row.logs == "withheld"]
+    parts: list[str] = []
+    if gave_up:
+        parts.append(
+            f"⚠️ **Run archive**: control gave up archiving {_plural(len(gave_up), 'run')} on "
+            f"{'its release' if len(gave_up) == 1 else 'their releases'} after "
+            f"{attempts} attempts; most common reason: {_most_common([row.note or 'unknown' for row in gave_up])}. "
+            f"{_runs(gave_up)}"
+        )
+    if withheld:
+        kinds = [kind for row in withheld for kind in matched_kinds(row.note)]
+        parts.append(
+            f"⚠️ **Run archive**: the logs of {_plural(len(withheld), 'run')} matched a credential pattern, so "
+            f"`logs.zip` was not attached (`run.json` was); most common match: {_most_common(kinds)}. Check the runs "
+            f"before their logs expire: {_runs(withheld)}"
+        )
+    return "\n\n".join(parts) + "\n\nEach run is in control's log (`run archive:`) and `run_archives`."
+
+
+async def report(state: State, now: Callable[[], str] = utcnow) -> bool:
+    """Post one summary of the runs given up on and the logs withheld since the last one, at most once per
+    REPORT_EVERY: the first goes out at once, the rest wait for the hour. True when a summary went out. A post
+    Discord refuses leaves the runs for the next summary."""
+    at = now()
+    last = state.db.get(REPORTED_AT)
+    if last and datetime.datetime.fromisoformat(at) - datetime.datetime.fromisoformat(last) < REPORT_EVERY:
+        return False
+    rows = state.model.unreported_run_archives()
+    if not rows:
+        return False
+    state.db.set(REPORTED_AT, at)
+    posted = await state.discord.post(summary(rows, state.settings.run_archive_attempts))
+    if posted is None and state.discord.configured:
+        log.warning("run archive: the summary of %s runs did not post; it is tried again in an hour", len(rows))
+        return False
+    state.model.mark_run_archives_reported([(row.repo, row.run_id) for row in rows], at)
+    return True
 
 
 async def archive_once(state: State, now: Callable[[], str] = utcnow) -> int:
@@ -396,6 +465,10 @@ async def archive_once(state: State, now: Callable[[], str] = utcnow) -> int:
         except Exception as exc:  # one run's failure never stops the sweep
             log.exception("run archive of %s run %s failed", repo, run_id)
             await failed(state, repo, run_id, type(exc).__name__, now)
+    try:
+        await report(state, now)
+    except Exception:
+        log.exception("run archive summary failed")
     return len(due)
 
 

@@ -275,13 +275,20 @@ without history) (amber). Deferrals for a busy fleet post nothing.
 
 ## Member sign-in and actions
 
-`/login` sends the browser to GitHub's OAuth authorisation with the App's `client_id`; `/login/callback`
-exchanges the code (with `client_secret`) for a user token, uses it for exactly one call (`GET /user`) and
-drops it. Membership is then read with **our** installation token: `GET /orgs/{org}/memberships/{login}`
-must answer `state: active`. The session cookie (`control_session`: login, avatar, member flag, when it was
+`/login` sends the browser to GitHub's OAuth authorisation; `/login/callback` exchanges the code for a user token
+and drops it after reading who signed in and whether they are a member, which must answer `state: active`. With
+the classic OAuth App (`OAUTH_CLIENT_ID`/`OAUTH_CLIENT_SECRET`, scopes `read:user read:org`; the playground's
+setup) the user's token makes both calls, `GET /user` and `GET /user/memberships/orgs/{org}`, so the GitHub App
+needs no Members permission. Without an OAuth App the GitHub App's own OAuth client signs in and the user's token
+is used only for `GET /user`; membership is then read with **our** installation token,
+`GET /orgs/{org}/memberships/{login}`, which needs the App's organisation permission Members: read. The session
+cookie (`control_session`: login, avatar, member flag, when it was
 checked, a CSRF token) is HMAC-signed with `CONTROL_SESSION_SECRET`, `HttpOnly`, `Secure` when the public URL
 is https, `SameSite=None` when `CONTROL_ALLOWED_ORIGINS` names an external origin (else `Lax`), and lives 7
-days; the member flag is re-checked hourly on `/management`, on `/api/me` and before every action. Sign-in needs no OAuth scopes and no "Request user authorization (OAuth) during installation".
+days; the member flag is re-checked hourly on `/management`, on `/api/me` and before every action, with the
+installation token. Without Members: read that check answers 403 and the verdict taken at sign-in stands for the
+life of the session, so someone who leaves the org keeps member actions until their session expires or they sign
+in again. Sign-in never needs "Request user authorization (OAuth) during installation".
 
 **The GitHub App needs the callback URL**: `${CONTROL_PUBLIC_URL}/login/callback` under *Identifying and
 authorizing users → Callback URL* in the app's settings. New apps get it from the manifest
@@ -455,7 +462,10 @@ events keep the stored installation id current.
 > The run archive uploads Release assets with **Contents: write**, which the App has. The Pages check needs no
 > more than the metadata every App has: control never enables Pages or changes environments.
 
-> Sign-in needs the organisation permission **Members: read** on the App (it is in the manifest for new apps). On an app created before it was added, grant it under the App's *Permissions & events* and then accept the updated permissions on the installation; until then every user is treated as a non-member.
+> The manifest asks for no organisation permission: sign-in reads membership with the user's own token through the
+> classic OAuth App (see *Member sign-in*). Only without an OAuth App does sign-in need **Members: read** on the
+> App, granted by hand under the App's *Permissions & events* and accepted on the installation; until then every
+> user is treated as a non-member. With it, the hourly re-check also catches someone who has left the org.
 
 ## Publication hold
 
@@ -487,7 +497,7 @@ attaches two assets to its Release with the installation token:
   written; before attaching them control still checks every line for GitHub token formats (`ghp_`, `gho_`,
   `ghs_`, `ghu_`, `ghr_`, `github_pat_`), JWTs, `Authorization:` headers carrying a credential (not `***` or an
   unexpanded `$VAR`), Discord webhook URLs and the exact events secret. On any match the logs are not attached
-  (`run.json` still is), and the log and a Discord post name the kind of match and the file, never the match.
+  (`run.json` still is), and the log line names the kind of match and the file, never the match.
 
 A run is matched to its Release through its `build.summary` (`/events`): a live build with `result: success`, a
 version tag and a `release_url`, whose tag (the end of that URL) names the Release. It is archived once its
@@ -496,7 +506,12 @@ run's status itself). The completion webhook wakes the archiver (30 seconds late
 otherwise it sweeps every minute, newest first and `CONTROL_RUN_ARCHIVE_PER_PASS` runs at a time, which is also
 how releases from before the archive existed get theirs. Assets already on the Release are left alone. Logs not
 ready, a GitHub error or a network failure are retried with backoff; after `CONTROL_RUN_ARCHIVE_ATTEMPTS` control
-gives up and posts it. Logs GitHub has deleted (`410`, or `404` past the 90 days) leave `run.json` alone on the
+gives up. Each give-up and each withheld `logs.zip` has its own log line, and Discord hears of them grouped: one
+summary at most an hour (the first at once, later ones at the hour), with the count, the first five repos and tags
+linking their runs, and the most common reason (control's own note: an HTTP status, an error class, the kind of
+credential matched; never log text). A systematic failure, such as every upload answering 403, is one message an
+hour rather than one per run. `run_archives.reported_at` records which runs a summary has named.
+Logs GitHub has deleted (`410`, or `404` past the 90 days) leave `run.json` alone on the
 Release. The outcome per run is in `run_archives` (`done`, `retry`, `failed`, `skipped` when the Release is gone;
 `logs` says `uploaded`, `present`, `withheld`, `expired`, `too-large` or `unreadable`).
 

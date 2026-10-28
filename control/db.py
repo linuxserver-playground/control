@@ -304,6 +304,12 @@ MIGRATIONS: list[str] = [
         created_at TEXT NOT NULL
     );
     """,
+    # The run archive posts its give-ups and withheld logs as one grouped summary (archive.report): a row is in the
+    # next summary until `reported_at` is set. Rows from before, each already posted on its own, count as reported.
+    """
+    ALTER TABLE run_archives ADD COLUMN reported_at TEXT;
+    UPDATE run_archives SET reported_at = updated_at WHERE state = 'failed' OR logs = 'withheld';
+    """,
 ]
 
 

@@ -266,3 +266,95 @@ def test_logs_missing_past_retention_count_as_expired(state: State, world: GitHu
     asyncio.run(archive.archive_once(state, clock))
     row = state.model.run_archive(REPO, 5001)
     assert row and row.state == "done" and row.logs == "expired" and world.uploaded() == ["run.json"]
+
+
+def given_up(state: State, n: int, note: str, at: str, logs: str | None = None) -> None:
+    """A run_archives row as `failed` (or `done` with `logs`) leaves it, for docker-app<n>."""
+    repo = f"example-org/docker-app{n}"
+    row = archive._new_row(repo, 6000 + n, f"1.{n}-ls1", at)
+    final = {"state": "done", "logs": logs} if logs else {"state": "failed", "attempts": 8}
+    state.model.upsert_run_archive(row.model_copy(update={**final, "note": note, "updated_at": at}))
+
+
+class Discord:
+    def __init__(self, status: int = 200) -> None:
+        self.posts: list[str] = []
+        self.status = status
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.posts.append(json.loads(request.content).get("content", ""))
+        return httpx.Response(self.status, json={"id": "msg-1"})
+
+
+def test_give_ups_are_one_summary_an_hour(state: State, monkeypatch: pytest.MonkeyPatch) -> None:
+    discord = Discord()
+    mock_discord(state, monkeypatch, discord)
+    clock = Clock()
+    for n in range(5):
+        given_up(state, n, "GitHub answered 403", clock())
+    for n in range(5, 7):
+        given_up(state, n, "ReadTimeout", clock())
+    assert asyncio.run(archive.report(state, clock)) is True
+    assert len(discord.posts) == 1
+    post = discord.posts[0]
+    assert "gave up archiving 7 runs on their releases after 8 attempts" in post
+    assert "most common reason: GitHub answered 403" in post
+    assert "docker-app0 1.0-ls1" in post and "docker-app4 1.4-ls1" in post and "docker-app5" not in post
+    assert "and 2 more" in post and "/actions/runs/6000" in post
+    assert state.model.unreported_run_archives() == []
+    # More give-ups within the hour wait for it, then go out together.
+    clock.advance(minutes=10)
+    given_up(state, 7, "GitHub answered 403", clock())
+    given_up(state, 8, "GitHub answered 403", clock())
+    assert asyncio.run(archive.report(state, clock)) is False
+    clock.advance(minutes=51)
+    assert asyncio.run(archive.report(state, clock)) is True
+    assert len(discord.posts) == 2 and "gave up archiving 2 runs" in discord.posts[1]
+    # Nothing new, nothing posted.
+    clock.advance(hours=2)
+    assert asyncio.run(archive.report(state, clock)) is False and len(discord.posts) == 2
+
+
+def test_withheld_logs_are_grouped_by_their_most_common_match(state: State, monkeypatch: pytest.MonkeyPatch) -> None:
+    discord = Discord()
+    mock_discord(state, monkeypatch, discord)
+    clock = Clock()
+    token = archive.describe([("a GitHub token", "build (amd64)/3_Build.txt")])
+    both = archive.describe([("a GitHub token", "a.txt"), ("a JWT", "b.txt")])
+    given_up(state, 1, token, clock(), logs="withheld")
+    given_up(state, 2, both, clock(), logs="withheld")
+    given_up(state, 3, "GitHub answered 403", clock())
+    # Done runs whose logs went up, or expired, are no news.
+    given_up(state, 4, "", clock(), logs="uploaded")
+    assert archive.matched_kinds(both) == ["a GitHub token", "a JWT"]
+    assert asyncio.run(archive.report(state, clock)) is True
+    (post,) = discord.posts
+    assert "gave up archiving 1 run on its release" in post
+    assert "the logs of 2 runs matched a credential pattern" in post and "most common match: a GitHub token" in post
+    assert "docker-app4" not in post
+
+
+def test_a_summary_discord_refuses_is_retried_after_the_hour(state: State, monkeypatch: pytest.MonkeyPatch) -> None:
+    discord = Discord(status=500)
+    mock_discord(state, monkeypatch, discord)
+    clock = Clock()
+    given_up(state, 1, "GitHub answered 403", clock())
+    assert asyncio.run(archive.report(state, clock)) is False and len(discord.posts) == 1
+    assert len(state.model.unreported_run_archives()) == 1
+    clock.advance(minutes=30)
+    assert asyncio.run(archive.report(state, clock)) is False and len(discord.posts) == 1
+    discord.status = 200
+    clock.advance(minutes=31)
+    assert asyncio.run(archive.report(state, clock)) is True
+    assert state.model.unreported_run_archives() == []
+
+
+def test_a_rewritten_row_keeps_its_report(state: State, monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_discord(state, monkeypatch, Discord())
+    clock = Clock()
+    given_up(state, 1, "GitHub answered 403", clock())
+    stale = state.model.run_archive("example-org/docker-app1", 6001)
+    assert stale and asyncio.run(archive.report(state, clock)) is True
+    state.model.upsert_run_archive(stale)
+    row = state.model.run_archive("example-org/docker-app1", 6001)
+    assert row and row.reported_at == clock()

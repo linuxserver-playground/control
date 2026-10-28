@@ -678,6 +678,8 @@ class RunArchive(BaseModel):
     note: str | None
     created_at: str
     updated_at: str
+    reported_at: str | None = None
+    """When a give-up or withheld logs went out in a Discord summary (archive.report); None while not yet."""
 
 
 BUILD_COLUMNS = ", ".join(name for name in Build.model_fields if name != "bundle_json")
@@ -1462,7 +1464,24 @@ class Model:
 
     def upsert_run_archive(self, archive: RunArchive) -> None:
         with self.db.connect() as conn:
-            _upsert(conn, "run_archives", archive.model_dump(), ("repo", "run_id"))
+            # A copy read before the report marked it never takes `reported_at` back.
+            _upsert(conn, "run_archives", archive.model_dump(), ("repo", "run_id"), keep=("reported_at",))
+
+    def unreported_run_archives(self) -> list[RunArchive]:
+        """Runs given up on, or whose logs were withheld, that no Discord summary has named yet, oldest first."""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM run_archives WHERE reported_at IS NULL AND (state = 'failed' OR logs = 'withheld') "
+                "ORDER BY updated_at, repo, run_id"
+            ).fetchall()
+        return [RunArchive(**dict(row)) for row in rows]
+
+    def mark_run_archives_reported(self, keys: list[tuple[str, int]], at: str) -> None:
+        with self.db.connect() as conn:
+            conn.executemany(
+                "UPDATE run_archives SET reported_at = ? WHERE repo = ? AND run_id = ?",
+                [(at, repo, run_id) for repo, run_id in keys],
+            )
 
     # -- repo pages -----------------------------------------------------------------------------------------------
 
