@@ -74,6 +74,13 @@ assets with the App's existing **Contents: write**, and the Pages check (`contro
 site, enable it on that repo as the new-image recipe says. `CONTROL_RUN_ARCHIVE=false` or `CONTROL_PAGES_CHECK=false`
 in `.env` turn them off.
 
+## Self-healing
+
+Retrying failed Pages deploys and re-running live builds that failed only in an infrastructure step
+(`control/recover.py`) runs with code defaults and needs nothing on n97: dispatches and `rerun-failed-jobs` use the
+App's existing **Actions: write**. `CONTROL_HEAL_PAGES=false` or `CONTROL_HEAL_RERUNS=false` in `.env` turn either off;
+`CONTROL_SCHEDULER=false` stops both with the rest of the scheduler.
+
 ## Deploying changes
 
 Merge to `main`. The Publish workflow runs the checks, builds both arches and moves

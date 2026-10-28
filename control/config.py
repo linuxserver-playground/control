@@ -77,6 +77,26 @@ class Settings(BaseModel):
     pages_check: bool = True
     """Warn once (log and Discord) about every image repo without a GitHub Pages site, whose build files then never
     reach the website, and list them in the discovery record (pages.py). Read-only: control never enables Pages."""
+    heal_pages: bool = True
+    """Redeploy an image repo's Pages site (`reason: pages` on its default branch) when a deploy failed, backing off
+    (recover.py). A failed deploy leaves the previous site up, stale; repeating one is always safe."""
+    heal_pages_backoff_minutes: tuple[int, ...] = (5, 30, 120, 1440)
+    """Wait before each retry: the first after the failure, each next after the previous dispatch; the last step
+    repeats. Env CONTROL_HEAL_PAGES_BACKOFF_MINUTES (csv)."""
+    heal_pages_attempts: int = 4
+    """Retries before control gives up on a repo's Pages site and says so (about a day with the default steps)."""
+    heal_reruns: bool = True
+    """Re-run the failed jobs of a live build run once when its failing step is plainly infrastructure (checkout,
+    runner setup, registry login, artifacts, the release upload), never the image build, the tests or a check."""
+    heal_rerun_delay_minutes: int = 5
+    """How long after the run failed control re-runs it: a flake upstream of us (GHCR, the artifact service) often
+    lasts a few minutes."""
+    heal_rerun_window_hours: int = 6
+    """A failed run not re-run within this long (the fleet stayed busy) is given up on and reported; failures
+    older than this when control first sees them are left alone."""
+    heal_per_tick: int = 3
+    """Heal actions (dispatches and re-runs together) control starts per minute at most, so an outage that failed
+    many repos at once does not come back as a burst."""
     scheduler: bool = True
     """Run the fleet discovery and scheduler loop beside the server (once the app is configured and installed)."""
     session_secret: str | None = None
@@ -99,6 +119,13 @@ class Settings(BaseModel):
                 raise ValueError(f"allowed origin must be scheme://host[:port], got {raw!r}")
             origins.append(origin)
         return tuple(origins)
+
+    @field_validator("heal_pages_backoff_minutes")
+    @classmethod
+    def _backoff(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        if not value or any(step < 1 for step in value):
+            raise ValueError("the Pages backoff needs at least one step, each a positive number of minutes")
+        return value
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -162,6 +189,20 @@ class Settings(BaseModel):
             fields["run_archive_max_logs_mb"] = int(max_logs)
         if pages := env("CONTROL_PAGES_CHECK"):
             fields["pages_check"] = pages.strip().lower() in ("1", "true", "yes", "on")
+        if heal_pages := env("CONTROL_HEAL_PAGES"):
+            fields["heal_pages"] = heal_pages.strip().lower() in ("1", "true", "yes", "on")
+        if backoff := env("CONTROL_HEAL_PAGES_BACKOFF_MINUTES"):
+            fields["heal_pages_backoff_minutes"] = tuple(int(m) for m in backoff.split(",") if m.strip())
+        if heal_attempts := env("CONTROL_HEAL_PAGES_ATTEMPTS"):
+            fields["heal_pages_attempts"] = int(heal_attempts)
+        if reruns := env("CONTROL_HEAL_RERUNS"):
+            fields["heal_reruns"] = reruns.strip().lower() in ("1", "true", "yes", "on")
+        if rerun_delay := env("CONTROL_HEAL_RERUN_DELAY_MINUTES"):
+            fields["heal_rerun_delay_minutes"] = int(rerun_delay)
+        if rerun_window := env("CONTROL_HEAL_RERUN_WINDOW_HOURS"):
+            fields["heal_rerun_window_hours"] = int(rerun_window)
+        if per_tick := env("CONTROL_HEAL_PER_TICK"):
+            fields["heal_per_tick"] = int(per_tick)
         if scheduler := env("CONTROL_SCHEDULER"):
             fields["scheduler"] = scheduler.strip().lower() in ("1", "true", "yes", "on")
         if session_secret := env("CONTROL_SESSION_SECRET"):

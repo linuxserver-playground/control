@@ -310,6 +310,41 @@ MIGRATIONS: list[str] = [
     ALTER TABLE run_archives ADD COLUMN reported_at TEXT;
     UPDATE run_archives SET reported_at = updated_at WHERE state = 'failed' OR logs = 'withheld';
     """,
+    # Self-healing (recover.py): one row per image repo whose Pages deploy control is retrying (or gave up on, or
+    # saw recover), and one per failed live build run control judged for a re-run of its failed jobs.
+    """
+    CREATE TABLE heal_pages (
+        repo TEXT PRIMARY KEY,
+        state TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        failed_since TEXT,
+        last_outcome_at TEXT,
+        last_dispatch_at TEXT,
+        next_attempt_at TEXT,
+        run_id INTEGER,
+        note TEXT,
+        reported_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE TABLE heal_reruns (
+        repo TEXT NOT NULL,
+        run_id INTEGER NOT NULL,
+        branch TEXT,
+        attempt INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        step TEXT,
+        note TEXT,
+        slots INTEGER NOT NULL DEFAULT 1,
+        not_before TEXT,
+        requested_at TEXT,
+        reported_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (repo, run_id)
+    );
+    CREATE INDEX heal_reruns_state ON heal_reruns (state);
+    """,
 ]
 
 

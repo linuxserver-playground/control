@@ -88,7 +88,7 @@ def workflow_job(model: Model, stream: Broadcaster, payload: dict[str, Any]) -> 
         stream.publish("runs", job.run_id)
         if payload.get("action") == "completed" and is_pages_job(job.name) and job.conclusion == "failure":
             # A Pages deploy is not a build: no event, no Discord, no red branch. Its failure is this line and the
-            # run on the runs page; the next live release or `reason=pages` dispatch redeploys the site whole.
+            # run on the runs page; recover.py redeploys the site with backoff and reports it if that never works.
             log.warning("pages deploy failed on %s run %s: %s", job.repo, job.run_id, job.html_url)
 
 

@@ -468,7 +468,7 @@ class SchedulerDecision(BaseModel):
     image: str
     branch: str
     kind: str = "upstream"
-    """upstream | release | packages | manual: which schedule (or which member action) produced the decision."""
+    """upstream | release | packages | manual | batch | mod | heal: which schedule, member action or retry made it."""
     outcome: str
     """unchanged | skipped | dispatch | error."""
     detail: str | None
@@ -680,6 +680,53 @@ class RunArchive(BaseModel):
     updated_at: str
     reported_at: str | None = None
     """When a give-up or withheld logs went out in a Discord summary (archive.report); None while not yet."""
+
+
+class PagesHeal(BaseModel):
+    """Control's retries of one image repo's Pages deploy (recover.py)."""
+
+    repo: str
+    state: str
+    """`ok` (the newest deploy control saw succeeded), `retrying` (a `reason: pages` dispatch is due at
+    `next_attempt_at`) or `gave-up` (no deploy succeeded within the attempts; reported, then left alone)."""
+    attempts: int = 0
+    """Dispatches control sent since the deploy first failed."""
+    failed_since: str | None = None
+    last_outcome_at: str | None = None
+    """When the newest outcome control has taken into account finished; older ones are never read again."""
+    last_dispatch_at: str | None = None
+    next_attempt_at: str | None = None
+    run_id: int | None = None
+    """The run whose failure control saw last."""
+    note: str | None = None
+    """Why the deploy failed, as control can tell it (the failing step, or the live build's report)."""
+    reported_at: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class RunHeal(BaseModel):
+    """Control's judgement of one failed live build run, and the one re-run of its failed jobs it may get."""
+
+    repo: str
+    run_id: int
+    branch: str | None
+    attempt: int
+    """The run attempt control judged; a re-run makes the next one."""
+    state: str
+    """`declined` (not an infrastructure failure, never re-run), `pending` (re-run due at `not_before`, once
+    capacity allows), `rerun` (requested), `passed` or `failed` (the re-run's outcome), `superseded` (a newer run
+    of the branch came first) or `gave-up` (could not be re-run in time; reported)."""
+    step: str | None
+    """The failing job and step that decided it: `build / Build amd64: Log in to GHCR`."""
+    note: str | None
+    slots: int = 1
+    """Jobs the re-run would start: what it needs free."""
+    not_before: str | None = None
+    requested_at: str | None = None
+    reported_at: str | None = None
+    created_at: str
+    updated_at: str
 
 
 BUILD_COLUMNS = ", ".join(name for name in Build.model_fields if name != "bundle_json")
@@ -1500,6 +1547,101 @@ class Model:
     def clear_pages_missing(self, repo: str) -> None:
         with self.db.connect() as conn:
             conn.execute("DELETE FROM repo_pages WHERE repo = ?", (repo,))
+
+    # -- self-healing ---------------------------------------------------------------------------------------------
+
+    def pages_heal(self, repo: str) -> PagesHeal | None:
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT * FROM heal_pages WHERE repo = ?", (repo,)).fetchone()
+        return PagesHeal(**dict(row)) if row else None
+
+    def upsert_pages_heal(self, heal: PagesHeal) -> None:
+        with self.db.connect() as conn:
+            # Always the whole row: a give-up after a recovery starts unreported again.
+            _upsert(conn, "heal_pages", heal.model_dump(), ("repo",))
+
+    def pages_heals(self, state: str | None = None) -> list[PagesHeal]:
+        sql = "SELECT * FROM heal_pages" + (" WHERE state = ?" if state else "") + " ORDER BY repo"
+        with self.db.connect() as conn:
+            rows = conn.execute(sql, (state,) if state else ()).fetchall()
+        return [PagesHeal(**dict(row)) for row in rows]
+
+    def pages_outcomes(self, since: str) -> list[Job]:
+        """Completed Pages deploys since `since`, oldest first: every `Pages` job that ran (it runs only in a
+        `reason: pages` run) and every live Publish job, whose `Pages (live)` step deploys after a release."""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE status = 'completed' AND completed_at >= ? AND ("
+                f"((name = '{PAGES_JOB}' OR name LIKE '% / {PAGES_JOB}') AND conclusion IN ('success', 'failure')) "
+                "OR name = 'Publish' OR name LIKE '% / Publish') ORDER BY completed_at, id",
+                (since,),
+            ).fetchall()
+        return [_job_row(row) for row in rows]
+
+    def failed_build_runs(self, since: str, settled_before: str, events: tuple[str, ...]) -> list[Run]:
+        """First attempts of image build runs on a live branch that failed between `since` and `settled_before`
+        and that control has not judged yet, oldest first. Pull request runs, Pages deploys and runs of branches
+        that are not live (no manifests row) are left out."""
+        marks = ", ".join("?" for _ in events)
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT runs.* FROM runs JOIN manifests m ON m.repo = runs.repo AND m.branch = runs.branch "
+                "LEFT JOIN heal_reruns h ON h.repo = runs.repo AND h.run_id = runs.id "
+                f"WHERE runs.status = 'completed' AND runs.conclusion = 'failure' AND runs.attempt = 1 "
+                f"AND runs.event IN ({marks}) AND runs.updated_at >= ? AND runs.updated_at <= ? "
+                f"AND h.run_id IS NULL AND {BUILD_RUN_SQL} ORDER BY runs.updated_at, runs.id",
+                (*events, since, settled_before),
+            ).fetchall()
+        return [Run(**dict(row)) for row in rows]
+
+    def newest_branch_build(self, repo: str, branch: str) -> Run | None:
+        """The newest build run of a branch from a push or dispatch: pull request runs (a fork's branch can share
+        the name) and Pages deploys are left out."""
+        with self.db.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM runs WHERE repo = ? AND branch = ? AND (event IS NULL OR event NOT IN "
+                f"('pull_request', 'pull_request_target')) AND {BUILD_RUN_SQL} "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                (repo, branch),
+            ).fetchone()
+        return Run(**dict(row)) if row else None
+
+    def run_heal(self, repo: str, run_id: int) -> RunHeal | None:
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT * FROM heal_reruns WHERE repo = ? AND run_id = ?", (repo, run_id)).fetchone()
+        return RunHeal(**dict(row)) if row else None
+
+    def upsert_run_heal(self, heal: RunHeal) -> None:
+        with self.db.connect() as conn:
+            _upsert(conn, "heal_reruns", heal.model_dump(), ("repo", "run_id"), keep=("reported_at",))
+
+    def run_heals(self, *states: str) -> list[RunHeal]:
+        marks = ", ".join("?" for _ in states)
+        sql = "SELECT * FROM heal_reruns" + (f" WHERE state IN ({marks})" if states else "")
+        with self.db.connect() as conn:
+            rows = conn.execute(sql + " ORDER BY updated_at, repo, run_id", states).fetchall()
+        return [RunHeal(**dict(row)) for row in rows]
+
+    def unreported_heals(self) -> tuple[list[PagesHeal], list[RunHeal]]:
+        """Give-ups no Discord summary has named yet: Pages deploys, and build runs that failed again after
+        their re-run or could not be re-run. Oldest first."""
+        with self.db.connect() as conn:
+            pages = conn.execute(
+                "SELECT * FROM heal_pages WHERE state = 'gave-up' AND reported_at IS NULL ORDER BY updated_at, repo"
+            ).fetchall()
+            runs = conn.execute(
+                "SELECT * FROM heal_reruns WHERE state IN ('failed', 'gave-up') AND reported_at IS NULL "
+                "ORDER BY updated_at, repo, run_id"
+            ).fetchall()
+        return [PagesHeal(**dict(row)) for row in pages], [RunHeal(**dict(row)) for row in runs]
+
+    def mark_heals_reported(self, repos: list[str], runs: list[tuple[str, int]], at: str) -> None:
+        with self.db.connect() as conn:
+            conn.executemany("UPDATE heal_pages SET reported_at = ? WHERE repo = ?", [(at, repo) for repo in repos])
+            conn.executemany(
+                "UPDATE heal_reruns SET reported_at = ? WHERE repo = ? AND run_id = ?",
+                [(at, repo, run_id) for repo, run_id in runs],
+            )
 
     # -- status ---------------------------------------------------------------------------------------------------
 

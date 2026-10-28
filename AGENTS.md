@@ -19,7 +19,10 @@ fleet, and lets org members act (re-run, cancel, dispatch, skip). Python 3.12+, 
   `control/mods.py` the docker-mods side: every branch's `mod.yml` into `mod_manifests` (GraphQL, and one branch on
   a push that touches it) and the GHCR tag check behind the hourly mod check of mods with an `upstream` block;
   `control/archive.py` the run archive: `run.json` and `logs.zip` (after a credential pattern check) attached to each
-  live release once its run completes; `control/pages.py` the read-only Pages check: one warning per image
+  live release once its run completes; `control/heal.py` re-reads the jobs of completed runs whose job webhooks never
+  came; `control/recover.py` self-healing from the scheduler's minute loop: failed Pages deploys redeployed with
+  backoff, live builds that failed only in an infrastructure step (`INFRA_STEPS`) re-run once, give-ups grouped
+  into one Discord summary an hour; `control/pages.py` the read-only Pages check: one warning per image
   repo whose `has_pages` is false (control never enables Pages);
   `control/batch.py` the batch build projects (selkies-layers, proot-apps, wheelie): sizing `parallel` from the
   jobs running, their slots, and the per-unit failure alerts; `control/vendor/wheelie_gaps.py` wheelie's gap
@@ -72,6 +75,12 @@ setting needs a default that works without it, plus a line in `deploy/n97/README
 - The upstream version is resolved only through `control/vendor/resolve_version.py`, never reimplemented;
   to change it, change `workflows/scripts/resolve_version.py`, copy the file back and update the commit in
   the header. The scheduler never runs `command` or `deb_repo` sources (shell from a repo, docker).
+- Self-healing (`control/recover.py`) repeats only what cannot be the image's fault and is safe to repeat. A step
+  joins `INFRA_STEPS` only when its failure is GitHub's or the network's and a re-run changes nothing already right
+  (read the step in workflows' `image-build.yml` first, and add a test case); a build, test or check step never does.
+  Pull request runs are never re-run, no run is re-run twice, every retry waits for `batch.capacity` free slots and
+  is an `actions` row by `control`, and only give-ups reach Discord, grouped hourly. The `build.summary` Pages
+  outcome is read through `recover.PAGES_FIELD`, the one place its name lives.
 - Every scheduler outcome is a `scheduler_decisions` row with a JSON detail; dispatch is always
   `workflow_dispatch` on `build.yml` with the branch as `ref` (a batch project: the workflow and ref its
   `PROJECTS` entry names; a mod: `inputs: {mod_version}` instead of `reason`, which its build.yml lacks, plus `line` for a mod with version lines). Member dispatches go through the same

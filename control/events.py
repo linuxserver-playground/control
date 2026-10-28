@@ -512,6 +512,9 @@ async def control_event(
             await notify_hub(state, build)
             if released(build):
                 archive.wake(state)  # archived once its run completes; a completion seen first is waiting on this
+            from . import recover  # recover imports the scheduler, which imports this module
+
+            recover.observe_summary(state, payload)  # a live Publish's failed Pages deploy is retried
     log.info("%s for %s run %s (%s)", event_type, payload["repository"], payload["run_id"], payload.get("result", ""))
     return {"status": "accepted", "type": event_type, "applied": applied}
 

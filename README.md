@@ -66,6 +66,11 @@ docker run --rm -p 8080:8080 -e PUID=1000 -e PGID=1000 -e CONTROL_PUBLIC_URL=htt
 | `CONTROL_RUN_ARCHIVE` | `true`                        | Attach `run.json` and `logs.zip` to every live release once its run completes (see *Run archive*). |
 | `CONTROL_RUN_ARCHIVE_PER_PASS`, `CONTROL_RUN_ARCHIVE_ATTEMPTS`, `CONTROL_RUN_ARCHIVE_MAX_LOGS_MB` | `3`, `8`, `500` | Runs archived per minute at most; tries before giving up on one (backing off 5 minutes to 6 hours); the largest log archive attached. |
 | `CONTROL_PAGES_CHECK` | `true`                        | Warn once about every image repo without a GitHub Pages site and list them in the discovery record (see *Pages on image repos*). Read-only. |
+| `CONTROL_HEAL_PAGES`  | `true`                        | Redeploy an image repo's Pages site when a deploy failed, with backoff (see *Self-healing*). |
+| `CONTROL_HEAL_PAGES_BACKOFF_MINUTES`, `CONTROL_HEAL_PAGES_ATTEMPTS` | `5,30,120,1440`, `4` | The wait before each Pages retry (csv; the last step repeats) and the retries before control gives up and reports. |
+| `CONTROL_HEAL_RERUNS` | `true`                        | Re-run the failed jobs of a live build once when only an infrastructure step failed (see *Self-healing*). |
+| `CONTROL_HEAL_RERUN_DELAY_MINUTES`, `CONTROL_HEAL_RERUN_WINDOW_HOURS` | `5`, `6` | How long after the failure the re-run goes out; how long control may wait for free slots before it gives up and reports. |
+| `CONTROL_HEAL_PER_TICK` | `3`                         | Heal actions (Pages dispatches and re-runs together) started per minute at most. |
 | `CONTROL_SCHEDULER`   | `true`                        | Run fleet discovery and the scheduler loop beside the server. `false` keeps the pages and member actions and stops dispatching. |
 | `CONTROL_BATCH_LIVE`  | `wheelie`                     | Batch build projects control dispatches for real (csv; empty for none). The others are sized and recorded as dry runs while their own cron still fires. |
 | `CONTROL_BATCH_RESERVE` | `4`                         | Job slots a batch run never sizes into, kept for image, hub and site builds. |
@@ -95,7 +100,7 @@ Every page is server-rendered and also available as JSON (pydantic models in `co
 |                                  | `/api/actions.json`               | The public member-action log (last 100), newest first.                                 |
 |                                  | `GET /api/me`                     | Who is signed in, for the website: `{authenticated, login, avatar_url, member, checked_at, csrf}`; never 401, anonymous is `authenticated: false`. Read from the session cookie; actions confirm membership live. |
 | `GET /batch`                     | `/api/batch.json`                 | Batch build projects: runner capacity now (`running`, `waiting`, `held`, the slots each batch run holds, `free`), and per project its schedule, live or dry run, the `parallel` a run started now would get, the active run, the last decision and dispatch (with its run), the last 10 evaluated runs and the units failing now; the last 50 `batch` decisions. Live-refreshing. |
-| `GET /status`                    | `/api/status.json`                | Version and the commit the running image was built from (`revision`), app configured/installed, Discord, `/events`, scheduler, row counts, last backfill and discovery, last 20 deliveries. |
+| `GET /status`                    | `/api/status.json`                | Version and the commit the running image was built from (`revision`), app configured/installed, Discord, `/events`, scheduler, row counts, last backfill and discovery, last 20 deliveries; `healing`: the Pages sites control is retrying or gave up on and the failed runs it will re-run or has re-run. |
 | `GET /api/stream`                |                                   | Server-sent events: `{"type": "<table>", "key": ...}` whenever a handler changes a row, including `scheduler_decisions`, `actions`, `skips` and `manifests`. |
 | `GET /login`, `/login/callback`, `POST /logout` | | Member sign-in (below). `POST /api/logout` with `X-CSRF-Token` is the website's sign-out: `204`, cookie cleared. |
 | `POST /manage/{rerun,cancel,dispatch,packages,skip,unskip,reconcile}` | `POST /api/actions/{same}` | Member actions (below): the HTML form, or a JSON body with the same fields plus the `X-CSRF-Token` header, answering `{ok, action_id, detail}`. |
@@ -126,7 +131,9 @@ backwards; unknown events are stored and ignored; a handler failure is logged an
 response. The scheduler owns `manifests` (one row per live branch), `mod_manifests` (one row per docker-mods
 branch), `scheduler_decisions` and `skips`;
 member actions write `actions`; the run archive writes `run_archives` (one row per released run it has tried) and
-the Pages check `repo_pages` (one row per image repo reported for having no Pages site, removed once it has one).
+the Pages check `repo_pages` (one row per image repo reported for having no Pages site, removed once it has one);
+self-healing `heal_pages` (one row per image repo whose Pages deploy failed) and `heal_reruns` (one row per failed
+live build run it judged).
 
 ## Scheduler
 
@@ -196,7 +203,8 @@ build). The scheduler's in-flight, settle and failed-initial-build checks, the h
 decision-to-run link leave Pages deploys out, and a pages dispatch neither starts nor resets a branch's cooldown.
 With no build event there is no builds row, so no fleet result, Discord build message, publication hold or run
 archive. A failed `Pages` job is a warning in the log (`pages deploy failed on <repo> run <id>: <job url>`) and
-a red run on the runs page, nothing more; its stuck threshold is the default hour, not its own short history.
+a red run on the runs page, and control redeploys the site with backoff (see *Self-healing*); its stuck threshold is
+the default hour, not its own short history.
 
 **Mod check** (`control/mods.py`): the Jenkins External-Triggers jobs, which looked up a mod's tool version every
 hour and started its build when Docker Hub had no `mods:<branch>-<version>` tag. Discovery also reads every
@@ -529,3 +537,58 @@ GitHub Pages site: its build files will not show on the website. Enable it as th
 recorded in `repo_pages` so it is not repeated every 30 minutes. The row goes when `has_pages` turns true, so a
 repo that loses its site again is reported again. Every discovery lists the repos still without one in its record
 (`last_discovery.pages_missing` in `/api/status.json`). `CONTROL_PAGES_CHECK=false` turns it off.
+
+## Self-healing
+
+GitHub loses webhooks, answers 500s, drops runners and flakes on clones and registry calls; nobody should babysit
+that. Control repairs what it can and reports only what stays broken.
+
+**Lost job webhooks** (`control/heal.py`): whenever a run completes, and once at start, control reads the jobs of
+every completed run that still holds an unfinished job from the API, so no job shows as running forever.
+
+**Pages deploys** (`control/recover.py`): a deploy that failed leaves the previous site up, stale, and repeating one
+is always safe. Control sees a failure from a `reason: pages` run's failed `Pages` job, a live Publish whose
+`Pages (live)` step failed, or a `build.summary` whose `pages` is `failed` (`deployed` clears). It then dispatches
+`reason: pages` on the repo's default branch after `CONTROL_HEAL_PAGES_BACKOFF_MINUTES` (5 minutes, then 30 after
+that dispatch, then 2 hours, then daily), one row per repo so at most one retry is pending, and stops at the first
+deploy that succeeds, whoever started it. A retry waits while a non-PR run of the repo is going (a build's Publish
+deploys anyway) and while the fleet has no free slot. After `CONTROL_HEAL_PAGES_ATTEMPTS` retries (about a day) it
+gives up; a repo with no Pages site (*Pages on image repos*) is never retried. Each dispatch is a scheduler
+decision of kind `heal` (a Pages deploy never starts a branch's build cooldown) and an action by `control`.
+
+**Infrastructure failures of live builds**: a failed first attempt of a push or dispatch run on a live branch (never
+a pull request run, so never a fork) is judged once from its jobs, `CONTROL_HEAL_RERUN_DELAY_MINUTES` after it
+failed. Each failed job's failing step (the first failed, else the first cancelled) must be one of these top-level
+steps of `image-build.yml`, whose inputs earlier steps made and checked and which change nothing when repeated:
+
+| Step | Why it is infrastructure |
+| --- | --- |
+| `Set up job`, `Complete job`, a job with no failed step | GitHub assigning the runner and fetching actions; the runner lost or never started |
+| `Check out repository`, `Check out shared workflows`, `Check out repository (package check)` | a git clone from GitHub |
+| `Free disk space`, `Set up buildx` | the runner's preinstalled toolchains (best effort), downloading BuildKit |
+| `Log in to GHCR` | the registry login |
+| `Upload manifest`, `Download manifest`, `Upload bundle files`, `Upload image (not pushed)`, `Download bundle files`, `Upload bundle` | the artifact service |
+| `Next build number` | reading the repo's Releases and tags from the API |
+| `Publish tags` | tagging images already built and tested from their staging references; idempotent |
+| `Release (live)` | the GitHub Release; a re-run finds it and re-uploads the assets with `--clobber` |
+| `Notify control plane` | the POST to `/events`, which control de-duplicates |
+| `Post <any of these>` | the action's cleanup |
+
+Publish's `Fail if any job failed` defers to the job that failed. Anything else failing means no re-run: `Build`,
+`Test`, `Fail on test failure`, `Resolve upstream version`, the generated-file and shellcheck checks, and the
+composites that mix a pip install with validation (`Read manifest`, `Emit build.json`; the jobs API names only the
+composite). Otherwise control calls `rerun-failed-jobs` once, while the run is still its branch's newest build, no
+skip flag holds the branch and the fleet has as many slots free as the failed jobs; a run waiting longer than
+`CONTROL_HEAL_RERUN_WINDOW_HOURS` for that is given up. A run is never re-run twice by control, and one a member
+already re-ran is left alone. The re-run is an action by `control`.
+
+**Capacity**: both wait for free slots as batch runs are sized (`/api/batch.json` `free`: the limit less
+`CONTROL_BATCH_RESERVE`, the jobs running and queued and the batch runs' widths), so a retry never takes a slot
+an image, hub or site build is waiting for, and at most `CONTROL_HEAL_PER_TICK` heal actions start a minute.
+
+**Reporting**: every step is a log line (`heal:`), every dispatch and re-run a row on `/management` by `control`, and
+`/api/status.json` `healing` lists what is pending. Discord hears only of give-ups (a Pages site still failing
+after its retries, a build that failed again after its re-run, a re-run GitHub refused or the fleet had no room for),
+grouped as the run archive's are: one summary at most an hour with the count, the first five repos or runs linking
+their runs, and the most common reason or step. A build's own failure message still posts when it fails; a re-run
+that passes edits it green.

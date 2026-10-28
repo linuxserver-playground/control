@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from . import auth, badge
+from . import auth, badge, recover
 from . import batch as batches
 from . import scheduler as sched
 from .backfill import last_backfill
@@ -307,6 +307,8 @@ class StatusPage(BaseModel):
     counts: dict[str, int]
     last_backfill: dict[str, Any] | None
     last_discovery: dict[str, Any] | None
+    healing: dict[str, Any] | None = None
+    """What self-healing is retrying now (recover.status): Pages sites and failed runs it will re-run."""
 
 
 class ManagementPage(BaseModel):
@@ -752,6 +754,7 @@ def status_page(state: State) -> StatusPage:
         counts=state.model.counts(),
         last_backfill=last_backfill(state),
         last_discovery=last_discovery(state),
+        healing=recover.status(state),
     )
 
 

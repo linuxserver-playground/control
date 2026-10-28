@@ -36,7 +36,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel
 
-from . import batch, events, mods, relay
+from . import batch, events, mods, recover, relay
 from .fleet import discover_once, discovery_due
 from .github import GitHub, installation_client
 from .model import Manifest, Model, ModLine, ModManifest, Release, SchedulerDecision
@@ -51,7 +51,8 @@ KIND_PACKAGES = "packages"
 KIND_MANUAL = "manual"
 KIND_BATCH = batch.KIND_BATCH
 KIND_MOD = "mod"
-KINDS = (KIND_UPSTREAM, KIND_RELEASE, KIND_PACKAGES, KIND_MANUAL, KIND_BATCH, KIND_MOD)
+KIND_HEAL = recover.KIND_HEAL
+KINDS = (KIND_UPSTREAM, KIND_RELEASE, KIND_PACKAGES, KIND_MANUAL, KIND_BATCH, KIND_MOD, KIND_HEAL)
 COOLDOWN = datetime.timedelta(hours=2)
 """No second dispatch for a branch within this long of the last one, whatever triggered it."""
 INITIAL_RETRY = datetime.timedelta(hours=24)
@@ -701,6 +702,7 @@ class Scheduler:
                     await self.tick()
                     if relay.hub_refresh_due(self.state, self.clock()):
                         await relay.dispatch_hub_refresh(self.state, self.github, self.clock())
+                    await recover.tick(self.state, self.github, self.clock())  # self-healing; never raises
             except asyncio.CancelledError:
                 raise
             except Exception:
