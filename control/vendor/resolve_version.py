@@ -1,5 +1,5 @@
 # Vendored from linuxserver-playground/workflows scripts/resolve_version.py at commit
-# f1d031d7764634666c8a1352418ddd2a8b58f074.
+# ccfaf4560bccbea633021532d40f1e5c83e38a58.
 # Do not edit here: change it in the workflows repo and copy it back. tests/test_vendor.py fails
 # when this file and the source checkout differ, so the build and the scheduler resolve alike.
 # End of vendoring header.
@@ -18,7 +18,8 @@ image.json) and plain environment variables; the output is a dict.
     #  "source": "json", "source_url": "https://services.sonarr.tv/v1/releases"}
 
 Every ``version_source.type`` of image.schema.json is implemented. HTTP goes through ``http_get``
-so tests (and the control plane, if it wants caching) can replace it.
+so tests (and the control plane, if it wants caching) can replace it. ``with retries():`` retries its
+network failures and 429/5xx answers; the command line does, an importer chooses.
 
 Only the standard library is required. PyYAML is imported lazily when a ``.yml`` path is given;
 ``jq`` and ``docker`` are invoked as binaries for the ``json`` and ``deb_repo`` sources.
@@ -26,21 +27,26 @@ Only the standard library is required. PyYAML is imported lazily when a ``.yml``
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import gzip
 import hashlib
+import http.client
 import io
 import json
 import lzma
 import os
+import random
 import re
+import ssl
 import subprocess
 import sys
 import tarfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +97,58 @@ def _default_http_get(url: str, headers: dict[str, str] | None = None, method: s
 
 # Tests and the control plane may replace this.
 http_get: Callable[..., HttpResponse] = _default_http_get
+
+# Retries: what scripts/netretry.py does, inlined because this module is imported as one file (the control plane
+# vendors it, the hub checks out only this file). Only the command lines (this main(), mod_version.py and
+# upstream_notes.py, run by the builds) turn them on: the control plane resolves one image at a time on its own
+# schedule, and minutes of backoff on one dead upstream would hold up every check behind it.
+RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+
+
+def _with_retries(get: Callable[..., HttpResponse], sleep: Callable[[float], Any] = time.sleep) -> Callable[..., HttpResponse]:
+    """`get` retried on network failures and 429/5xx answers: 5 attempts, waits of about 10, 20, 40 and 80 s with
+    jitter (RETRY_MAX_ATTEMPTS, RETRY_BASE_DELAY, RETRY_MAX_DELAY override them). Other answers return at once."""
+
+    def setting(name: str, default: float) -> float:
+        try:
+            return float(os.environ.get(name, default))
+        except ValueError:
+            return default
+
+    def wrapped(url: str, headers: dict[str, str] | None = None, method: str = "GET", timeout: int = 60) -> HttpResponse:
+        attempts = max(1, int(setting("RETRY_MAX_ATTEMPTS", 5)))
+        base, cap = setting("RETRY_BASE_DELAY", 10), setting("RETRY_MAX_DELAY", 120)
+        for n in range(1, attempts + 1):
+            try:
+                resp = get(url, headers=headers, method=method, timeout=timeout)
+            except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+                certificate = ssl.SSLCertVerificationError
+                if n == attempts or isinstance(exc, certificate) or isinstance(getattr(exc, "reason", None), certificate):
+                    raise
+                problem = str(exc)
+            else:
+                if resp.status not in RETRY_STATUS or n == attempts:
+                    return resp
+                problem = f"HTTP {resp.status}"
+            delay = min(cap, base * 2 ** (n - 1))
+            pause = delay / 2 + random.uniform(0, delay)  # noqa: S311 - spreading retries, not security
+            print(f"retry: attempt {n}/{attempts} of {method} {url} failed ({problem}); waiting {pause:.0f}s...", file=sys.stderr)
+            sleep(pause)
+        raise AssertionError("unreachable")
+
+    return wrapped
+
+
+@contextlib.contextmanager
+def retries() -> Iterator[None]:
+    """Within the block, http_get retries network failures and 429/5xx answers."""
+    global http_get  # noqa: PLW0603 - the module's documented hook
+    original = http_get
+    http_get = _with_retries(original)
+    try:
+        yield
+    finally:
+        http_get = original
 
 
 def github_headers() -> dict[str, str]:
@@ -526,7 +584,8 @@ def main(argv: list[str]) -> int:
         return 2
     path = Path(argv[0])
     try:
-        result = resolve(load_manifest(path), path.parent)
+        with retries():
+            result = resolve(load_manifest(path), path.parent)
     except AssetsNotReady as exc:
         print(f"assets not ready: {exc}", file=sys.stderr)
         return 3
