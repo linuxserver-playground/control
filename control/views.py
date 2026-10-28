@@ -804,16 +804,10 @@ def status(request: Request) -> HTMLResponse:
 
 @router.get("/management", response_class=HTMLResponse)
 async def management(request: Request) -> HTMLResponse:
-    """The one read-only page that re-checks a stale membership, so the forms appear or vanish within the hour."""
+    """The action forms show for whoever the session cookie says is a member; every action confirms it with GitHub."""
     state = state_of(request)
     user = auth.current_user(request)
-    changed = False
-    if user is not None:
-        user, changed = await auth.refresh_if_stale(state, user)
-    response = html(request, "management.html", management_page(state, user), user=user, live=True)
-    if user is not None and changed:
-        auth.set_session(response, state, user)
-    return response
+    return html(request, "management.html", management_page(state, user), user=user, live=True)
 
 
 # -- routes: JSON -------------------------------------------------------------------------------------------------

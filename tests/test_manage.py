@@ -27,9 +27,10 @@ MUTATING: list[tuple[str, dict[str, str]]] = [
 
 
 class FakeActions:
-    """The GitHub endpoints the actions call; membership is always active here."""
+    """The GitHub endpoints the actions call; `members` are the active members of the org."""
 
-    def __init__(self) -> None:
+    def __init__(self, members: tuple[str, ...] = ("octocat", "hubot")) -> None:
+        self.members = members
         self.posts: list[tuple[str, Any]] = []
         self.gets: list[str] = []
 
@@ -40,7 +41,9 @@ class FakeActions:
         if request.method == "GET":
             self.gets.append(path)
             if path.startswith("/orgs/example-org/memberships/"):
-                return httpx.Response(200, json={"state": "active"})
+                if path.rsplit("/", 1)[-1] in self.members:
+                    return httpx.Response(200, json={"state": "active"})
+                return httpx.Response(404, json={})
             if path == "/orgs/example-org/repos":
                 return httpx.Response(200, json=[])
             return httpx.Response(404, json={})
@@ -219,11 +222,10 @@ def test_rate_limit(client: TestClient, state: State, github: FakeActions) -> No
     )
 
 
-def test_stale_member_is_rechecked_before_acting(
+def test_membership_is_confirmed_before_every_action(
     client: TestClient, state: State, github: FakeActions, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    stale_at = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=2)).isoformat(timespec="seconds")
-    user = sign_in(client, state, member=True, checked_at=stale_at)
+    user = sign_in(client, state, member=True)  # a verdict taken just now is still confirmed
     response = client.post("/manage/skip", data={"scope": "sonarr", "csrf": user.csrf}, follow_redirects=False)
     assert response.status_code == 303 and "/orgs/example-org/memberships/octocat" in github.gets
     assert response.cookies.get("control_session")  # the refreshed verdict travels back
@@ -237,7 +239,7 @@ def test_stale_member_is_rechecked_before_acting(
 
     mock_github(state, monkeypatch, not_member)
     client.cookies.clear()
-    user = sign_in(client, state, member=True, checked_at=stale_at)
+    user = sign_in(client, state, member=True)
     response = client.post("/manage/unskip", data={"scope": "sonarr", "csrf": user.csrf}, follow_redirects=False)
     assert response.status_code == 403 and state.model.skips()
 

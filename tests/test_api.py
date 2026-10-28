@@ -149,15 +149,13 @@ def test_me_is_never_401(client: TestClient, state: State) -> None:
     assert me.avatar_url == "https://avatars.example/octocat" and me.checked_at == user.checked_at
 
 
-def test_me_refreshes_a_stale_membership(client: TestClient, state: State, github: FakeActions) -> None:
-    stale_at = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=2)).isoformat(timespec="seconds")
-    sign_in(client, state, member=False, checked_at=stale_at)
+def test_me_reads_the_cookie_without_asking_github(client: TestClient, state: State, github: FakeActions) -> None:
+    old = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=2)).isoformat(timespec="seconds")
+    sign_in(client, state, member=False, checked_at=old)
     response = client.get("/api/me")
     me = auth.Me.model_validate(response.json())
-    assert me.member and me.checked_at and me.checked_at > stale_at
-    assert "/orgs/example-org/memberships/octocat" in github.gets
-    header = response.headers["set-cookie"].lower()
-    assert header.startswith(auth.SESSION_COOKIE) and "samesite=none" in header and "secure" in header
+    assert not me.member and me.checked_at == old
+    assert github.gets == [] and "set-cookie" not in response.headers
 
 
 def test_logout_json(client: TestClient, state: State) -> None:

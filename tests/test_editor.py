@@ -136,6 +136,9 @@ class FakeSite:
             self.revoked.append(json.loads(request.content)["access_token"])
             return httpx.Response(204)
         auth_header = request.headers.get("Authorization", "")
+        if path.startswith("/orgs/example-org/memberships/"):
+            assert auth_header == "Bearer ghs_token", f"{path} reads with the installation token"
+            return httpx.Response(200, json={"state": "active"})
         if path == "/graphql" or path.endswith("/permission"):
             assert auth_header == "Bearer ghs_token", f"{path} reads with the installation token"
             if path == "/graphql":

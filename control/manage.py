@@ -91,7 +91,7 @@ async def require_member(request: Request, csrf: str | None, editing: bool = Fal
     user = auth.current_user(request)
     if user is None:
         raise HTTPException(401, "sign in first")
-    user, refreshed = await auth.refresh_if_stale(state, user)
+    user = await auth.confirm_member(state, user)
     if not user.member:
         raise HTTPException(403, f"{user.login} is not a member of {state.settings.github_org}")
     if not auth.csrf_ok(user, csrf):
@@ -100,7 +100,7 @@ async def require_member(request: Request, csrf: str | None, editing: bool = Fal
     limit = EDIT_RATE_LIMIT if editing else RATE_LIMIT
     if state.model.count_actions_since(user.login, since, editing) >= limit:
         raise HTTPException(429, f"more than {limit} {'edits' if editing else 'actions'} in an hour; wait a while")
-    return Actor(user, refreshed)
+    return Actor(user, True)
 
 
 async def read_form(request: Request) -> Fields:

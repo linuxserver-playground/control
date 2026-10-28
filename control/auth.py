@@ -42,7 +42,6 @@ SESSION_COOKIE = "control_session"
 OAUTH_COOKIE = "control_oauth"
 SESSION_TTL = datetime.timedelta(days=7)
 OAUTH_TTL = datetime.timedelta(minutes=10)
-MEMBER_RECHECK = datetime.timedelta(hours=1)
 GITHUB = "https://github.com"
 API = "https://api.github.com"
 
@@ -55,10 +54,6 @@ class User(BaseModel):
     """When the membership verdict was last taken from GitHub."""
     csrf: str
     issued_at: str
-
-    def stale(self, now: datetime.datetime | None = None) -> bool:
-        at = now or datetime.datetime.now(datetime.UTC)
-        return at - datetime.datetime.fromisoformat(self.checked_at) >= MEMBER_RECHECK
 
 
 # -- signing ------------------------------------------------------------------------------------------------------
@@ -224,16 +219,15 @@ async def is_member(state: State, login: str) -> bool:
     return bool(await installation_membership(state, login))
 
 
-async def refresh_if_stale(state: State, user: User) -> tuple[User, bool]:
-    """(user, changed): the membership verdict re-taken once it is an hour old. When the installation token
-    cannot answer (classic OAuth App sign-in without the Members permission) the verdict taken at sign-in is
-    kept for the life of the session, which is capped by SESSION_TTL."""
-    if not user.stale():
-        return user, False
+async def confirm_member(state: State, user: User) -> User:
+    """The membership verdict taken from GitHub now, before an action or an editor save runs. It is one cheap call,
+    so nothing runs on what an old cookie says, and pages never make it: they show what the cookie says. When GitHub
+    cannot answer, the action is refused (503) rather than run on the old verdict."""
     verdict = await installation_membership(state, user.login)
+    if verdict is None:
+        raise HTTPException(503, "cannot confirm membership with GitHub right now; try again shortly")
     now = datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
-    member = user.member if verdict is None else verdict
-    return user.model_copy(update={"member": member, "checked_at": now}), True
+    return user.model_copy(update={"member": verdict, "checked_at": now})
 
 
 def safe_next(value: str | None, origins: Sequence[str] = ()) -> str:
@@ -373,12 +367,10 @@ async def _forget_editor(state: State, login: str) -> None:
 
 @router.get("/api/me")
 async def me(request: Request) -> Response:
-    """The website's sign-in state. Re-checks a stale membership like /management does, and rewrites the cookie."""
-    state = state_of(request)
+    """The website's sign-in state, as the session cookie holds it: no GitHub call. Actions confirm membership."""
     user = current_user(request)
     if user is None:
         return Response(Me(authenticated=False).model_dump_json(), media_type="application/json")
-    user, changed = await refresh_if_stale(state, user)
     body = Me(
         authenticated=True,
         login=user.login,
@@ -387,10 +379,7 @@ async def me(request: Request) -> Response:
         checked_at=user.checked_at,
         csrf=user.csrf,
     )
-    response = Response(body.model_dump_json(), media_type="application/json")
-    if changed:
-        set_session(response, state, user)
-    return response
+    return Response(body.model_dump_json(), media_type="application/json")
 
 
 @router.post("/api/logout", status_code=204)

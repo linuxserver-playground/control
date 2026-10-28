@@ -124,7 +124,7 @@ def test_callback_signs_in_a_member(
     assert github.memberships == ["octocat"]
     cookie = https_client.cookies.get(auth.SESSION_COOKIE)
     user = auth.User.model_validate(auth.unsign(https_state.session_secret, cookie, auth.SESSION_TTL) or {})
-    assert user.login == "octocat" and user.member and user.csrf and not user.stale()
+    assert user.login == "octocat" and user.member and user.csrf
     session_header = next(h for h in done.headers.get_list("set-cookie") if h.startswith(auth.SESSION_COOKIE))
     # An external origin is allowed by default, so the cookie must travel on its credentialed fetches.
     assert "HttpOnly" in session_header and "Secure" in session_header and "samesite=none" in session_header.lower()
@@ -169,26 +169,18 @@ def test_callback_without_installation_means_no_member(
     assert user.login == "octocat" and not user.member and github.memberships == []
 
 
-def test_membership_is_rechecked_hourly(
+def test_pages_take_membership_from_the_cookie(
     client: TestClient, state: State, credentials: AppCredentials, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     install(state, credentials)
     github = FakeOAuth(member=False)
     mock_github(state, monkeypatch, github)
-    stale_at = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=2)).isoformat(timespec="seconds")
-    user = sign_in(client, state, member=True, checked_at=stale_at)
-    assert user.stale()
-    # The management page re-checks, finds the membership gone, and rewrites the cookie.
-    page = client.get("/management")
-    assert github.memberships == ["octocat"] and "not an active member" in page.text
-    cookie = page.cookies.get(auth.SESSION_COOKIE)
-    refreshed = auth.unsign(state.session_secret, cookie, auth.SESSION_TTL)
-    assert refreshed and refreshed["member"] is False and refreshed["checked_at"] > stale_at
-    # A fresh verdict is not re-checked on the next request.
-    client.cookies.clear()
-    client.cookies.set(auth.SESSION_COOKIE, cookie or "")
-    client.get("/management")
-    assert github.memberships == ["octocat"]
+    old = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=2)).isoformat(timespec="seconds")
+    sign_in(client, state, member=True, checked_at=old)
+    # Page loads never ask GitHub, however old the verdict: actions confirm it (test_manage).
+    assert "not an active member" not in client.get("/management").text
+    assert client.get("/api/me").json()["member"] is True
+    assert github.memberships == []
 
 
 def test_safe_next() -> None:
@@ -253,10 +245,12 @@ def test_classic_oauth_app_sign_in_uses_scopes_and_the_user_token(
     assert user.login == "octocat" and user.member
 
 
-def test_stale_verdict_is_kept_when_the_installation_cannot_answer(
+def test_action_is_refused_when_membership_cannot_be_confirmed(
     https_state: State, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import asyncio
+
+    from fastapi import HTTPException
 
     def handler(request: httpx.Request) -> httpx.Response:
         if (token := token_response(request)) is not None:
@@ -264,7 +258,7 @@ def test_stale_verdict_is_kept_when_the_installation_cannot_answer(
         return httpx.Response(403, json={"message": "Resource not accessible by integration"})
 
     mock_github(https_state, monkeypatch, handler)
-    old = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=2)).isoformat(timespec="seconds")
-    user = auth.new_user("octocat", None, True).model_copy(update={"checked_at": old})
-    refreshed, changed = asyncio.run(auth.refresh_if_stale(https_state, user))
-    assert changed and refreshed.member is True and not refreshed.stale()
+    user = auth.new_user("octocat", None, True)
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(auth.confirm_member(https_state, user))
+    assert refused.value.status_code == 503

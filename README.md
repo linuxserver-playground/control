@@ -93,7 +93,7 @@ Every page is server-rendered and also available as JSON (pydantic models in `co
 | `GET /management`                | `/api/management.json`            | The public action log and skip flags; the action forms for signed-in members.          |
 |                                  | `/api/skips.json`                 | Active skip flags.                                                                     |
 |                                  | `/api/actions.json`               | The public member-action log (last 100), newest first.                                 |
-|                                  | `GET /api/me`                     | Who is signed in, for the website: `{authenticated, login, avatar_url, member, checked_at, csrf}`; never 401, anonymous is `authenticated: false`. Re-checks a stale membership. |
+|                                  | `GET /api/me`                     | Who is signed in, for the website: `{authenticated, login, avatar_url, member, checked_at, csrf}`; never 401, anonymous is `authenticated: false`. Read from the session cookie; actions confirm membership live. |
 | `GET /batch`                     | `/api/batch.json`                 | Batch build projects: runner capacity now (`running`, `waiting`, `held`, the slots each batch run holds, `free`), and per project its schedule, live or dry run, the `parallel` a run started now would get, the active run, the last decision and dispatch (with its run), the last 10 evaluated runs and the units failing now; the last 50 `batch` decisions. Live-refreshing. |
 | `GET /status`                    | `/api/status.json`                | Version and the commit the running image was built from (`revision`), app configured/installed, Discord, `/events`, scheduler, row counts, last backfill and discovery, last 20 deliveries. |
 | `GET /api/stream`                |                                   | Server-sent events: `{"type": "<table>", "key": ...}` whenever a handler changes a row, including `scheduler_decisions`, `actions`, `skips` and `manifests`. |
@@ -285,10 +285,11 @@ is used only for `GET /user`; membership is then read with **our** installation 
 cookie (`control_session`: login, avatar, member flag, when it was
 checked, a CSRF token) is HMAC-signed with `CONTROL_SESSION_SECRET`, `HttpOnly`, `Secure` when the public URL
 is https, `SameSite=None` when `CONTROL_ALLOWED_ORIGINS` names an external origin (else `Lax`), and lives 7
-days; the member flag is re-checked hourly on `/management`, on `/api/me` and before every action, with the
-installation token, which needs the App's Members: read: that is how someone who leaves the org loses member
-actions within the hour. Without it the check answers 403 and the verdict taken at sign-in stands for the life of
-the session. Sign-in never needs "Request user authorization (OAuth) during installation".
+days. Pages (`/management`, `/api/me`, the editor's reads) show what the cookie says and never call GitHub.
+Every action and every editor save confirms membership first, live, with the installation token (one call to
+`GET /orgs/{org}/memberships/{login}`, which needs the App's Members: read), so someone who leaves the org can
+do nothing from that moment, whatever their cookie says. When GitHub cannot answer, the action is refused with
+503 rather than run on the old verdict. Sign-in never needs "Request user authorization (OAuth) during installation".
 
 **The GitHub App needs the callback URL**: `${CONTROL_PUBLIC_URL}/login/callback` under *Identifying and
 authorizing users → Callback URL* in the app's settings. New apps get it from the manifest
@@ -462,8 +463,8 @@ events keep the stored installation id current.
 > The run archive uploads Release assets with **Contents: write**, which the App has. The Pages check needs no
 > more than the metadata every App has: control never enables Pages or changes environments.
 
-> The manifest asks for one organisation permission, **Members: read**, for the hourly membership re-check (see
-> *Member sign-in*): without it someone who has left the org keeps member actions until their session expires.
+> The manifest asks for one organisation permission, **Members: read**, for the membership check before every
+> action (see *Member sign-in*): without it every action is refused with 503.
 > Sign-in itself reads membership with the user's own token through the classic OAuth App. On an app created
 > before the manifest asked for it, grant it under the App's *Permissions & events* and accept it on the
 > installation. The playground's installation has it.

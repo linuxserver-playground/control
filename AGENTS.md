@@ -81,8 +81,9 @@ setting needs a default that works without it, plus a line in `deploy/n97/README
   is one `prepare_*` function in `ACTIONS`; `POST /manage/{action}` (form, `csrf` field, redirect) and
   `POST /api/actions/{action}` (JSON body, `X-CSRF-Token` header, JSON result) both run it, so never add
   logic to one route family only. The sign-in token is never stored: with the classic OAuth App it reads
-  `GET /user` and the user's own org membership; the hourly re-check uses the installation token (the App's
-  Members: read) and keeps the sign-in verdict when that answers 403. The one token of a user control keeps is the website
+  `GET /user` and the user's own org membership. `require_member` confirms membership live before every
+  action and editor save (`auth.confirm_member`, the installation token, the App's Members: read) and refuses
+  with 503 when GitHub cannot answer; pages and `/api/me` only read the cookie, so never add a GitHub call there. The one token of a user control keeps is the website
   editor's (`control/editor.py`): asked for separately, encrypted at rest, used only on `SITE_REPO`'s content
   paths, never sent to a browser, revoked on sign-out. Editor writes go through `manage.require_member`
   (`editing=True`) and log an `edit-*` row like any action.

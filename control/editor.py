@@ -357,7 +357,6 @@ async def _member(request: Request) -> auth.User:
     user = auth.current_user(request)
     if user is None:
         raise HTTPException(401, "sign in first")
-    user, _ = await auth.refresh_if_stale(state, user)
     if not user.member:
         raise HTTPException(403, f"{user.login} is not a member of {state.settings.github_org}")
     return user
@@ -636,7 +635,6 @@ async def status(request: Request) -> Status:
     user = auth.current_user(request)
     if user is None:
         return Status(authenticated=False, repo=repo)
-    user, _ = await auth.refresh_if_stale(state, user)
     if not user.member:
         return Status(authenticated=True, login=user.login, repo=repo)
     verdict = await can_edit(state, user.login)
