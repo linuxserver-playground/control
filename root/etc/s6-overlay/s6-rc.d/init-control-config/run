@@ -10,3 +10,8 @@ lsiown abc:abc \
     /config
 chmod 700 \
     /config
+
+# s6 keeps the container's environment (control's secrets from .env) as world-readable files; command version
+# sources run as nobody (run-version-command), so only root may read them. Services read them as root first.
+chmod 700 \
+    /run/s6/container_environment

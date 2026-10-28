@@ -37,7 +37,8 @@ IMAGE = "mods"
 """The image name mod decisions are recorded under, and the GHCR package every mod is a tag of."""
 SKIP_BRANCHES = frozenset({"master", "main", "template"})
 UNSCHEDULED = frozenset({"os", "command", "deb_repo"})
-"""Sources control never runs (see scheduler.UNRESOLVABLE); for a mod not even inside a `combined` source."""
+"""Sources a mod may not use (mod.schema.json), not even inside a `combined` source: control never checks them for
+a mod."""
 REGISTRY = "https://ghcr.io"
 MANIFEST_TYPES = ", ".join(
     (

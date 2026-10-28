@@ -27,6 +27,7 @@ fleet, and lets org members act (re-run, cancel, dispatch, skip). Python 3.12+, 
   `control/batch.py` the batch build projects (selkies-layers, proot-apps, wheelie): sizing `parallel` from the
   jobs running, their slots, and the per-unit failure alerts; `control/vendor/wheelie_gaps.py` wheelie's gap
   check, copied verbatim like the resolver;
+  `control/sandbox.py` runs `command` version sources as nobody for the scheduler;
   `control/vendor/resolve_version.py` the workflows repo's resolver, copied verbatim (header names the
   commit; `tests/test_vendor.py` fails on drift); `control/auth.py` GitHub OAuth sign-in, the signed session
   cookie and the membership check; `control/manage.py` the member POST actions; `control/webhooks.py`
@@ -74,7 +75,11 @@ setting needs a default that works without it, plus a line in `deploy/n97/README
   `settings.github_org`).
 - The upstream version is resolved only through `control/vendor/resolve_version.py`, never reimplemented;
   to change it, change `workflows/scripts/resolve_version.py`, copy the file back and update the commit in
-  the header. The scheduler never runs `command` or `deb_repo` sources (shell from a repo, docker).
+  the header. The scheduler never runs `deb_repo` sources (docker). It runs `command` sources hourly, only
+  through `control/sandbox.py`: `root/usr/local/bin/run-version-command` as nobody via doas (rule in
+  `root/etc/doas.d/`), with an empty environment, its own directory, ulimits and a kill at 120 s. Never run one
+  as abc, never give it a token, and keep `/config` and `/run/s6/container_environment` at 700 (the init
+  script): both hold secrets nobody must not read.
 - Self-healing (`control/recover.py`) repeats only what cannot be the image's fault and is safe to repeat. A step
   joins `INFRA_STEPS` only when its failure is GitHub's or the network's and a re-run changes nothing already right
   (read the step in workflows' `image-build.yml` first, and add a test case); a build, test or check step never does.

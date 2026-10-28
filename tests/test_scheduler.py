@@ -336,9 +336,14 @@ async def test_skipped_outcomes(state: State) -> None:
     os_image = live(state, "os", {**MANIFEST, "upstream": {"version": {"type": "os"}}})
     decision, _ = await run_check(state, os_image, FakeResolver("x"))
     assert decision.outcome == "skipped" and "os image" in decision.detail["reason"]
+    deb_source = {"type": "deb_repo", "image": "x", "sources": "y", "packages": "z"}
+    deb = live(state, "deb", {**MANIFEST, "upstream": {"version": deb_source}})
+    decision, _ = await run_check(state, deb, FakeResolver("x"))
+    assert decision.outcome == "skipped" and decision.detail["source"] == "deb_repo"
+    # A command source runs only where the sandbox is (the control image), never in a checkout.
     cmd = live(state, "cmd", {**MANIFEST, "upstream": {"version": {"type": "command", "run": "echo 1"}}})
     decision, _ = await run_check(state, cmd, FakeResolver("x"))
-    assert decision.outcome == "skipped" and decision.detail["source"] == "command"
+    assert decision.outcome == "skipped" and decision.detail["reason"] == "no command sandbox here"
 
     # Assets not published yet is "try later", not an error.
     assets = live(state, "assets")

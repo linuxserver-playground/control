@@ -36,7 +36,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel
 
-from . import batch, events, mods, recover, relay
+from . import batch, events, mods, recover, relay, sandbox
 from .fleet import discover_once, discovery_due
 from .github import GitHub, installation_client
 from .model import Manifest, Model, ModLine, ModManifest, Release, SchedulerDecision
@@ -73,9 +73,9 @@ ERROR_ALERT_AFTER = 6
 TICK_SECONDS = 60.0
 RESOLVE_TIMEOUT = 180.0
 HOURS_PER_WEEK = 24 * 7
-UNRESOLVABLE = {"command", "deb_repo"}
-"""Sources control will not run: `command` is arbitrary shell from a repo and `deb_repo` needs docker. Both
-still build on the weekly package check, where the build resolves them itself."""
+UNRESOLVABLE = {"deb_repo"}
+"""Sources control will not run: `deb_repo` needs docker. It still builds on the weekly package check, where the
+build resolves it itself. `command` runs, but only in the sandbox (sandbox.py)."""
 WORKFLOW_FILE = "build.yml"
 
 
@@ -199,8 +199,10 @@ async def tag_commit(github: GitHub, repo: str, tag: str) -> str:
 def resolve_with_token(manifest: dict[str, Any], token: str | None) -> dict[str, Any]:
     """Run the vendored resolver in an empty directory (nothing of the repo is checked out here) with the
     installation token on api.github.com calls so upstream lookups share our rate limit, not the anonymous
-    one. The resolver's HTTP hook is module state, so checks run one at a time."""
+    one, and `command` sources in the sandbox, never with that token. The resolver's hooks are module state, so
+    checks run one at a time."""
     original = rv.http_get
+    original_run = rv.run_command
 
     def get(url: str, headers: dict[str, str] | None = None, method: str = "GET", timeout: int = 60) -> Any:
         merged = dict(headers or {})
@@ -209,12 +211,14 @@ def resolve_with_token(manifest: dict[str, Any], token: str | None) -> dict[str,
         return original(url, headers=merged, method=method, timeout=timeout)
 
     rv.http_get = get
+    rv.run_command = sandbox.run
     try:
         with tempfile.TemporaryDirectory(prefix="control-resolve-") as empty:
             result: dict[str, Any] = rv.resolve(manifest, empty)
             return result
     finally:
         rv.http_get = original
+        rv.run_command = original_run
 
 
 Resolver = Callable[[dict[str, Any], str | None], Awaitable[dict[str, Any]]]
@@ -312,6 +316,9 @@ class Scheduler:
             return self.record(image, branch, kind, "skipped", {"reason": "os image: builds on the package check"})
         if source in UNRESOLVABLE or source is None:
             why = {"reason": "source not resolvable by control", "source": source}
+            return self.record(image, branch, kind, "skipped", why)
+        if source == "command" and not sandbox.available():
+            why = {"reason": "no command sandbox here", "source": source}
             return self.record(image, branch, kind, "skipped", why)
         if dispatched_at := self.in_cooldown(image, branch, now):
             return self.record(image, branch, kind, "skipped", {"reason": "cooldown", "dispatched_at": dispatched_at})

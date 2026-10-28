@@ -21,8 +21,11 @@ RUN \
     python3-dev && \
   echo "**** install runtime packages ****" && \
   apk add --no-cache \
+    doas \
+    gawk \
     jq \
-    python3 && \
+    python3 \
+    xz && \
   echo "**** install control ****" && \
   python3 -m venv /lsiopy && \
   /lsiopy/bin/pip install -U --no-cache-dir \
@@ -41,3 +44,6 @@ RUN \
 
 # add local files
 COPY root/ /
+
+# doas refuses a rule file anyone but root could change
+RUN chmod 0400 /etc/doas.d/control.conf

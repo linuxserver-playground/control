@@ -1,0 +1,19 @@
+#!/bin/bash
+# shellcheck shell=bash
+
+# Runs one `command` version source, read from stdin, for the scheduler. control starts it through doas as
+# nobody, so the command cannot read /config (the App key, the database) or control's environment. It gets an
+# empty environment, an empty directory of its own and CPU, memory and file size limits, and is killed after
+# 120 seconds. Network access stays: upstream lookups need it.
+
+script=$(cat)
+work=$(mktemp -d)
+trap 'rm -rf "${work}"' EXIT
+cd "${work}" || exit 1
+ulimit -c 0 -t 90 -v 2097152 -f 524288
+env -i \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    HOME="${work}" \
+    TMPDIR="${work}" \
+    LANG=C.UTF-8 \
+    timeout -s KILL 120 bash -o pipefail -c "${script}"

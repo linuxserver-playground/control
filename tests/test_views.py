@@ -321,6 +321,8 @@ def test_sse_format() -> None:
 
 def test_upstream_url() -> None:
     gh = {"type": "github_release", "repo": "Sonarr/Sonarr"}
+    arch = {"type": "arch_package", "package": "darktable", "release": True}
+    assert views.upstream_url(arch, "5.6.2-1") == "https://archlinux.org/packages/extra/x86_64/darktable/"
     assert views.upstream_url(gh, "v4.0.1") == "https://github.com/Sonarr/Sonarr/releases/tag/v4.0.1"
     # A transformed version is not upstream's tag: link the releases, not a guess.
     assert (

@@ -161,7 +161,7 @@ of the branch is the hint. Both sides are compared as sanitised strings (§3). O
 | ----------- | ------------------------------------------------------------------------------------------------------ |
 | `unchanged` | Released equals upstream.                                                                              |
 | `dispatch`  | They differ, or nothing was released yet: `workflow_dispatch` of `build.yml` on the branch with `reason: upstream`. |
-| `skipped`   | A skip flag matches; a run of the branch is in progress; a dispatch for the branch happened in the last 2 hours (cooldown, whatever triggered it); `upstream.version.type` is `os` (those build on the package check); the type is `command` or `deb_repo` (arbitrary shell, or docker, which control will not run: they build on the package check too); or `require_assets` are not published yet; or the branch has no Release and its last build of the head failed or was cancelled less than 24 hours ago (retried daily, not every cooldown). |
+| `skipped`   | A skip flag matches; a run of the branch is in progress; a dispatch for the branch happened in the last 2 hours (cooldown, whatever triggered it); `upstream.version.type` is `os` (those build on the package check); the type is `deb_repo` (it needs docker, which control does not have: it builds on the package check too); the type is `command` and control runs without its sandbox (a checkout rather than the image); or `require_assets` are not published yet; or the branch has no Release and its last build of the head failed or was cancelled less than 24 hours ago (retried daily, not every cooldown). |
 | `error`     | The resolver or the dispatch failed. After 6 errors in a row for one branch Discord gets one red embed naming the image, branch and error, linking `${SITE_URL}/fleet/scheduler/?image=<image>`; a success resets the streak. |
 
 **Release check**: in the same hourly pass, after the upstream check, every live branch is checked for a
@@ -219,7 +219,7 @@ GHCR, with an anonymous pull token, whether `ghcr.io/<org>/mods:<branch>-<versio
 image `mods`, branch `<branch>`, kind `mod`: `unchanged` when the tag exists; `dispatch` (`build.yml` on the
 branch with `inputs: {mod_version}`, the resolved version) when it does not; `skipped` for a skip flag
 (`mods`, `mods/<branch>`, `mods/<branch>/<version>`), a run in progress, the cooldown, a source control will
-not run (`os`, `command`, `deb_repo`, also inside `combined`), or a dispatch of the same version less than a day
+not check for a mod (`os`, `command`, `deb_repo`, also inside `combined`), or a dispatch of the same version less than a day
 ago whose build failed (retried daily); `error` for the resolver or the registry. The build itself passes the
 version as `MOD_VERSION` and tags `<branch>-<version>` (CONVENTIONS §3, "Mods"), so a push that already built
 the version leaves the next check `unchanged`.

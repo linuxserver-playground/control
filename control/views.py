@@ -415,6 +415,9 @@ def upstream_url(source: dict[str, Any], version: str | None, website: str | Non
             return f"https://www.npmjs.com/package/{source['package']}" + (f"/v/{v}" if exact else "")
         case "pip" if source.get("package"):
             return f"https://pypi.org/project/{source['package']}/" + (f"{v}/" if exact else "")
+        case "arch_package" if source.get("package"):
+            repo_name, arch = source.get("repo", "extra"), source.get("arch", "x86_64")
+            return f"https://archlinux.org/packages/{repo_name}/{arch}/{source['package']}/"
     return website
 
 

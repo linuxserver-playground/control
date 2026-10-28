@@ -1,5 +1,5 @@
 # Vendored from linuxserver-playground/workflows scripts/resolve_version.py at commit
-# ccfaf4560bccbea633021532d40f1e5c83e38a58.
+# f873079677cc1577fbc860ba6b2552daaa6e9fa7.
 # Do not edit here: change it in the workflows repo and copy it back. tests/test_vendor.py fails
 # when this file and the source checkout differ, so the build and the scheduler resolve alike.
 # End of vendoring header.
@@ -22,7 +22,7 @@ so tests (and the control plane, if it wants caching) can replace it. ``with ret
 network failures and 429/5xx answers; the command line does, an importer chooses.
 
 Only the standard library is required. PyYAML is imported lazily when a ``.yml`` path is given;
-``jq`` and ``docker`` are invoked as binaries for the ``json`` and ``deb_repo`` sources.
+``jq`` and ``docker`` are invoked as binaries for the ``json`` and ``deb_repo`` sources, and ``bash`` for ``command``.
 """
 
 from __future__ import annotations
@@ -170,21 +170,52 @@ def _get_ok(url: str, headers: dict[str, str] | None = None) -> HttpResponse:
 # Sources. Each returns (version, source_url).
 
 
+def version_key(value: str) -> tuple[tuple[int, int, str], ...]:
+    """Natural order, as `sort -V` gives it: digit runs compare as numbers, everything else as text, and a version
+    sorts before itself with a suffix (35.0.2 < 35.0.2rc2)."""
+    return tuple((0, int(part), "") if part.isdigit() else (1, 0, part) for part in re.findall(r"\d+|\D+", value))
+
+
 def _github_release(src: dict[str, Any]) -> tuple[str, str]:
+    """GitHub's latest stable release, as Jenkins' github_stable read it. With `include`, `exclude`, `prerelease` or
+    `sort` the release list is filtered instead: newest published first, or the highest tag with `sort: version`.
+    The list is not ordered by date (GitHub sorts it by the tagged commit, then by name, so a repository whose
+    releases all tag one commit lists them alphabetically), which is why the unfiltered case asks for latest."""
     repo = src["repo"]
     want_prerelease = bool(src.get("prerelease", False))
+    include = re.compile(src["include"]) if src.get("include") else None
     exclude = re.compile(src["exclude"]) if src.get("exclude") else None
+    by_version = src.get("sort") == "version"
+    if not (want_prerelease or include or exclude or by_version):
+        resp = http_get(f"https://api.github.com/repos/{repo}/releases/latest", headers=github_headers())
+        if resp.status == 404:
+            raise ResolveError(f"github repo {repo} has no stable release")
+        if resp.status != 200:
+            raise ResolveError(f"GET https://api.github.com/repos/{repo}/releases/latest returned HTTP {resp.status}")
+        rel = resp.json()
+        tag = rel.get("tag_name") or ""
+        return tag, rel.get("html_url") or f"https://github.com/{repo}/releases/tag/{tag}"
     resp = _get_ok(f"https://api.github.com/repos/{repo}/releases?per_page=100", github_headers())
+    candidates = []
     for rel in resp.json():
-        if rel.get("draft"):
+        tag = rel.get("tag_name") or ""
+        if rel.get("draft") or not tag:
             continue
         if rel.get("prerelease") and not want_prerelease:
             continue
-        tag = rel.get("tag_name") or ""
+        if include and not include.search(tag):
+            continue
         if exclude and exclude.search(tag):
             continue
-        return tag, rel.get("html_url") or f"https://github.com/{repo}/releases/tag/{tag}"
-    raise ResolveError(f"no matching release found for github repo {repo}")
+        candidates.append(rel)
+    if not candidates:
+        raise ResolveError(f"no matching release found for github repo {repo}")
+    if by_version:
+        rel = max(candidates, key=lambda r: version_key(r["tag_name"]))
+    else:
+        rel = max(candidates, key=lambda r: r.get("published_at") or r.get("created_at") or "")
+    tag = rel["tag_name"]
+    return tag, rel.get("html_url") or f"https://github.com/{repo}/releases/tag/{tag}"
 
 
 def _github_commit(src: dict[str, Any]) -> tuple[str, str]:
@@ -223,25 +254,72 @@ def _gitea_release(src: dict[str, Any]) -> tuple[str, str]:
     return _gitea_like_release(f"{base}/api/v1", src["repo"], base)
 
 
-def run_jq(expr: str, body: bytes) -> str:
-    """Apply a jq expression with the jq binary; -r so strings come back bare."""
+def jq_lines(expr: str, body: bytes) -> list[str]:
+    """Apply a jq expression with the jq binary; -r so strings come back bare. Every non-empty output line."""
     try:
         proc = subprocess.run(["jq", "-r", expr], input=body, capture_output=True, check=False)
     except FileNotFoundError as exc:
         raise ResolveError("jq binary not found; the json source needs it") from exc
     if proc.returncode != 0:
         raise ResolveError(f"jq failed: {proc.stderr.decode(errors='replace').strip()}")
-    lines = [line for line in proc.stdout.decode().splitlines() if line.strip()]
+    lines = [line.strip() for line in proc.stdout.decode().splitlines() if line.strip()]
     if not lines:
         raise ResolveError(f"jq expression {expr!r} produced no output")
-    return lines[0].strip()
+    return lines
+
+
+def run_jq(expr: str, body: bytes) -> str:
+    return jq_lines(expr, body)[0]
 
 
 def _json(src: dict[str, Any]) -> tuple[str, str]:
+    """The first value the jq expression prints, or the highest with `sort: version`."""
     url = src["url"]
     headers = github_headers() if "api.github.com" in url else None
-    resp = _get_ok(url, headers)
-    return run_jq(src["jq"], resp.body), url
+    lines = jq_lines(src["jq"], _get_ok(url, headers).body)
+    return (max(lines, key=version_key) if src.get("sort") == "version" else lines[0]), url
+
+
+def _regex(src: dict[str, Any]) -> tuple[str, str]:
+    """A version read out of a web page or text file: the first match of `pattern` (its `version` group, else group 1,
+    else the whole match), or the highest with `sort: version`. `search: url` matches the address the URL redirects
+    to instead of the body, for download links that name the version only there."""
+    url = src["url"]
+    pattern = re.compile(src["pattern"], re.MULTILINE)
+    headers = github_headers() if "api.github.com" in url else None
+    if src.get("search") == "url":
+        resp = http_get(url, headers=headers, method="HEAD")
+        if resp.status != 200:
+            raise ResolveError(f"HEAD {url} returned HTTP {resp.status}")
+        text = resp.url or url
+    else:
+        text = _get_ok(url, headers).text()
+    found = []
+    for match in pattern.finditer(text):
+        if "version" in pattern.groupindex:
+            found.append(match.group("version"))
+        else:
+            found.append(match.group(1) if pattern.groups else match.group(0))
+    found = [value.strip() for value in found if value and value.strip()]
+    if not found:
+        raise ResolveError(f"pattern {src['pattern']!r} matched nothing at {url}")
+    return (max(found, key=version_key) if src.get("sort") == "version" else found[0]), url
+
+
+def _arch_package(src: dict[str, Any]) -> tuple[str, str]:
+    """An Arch Linux package's version from archlinux.org: `pkgver`, or `pkgver-pkgrel` with `release: true`, so a
+    rebuild of the same version counts too. The epoch is left out: it only orders versions, and the tag would
+    glue it onto the version (2:5.6.2 would read 25.6.2)."""
+    package = src["package"]
+    repo = src.get("repo", "extra")
+    arch = src.get("arch", "x86_64")
+    query = urllib.parse.urlencode({"name": package, "repo": repo.capitalize(), "arch": arch})
+    results = _get_ok(f"https://archlinux.org/packages/search/json/?{query}").json().get("results") or []
+    match = next((r for r in results if r.get("pkgname") == package), None)
+    if match is None:
+        raise ResolveError(f"arch package {package} not in {repo}/{arch}")
+    version = f"{match['pkgver']}-{match['pkgrel']}" if src.get("release") else str(match["pkgver"])
+    return version, f"https://archlinux.org/packages/{repo}/{arch}/{package}/"
 
 
 def _npm(src: dict[str, Any]) -> tuple[str, str]:
@@ -436,8 +514,30 @@ def _os(manifest_dir: Path) -> tuple[str, str]:
 CLOSED_PIPE_EXITS = (141, 23)
 
 
+# How long a command source may run before it counts as failed.
+COMMAND_TIMEOUT = 120
+
+
+def _run_command(script: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", "-o", "pipefail", "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=os.environ.copy(),
+        timeout=COMMAND_TIMEOUT,
+    )
+
+
+# The control plane replaces this with a sandboxed runner: no secrets in the environment, its own empty directory.
+run_command: Callable[[str], subprocess.CompletedProcess[str]] = _run_command
+
+
 def _command(src: dict[str, Any]) -> tuple[str, str]:
-    proc = subprocess.run(["bash", "-o", "pipefail", "-c", src["run"]], capture_output=True, text=True, check=False, env=os.environ.copy())
+    try:
+        proc = run_command(src["run"])
+    except subprocess.TimeoutExpired as exc:
+        raise ResolveError(f"command source timed out after {exc.timeout:.0f}s") from exc
     if proc.returncode not in (0, *CLOSED_PIPE_EXITS):
         raise ResolveError(f"command source failed ({proc.returncode}): {proc.stderr.strip()}")
     lines = [line for line in proc.stdout.splitlines() if line.strip()]
@@ -551,6 +651,12 @@ def resolve_raw(source: dict[str, Any], platforms: list[str], manifest_dir: Path
         return _os(manifest_dir)
     if kind == "command":
         return _command(source)
+    if kind == "regex":
+        return _regex(source)
+    if kind == "arch_package":
+        return _arch_package(source)
+    if kind == "static":
+        return str(source["version"]), "none"
     if kind == "combined":
         return _combined(source, platforms, manifest_dir)
     raise ResolveError(f"unknown version source type {kind!r}")
