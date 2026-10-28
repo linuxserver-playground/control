@@ -633,6 +633,26 @@ class Action(BaseModel):
     updated_at: str
 
 
+class RunArchive(BaseModel):
+    """What control did to archive one released run on its Release (archive.py)."""
+
+    repo: str
+    run_id: int
+    release_tag: str | None
+    state: str
+    """`done` (nothing more to do), `retry` (a transient failure; tried again at `next_attempt_at`), `failed` (gave
+    up after the configured attempts) or `skipped` (the release is gone)."""
+    run_json: str | None
+    """`uploaded`, `present` (already on the Release) or None while not attached."""
+    logs: str | None
+    """`uploaded`, `present`, `withheld` (the pattern check matched), `expired`, `too-large`, `unreadable`, or None."""
+    attempts: int
+    next_attempt_at: str | None
+    note: str | None
+    created_at: str
+    updated_at: str
+
+
 BUILD_COLUMNS = ", ".join(name for name in Build.model_fields if name != "bundle_json")
 PUBLICATION_COLUMNS = ("discord_message_id", "publish_state", "publish_started_at", "published_at", "publish_note")
 """Columns control sets itself; a (re)delivered event never overwrites them."""
@@ -1379,6 +1399,49 @@ class Model:
                 (actor, since, editing),
             ).fetchone()
         return int(row["n"])
+
+    # -- run archive ----------------------------------------------------------------------------------------------
+
+    def archive_candidates(self, now: str, settled_before: str, limit: int) -> list[tuple[str, int]]:
+        """Released live runs whose record and logs are not on their Release yet, newest first so a fresh release
+        never waits behind older ones. A run counts once its `workflow_run` says completed, or, should that webhook
+        never come, once its summary is older than `settled_before` (the archiver reads the run itself anyway)."""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT b.repo, b.run_id FROM builds b "
+                "LEFT JOIN runs r ON r.id = b.run_id "
+                "LEFT JOIN run_archives a ON a.repo = b.repo AND a.run_id = b.run_id "
+                "WHERE b.mode = 'live' AND b.result = 'success' AND b.version_tag IS NOT NULL "
+                "AND b.release_url IS NOT NULL "
+                "AND (r.status = 'completed' OR b.received_at <= ?) "
+                "AND (a.state IS NULL OR (a.state = 'retry' AND a.next_attempt_at <= ?)) "
+                "ORDER BY b.received_at DESC, b.rowid DESC LIMIT ?",
+                (settled_before, now, limit),
+            ).fetchall()
+        return [(str(row["repo"]), int(row["run_id"])) for row in rows]
+
+    def run_archive(self, repo: str, run_id: int) -> RunArchive | None:
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT * FROM run_archives WHERE repo = ? AND run_id = ?", (repo, run_id)).fetchone()
+        return RunArchive(**dict(row)) if row else None
+
+    def upsert_run_archive(self, archive: RunArchive) -> None:
+        with self.db.connect() as conn:
+            _upsert(conn, "run_archives", archive.model_dump(), ("repo", "run_id"))
+
+    # -- repo pages -----------------------------------------------------------------------------------------------
+
+    def repo_pages_done(self) -> set[str]:
+        with self.db.connect() as conn:
+            return {str(row["repo"]) for row in conn.execute("SELECT repo FROM repo_pages").fetchall()}
+
+    def set_repo_pages(self, repo: str, detail: str) -> None:
+        with self.db.connect() as conn:
+            conn.execute(
+                "INSERT INTO repo_pages (repo, detail, created_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(repo) DO UPDATE SET detail = excluded.detail",
+                (repo, detail, utcnow()),
+            )
 
     # -- status ---------------------------------------------------------------------------------------------------
 

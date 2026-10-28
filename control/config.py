@@ -65,6 +65,19 @@ class Settings(BaseModel):
     batch_live: tuple[str, ...] = ("wheelie", "proot-apps", "selkies-layers")
     """Batch projects control dispatches for real. The others are sized and recorded as dry runs, because their
     own cron still fires until the repo's `SCHEDULED_BY_CONTROL` variable is set. Env CONTROL_BATCH_LIVE (csv)."""
+    run_archive: bool = True
+    """Attach `run.json` and `logs.zip` to every live release once its run completes (archive.py): GitHub deletes
+    run logs after 90 days and the Release is the permanent record. Tests turn it off. Env CONTROL_RUN_ARCHIVE."""
+    run_archive_per_pass: int = 3
+    """Runs archived per minute at most, so the first pass over older releases stays gentle on the API budget."""
+    run_archive_attempts: int = 8
+    """Tries before control gives up on archiving a run (backing off from 5 minutes to 6 hours) and says so."""
+    run_archive_max_logs_mb: int = 500
+    """A run's log archive larger than this (compressed) is not attached; run.json still is."""
+    repo_pages: bool = True
+    """Enable GitHub Pages (`build_type=workflow`) on every `docker-*` repo once, and open its `github-pages`
+    environment to every branch, because each image's build deploys its heavy data to its own Pages (pages.py).
+    Needs the App's Pages and Administration write permissions; without them it logs once and skips."""
     scheduler: bool = True
     """Run the fleet discovery and scheduler loop beside the server (once the app is configured and installed)."""
     session_secret: str | None = None
@@ -140,6 +153,16 @@ class Settings(BaseModel):
             fields["batch_max_parallel"] = int(maximum)
         if (batch_live := env("CONTROL_BATCH_LIVE")) is not None:
             fields["batch_live"] = tuple(p.strip() for p in batch_live.split(",") if p.strip())
+        if archive := env("CONTROL_RUN_ARCHIVE"):
+            fields["run_archive"] = archive.strip().lower() in ("1", "true", "yes", "on")
+        if per_pass := env("CONTROL_RUN_ARCHIVE_PER_PASS"):
+            fields["run_archive_per_pass"] = int(per_pass)
+        if attempts := env("CONTROL_RUN_ARCHIVE_ATTEMPTS"):
+            fields["run_archive_attempts"] = int(attempts)
+        if max_logs := env("CONTROL_RUN_ARCHIVE_MAX_LOGS_MB"):
+            fields["run_archive_max_logs_mb"] = int(max_logs)
+        if pages := env("CONTROL_REPO_PAGES"):
+            fields["repo_pages"] = pages.strip().lower() in ("1", "true", "yes", "on")
         if scheduler := env("CONTROL_SCHEDULER"):
             fields["scheduler"] = scheduler.strip().lower() in ("1", "true", "yes", "on")
         if session_secret := env("CONTROL_SESSION_SECRET"):

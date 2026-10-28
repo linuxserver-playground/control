@@ -21,7 +21,7 @@ from contracts import errors as contract_errors
 from contracts import format_error
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from . import handlers
+from . import archive, handlers
 from .config import Settings
 from .db import utcnow
 from .github import installation_client
@@ -510,6 +510,8 @@ async def control_event(
         await announce(state, build, event_type)
         if event_type == "build.summary":
             await notify_hub(state, build)
+            if released(build):
+                archive.wake(state)  # archived once its run completes; a completion seen first is waiting on this
     log.info("%s for %s run %s (%s)", event_type, payload["repository"], payload["run_id"], payload.get("result", ""))
     return {"status": "accepted", "type": event_type, "applied": applied}
 

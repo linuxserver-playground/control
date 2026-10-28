@@ -276,6 +276,34 @@ MIGRATIONS: list[str] = [
         updated_at TEXT NOT NULL
     );
     """,
+    # The run archive (archive.py): each live release's run record and log archive attached to its Release, since
+    # GitHub deletes run logs after 90 days. One row per released run once control has tried it.
+    """
+    CREATE TABLE run_archives (
+        repo TEXT NOT NULL,
+        run_id INTEGER NOT NULL,
+        release_tag TEXT,
+        state TEXT NOT NULL,
+        run_json TEXT,
+        logs TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT,
+        note TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (repo, run_id)
+    );
+    CREATE INDEX run_archives_state ON run_archives (state, next_attempt_at);
+    """,
+    # Pages on each docker-* repo (pages.py): enabled once with build_type=workflow, the github-pages environment
+    # open to every branch. A repo with a row here is done.
+    """
+    CREATE TABLE repo_pages (
+        repo TEXT PRIMARY KEY,
+        detail TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    """,
 ]
 
 

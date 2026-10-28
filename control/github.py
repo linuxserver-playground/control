@@ -62,9 +62,30 @@ class GitHub:
         response.raise_for_status()
         return response
 
+    async def put(self, path: str, json: dict[str, Any] | None = None) -> httpx.Response:
+        response = await self.http.put(f"{API}{path}", json=json, headers=self.headers)
+        response.raise_for_status()
+        return response
+
     async def delete(self, path: str) -> httpx.Response:
         response = await self.http.delete(f"{API}{path}", headers=self.headers)
         response.raise_for_status()
+        return response
+
+    async def upload_asset(self, upload_url: str, name: str, content: bytes, content_type: str) -> httpx.Response:
+        """Attach a file to a Release; `upload_url` is the release's own template (`…/assets{?name,label}`)."""
+        url = upload_url.split("{", 1)[0]
+        headers = {**self.headers, "Content-Type": content_type}
+        response = await self.http.post(url, params={"name": name}, content=content, headers=headers, timeout=300)
+        response.raise_for_status()
+        return response
+
+    async def download(self, path: str) -> httpx.Response:
+        """An API path that answers with a redirect to signed storage (a run's logs). The redirect is followed by hand
+        and without our token, which the signed URL does not need and must never see. The caller judges the status."""
+        response = await self.http.get(f"{API}{path}", headers=self.headers)
+        if response.is_redirect and (location := response.headers.get("location")):
+            response = await self.http.get(location, timeout=300)
         return response
 
     async def graphql(self, query: str, variables: dict[str, Any]) -> Any:

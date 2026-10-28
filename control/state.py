@@ -39,6 +39,8 @@ class State:
     stream: Broadcaster
     session_secret: str
     """Signs the sign-in cookie; from CONTROL_SESSION_SECRET or random per process."""
+    archive_wakeup: asyncio.Event = field(default_factory=asyncio.Event)
+    """Set when a run completes, so the run archive (archive.py) looks now rather than at its next sweep."""
     background: set[asyncio.Task[Any]] = field(default_factory=set)
     """Fire-and-forget tasks (manifest refreshes, member-triggered discovery) kept referenced until done."""
 

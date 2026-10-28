@@ -63,6 +63,7 @@ def settings(tmp_path: Path) -> Settings:
         github_org="example-org",
         events_secret=EVENTS_SECRET,
         publish_watch=False,  # tests drive publish.check_once themselves
+        run_archive=False,  # tests drive archive.archive_once themselves
     )
 
 

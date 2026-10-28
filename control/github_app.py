@@ -21,14 +21,18 @@ log = logging.getLogger(__name__)
 API = "https://api.github.com"
 
 # `workflows` lets the app change workflow files and dispatch them; `actions` lets it re-run, cancel and
-# dispatch runs; `checks` is read because GitHub creates the check runs for Actions itself.
+# dispatch runs; `checks` is read because GitHub creates the check runs for Actions itself; `contents` write
+# also attaches the run archive to releases (archive.py). `pages` and `administration` write let it enable
+# Pages on a new image repo and open its github-pages environment to every branch (pages.py).
 PERMISSIONS: dict[str, str] = {
     "actions": "write",
+    "administration": "write",
     "checks": "read",
     "contents": "write",
     "issues": "read",
     "metadata": "read",
     "packages": "write",
+    "pages": "write",
     "pull_requests": "write",
     "workflows": "write",
 }
@@ -136,6 +140,18 @@ class InstallationTokens:
     def __init__(self, client: httpx.AsyncClient) -> None:
         self.client = client
         self._cache: dict[int, tuple[str, datetime.datetime]] = {}
+        self._permissions: dict[int, dict[str, str]] = {}
+
+    def permissions(self, installation_id: int) -> dict[str, str] | None:
+        """What the installation granted, as GitHub returned it with the last token; None before the first one.
+        An app's manifest only asks: the org accepts new permissions on the installation, and until then the
+        token carries the old set."""
+        return self._permissions.get(installation_id)
+
+    def forget(self, installation_id: int) -> None:
+        """Drop the cached token, so the next one carries permissions the org has just accepted."""
+        self._cache.pop(installation_id, None)
+        self._permissions.pop(installation_id, None)
 
     async def get(self, credentials: AppCredentials, installation_id: int) -> str:
         now = datetime.datetime.now(datetime.UTC)
@@ -154,5 +170,7 @@ class InstallationTokens:
         body = response.json()
         expires = datetime.datetime.fromisoformat(body["expires_at"].replace("Z", "+00:00"))
         self._cache[installation_id] = (body["token"], expires)
+        if isinstance(body.get("permissions"), dict):
+            self._permissions[installation_id] = {str(k): str(v) for k, v in body["permissions"].items()}
         log.info("new installation token for %s, expires %s", installation_id, expires.isoformat())
         return str(body["token"])

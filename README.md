@@ -63,6 +63,9 @@ docker run --rm -p 8080:8080 -e PUID=1000 -e PGID=1000 -e CONTROL_PUBLIC_URL=htt
 | `CONTROL_EVENTS_SECRET` | unset                       | Shared with the `workflows` repo; signs the events POSTed to `/events`. Unset means `/events` answers 503. |
 | `CONTROL_BACKFILL_ON_START` | `false`                 | `true` runs one GitHub API backfill in the background after boot (once the app is configured and installed). |
 | `CONTROL_CONCURRENCY_LIMIT` | `20`                    | GitHub's concurrent job limit for the org; the queue page measures in-progress jobs against it. |
+| `CONTROL_RUN_ARCHIVE` | `true`                        | Attach `run.json` and `logs.zip` to every live release once its run completes (see *Run archive*). |
+| `CONTROL_RUN_ARCHIVE_PER_PASS`, `CONTROL_RUN_ARCHIVE_ATTEMPTS`, `CONTROL_RUN_ARCHIVE_MAX_LOGS_MB` | `3`, `8`, `500` | Runs archived per minute at most; tries before giving up on one (backing off 5 minutes to 6 hours); the largest log archive attached. |
+| `CONTROL_REPO_PAGES`  | `true`                        | Enable GitHub Pages (`build_type=workflow`) once on every `docker-*` repo and open its `github-pages` environment to every branch (see *Pages on image repos*). |
 | `CONTROL_SCHEDULER`   | `true`                        | Run fleet discovery and the scheduler loop beside the server. `false` keeps the pages and member actions and stops dispatching. |
 | `CONTROL_BATCH_LIVE`  | `wheelie`                     | Batch build projects control dispatches for real (csv; empty for none). The others are sized and recorded as dry runs while their own cron still fires. |
 | `CONTROL_BATCH_RESERVE` | `4`                         | Job slots a batch run never sizes into, kept for image, hub and site builds. |
@@ -122,7 +125,8 @@ Webhooks are stored whole in `deliveries` first, then `control/handlers.py` upse
 backwards; unknown events are stored and ignored; a handler failure is logged and never fails the webhook
 response. The scheduler owns `manifests` (one row per live branch), `mod_manifests` (one row per docker-mods
 branch), `scheduler_decisions` and `skips`;
-member actions write `actions`.
+member actions write `actions`; the run archive writes `run_archives` (one row per released run it has tried) and
+the Pages setup `repo_pages` (one row per repo it has set up).
 
 ## Scheduler
 
@@ -436,6 +440,12 @@ missing header is `401`, and deliveries before the app exists are `503` so GitHu
 delivery is stored whole, keyed by `X-GitHub-Delivery` so redeliveries are ignored, and `installation`
 events keep the stored installation id current.
 
+> The run archive uploads Release assets with **Contents: write**, which the App has. Pages setup needs
+> **Pages: write** and **Administration: write** (both in the manifest for new apps); on an app created before
+> they were added, grant them under the App's *Permissions & events* and accept them on the installation. Until
+> then control logs and posts once that it skips the Pages setup, and resumes on its own: the
+> `installation` `new_permissions_accepted` webhook drops the cached token, whose successor carries the new set.
+
 > Sign-in needs the organisation permission **Members: read** on the App (it is in the manifest for new apps). On an app created before it was added, grant it under the App's *Permissions & events* and then accept the updated permissions on the installation; until then every user is treated as a non-member.
 
 ## Publication hold
@@ -448,3 +458,47 @@ link. Past `CONTROL_PUBLISH_DEADLINE_MINUTES` the message turns into "not on the
 does not notify) says where it is stuck, read from the hub's own data: the hub has not ingested the release, or the
 hub has it and the site has not published it, with the runs to look at. A page that turns up later is announced
 with a short follow-up; after `CONTROL_PUBLISH_EXPIRY_HOURS` control stops watching and says so.
+
+## Run archive
+
+The website renders build pages only for the newest builds of a branch; an older build is its GitHub Release,
+and GitHub deletes run logs after 90 days. So once a released live run has completed, `control/archive.py`
+attaches two assets to its Release with the installation token:
+
+- `run.json`: the run's structured record from the REST API, never log text. `schema` (1), `archived_at`,
+  `repository`, `release` (`tag`, `url`), `build` (`image`, `branch`, `mode`, `version_tag`, `release_tag`),
+  `run` (`id`, `name`, `path`, `run_number`, `run_attempt`, `html_url`, `display_title`, `event`, `status`,
+  `conclusion`, `created_at`, `run_started_at`, `updated_at`), `trigger` (`event`, the build's `reason`,
+  `actor`, `triggering_actor`), `head` (`branch`, `sha`, `message`, `timestamp`, `author` name) and `jobs`, each
+  with `id`, `name`, `html_url`, `run_attempt`, `status`, `conclusion`, `created_at`, `started_at`,
+  `completed_at`, `runner_name`, `runner_group_name`, `labels` and `steps` (`number`, `name`, `status`,
+  `conclusion`, `started_at`, `completed_at`). Field names are GitHub's.
+- `logs.zip`: `GET /repos/{repo}/actions/runs/{id}/logs` as GitHub serves it (the redirect to signed storage is
+  followed without the token). The logs of these public repos are already public and masked by GitHub when
+  written; before attaching them control still checks every line for GitHub token formats (`ghp_`, `gho_`,
+  `ghs_`, `ghu_`, `ghr_`, `github_pat_`), JWTs, `Authorization:` headers carrying a credential (not `***` or an
+  unexpanded `$VAR`), Discord webhook URLs and the exact events secret. On any match the logs are not attached
+  (`run.json` still is), and the log and a Discord post name the kind of match and the file, never the match.
+
+A run is matched to its Release through its `build.summary` (`/events`): a live build with `result: success`, a
+version tag and a `release_url`, whose tag (the end of that URL) names the Release. It is archived once its
+`workflow_run` has completed, or an hour after the summary should that webhook never arrive (control reads the
+run's status itself). The completion webhook wakes the archiver (30 seconds later, so the logs are ready);
+otherwise it sweeps every minute, newest first and `CONTROL_RUN_ARCHIVE_PER_PASS` runs at a time, which is also
+how releases from before the archive existed get theirs. Assets already on the Release are left alone. Logs not
+ready, a GitHub error or a network failure are retried with backoff; after `CONTROL_RUN_ARCHIVE_ATTEMPTS` control
+gives up and posts it. Logs GitHub has deleted (`410`, or `404` past the 90 days) leave `run.json` alone on the
+Release. The outcome per run is in `run_archives` (`done`, `retry`, `failed`, `skipped` when the Release is gone;
+`logs` says `uploaded`, `present`, `withheld`, `expired`, `too-large` or `unreadable`).
+
+## Pages on image repos
+
+Each image's build deploys its heavy data to its own repository's GitHub Pages, so every `docker-*` repo needs
+Pages enabled with `build_type=workflow` (`POST /repos/{repo}/pages`, or `PUT` to switch a branch-built site) and
+its `github-pages` environment open to every branch (`PUT /repos/{repo}/environments/github-pages` with
+`deployment_branch_policy: null`), since live branches are not all the default one. `control/pages.py` does it once
+per repo, recorded in `repo_pages`: on `repository` `created`, on the first push to a repo with nothing live yet,
+and on every fleet discovery for a repo not done yet (archived repos are skipped). It needs the App's Pages and
+Administration write permissions; without them it skips, logs and posts once which are missing, and tries again
+once a token carries them. The discovery record (`last_discovery` in `/api/status.json`) counts what it did
+(`pages`).

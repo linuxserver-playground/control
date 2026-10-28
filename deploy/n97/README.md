@@ -66,6 +66,16 @@ authorizing users** add the callback URL `https://ci.thelamer.duckdns.org:8443/l
 after this increment get the URL automatically. Then `/login` works for anyone, and members of the org (active
 membership) see the action forms on `/management`, `/runs/{id}`, `/images/{name}` and the fleet board.
 
+## Granting new App permissions
+
+The manifest only applies to an app created from it; an existing app needs new permissions granted by hand.
+Pages setup on new image repos (`control/pages.py`) needs **Pages: write** and **Administration: write**: add them
+under the App's *Permissions & events* (`https://github.com/organizations/linuxserver-playground/settings/apps/<slug>/permissions`),
+then accept the request on the organisation's installation (*Settings → GitHub Apps → Configure*). Nothing on
+n97 changes; control notices on the `installation` webhook. The run archive (`control/archive.py`) needs only
+**Contents: write**, which the App already has. Both run with code defaults, no `.env` line
+(`CONTROL_RUN_ARCHIVE=false` or `CONTROL_REPO_PAGES=false` turn them off).
+
 ## Deploying changes
 
 Merge to `main`. The Publish workflow runs the checks, builds both arches and moves
