@@ -111,6 +111,9 @@ class Project:
     start, holds slots, and is watched for failures."""
     gaps: bool = False
     """Run wheelie's gap check first and dispatch only when it finds a missing wheel."""
+    shared_units: bool = False
+    """The workflows build the same units under the same job names, so a unit that passes in one of them is fixed in
+    all: proot-apps' package check fails an app, a push fixes it, and build-on-commit's pass clears the failure."""
     note: str = ""
 
     @property
@@ -141,8 +144,9 @@ PROJECTS: tuple[Project, ...] = (
         offset=datetime.timedelta(0),
         cap=16,
         workflows=("Daily Package check", "build-on-commit"),
-        note="Daily package check of every app; it dispatches build-on-commit for the apps that changed, with the "
-        "same parallel. Its cron runs only where SCHEDULED_BY_CONTROL is not 'true' (forks).",
+        shared_units=True,
+        note="Daily package check of every app; it publishes the apps whose packages changed in the same pass. "
+        "Its cron runs only where SCHEDULED_BY_CONTROL is not 'true' (forks).",
     ),
     Project(
         repo="selkies-layers",
@@ -538,6 +542,8 @@ class Batch:
                     updated_at=_iso(now),
                 )
             )
+        if project.shared_units:
+            recovered += self.clear_elsewhere(project, run, workflow, outcomes)
         alerted = False
         if announce and (newly or recovered):
             embeds = []
@@ -563,6 +569,35 @@ class Batch:
         self.model.add_batch_run(record)
         self.state.stream.publish("batch_runs", [repo, run.id])
         return record
+
+    def clear_elsewhere(
+        self, project: Project, run: Run, workflow: str, outcomes: dict[str, tuple[str, str | None]]
+    ) -> list[str]:
+        """Units this run passed that an older run of another of the project's workflows failed: fixed there too."""
+        repo = self.full(project)
+        cleared: list[str] = []
+        for unit, (state, url) in sorted(outcomes.items()):
+            if state != "pass" or unit == RUN_UNIT:
+                continue
+            for other in project.workflows:
+                previous = self.model.batch_unit(repo, other, unit) if other != workflow else None
+                if previous is None or previous.state != "fail" or _at(previous.run_created_at) > _at(run.created_at):
+                    continue
+                self.model.upsert_batch_unit(
+                    previous.model_copy(
+                        update={
+                            "state": "pass",
+                            "since": run.updated_at,
+                            "run_id": run.id,
+                            "run_created_at": run.created_at,
+                            "html_url": url,
+                            "updated_at": _iso(self.now()),
+                        }
+                    )
+                )
+                if unit not in cleared:
+                    cleared.append(unit)
+        return cleared
 
     async def watch_dispatch(self, project: Project, now: datetime.datetime) -> None:
         """A dispatch GitHub accepted but whose run never appeared: reported once."""

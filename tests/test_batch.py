@@ -412,6 +412,35 @@ async def test_gap_check_errors_alert_after_a_streak(state: State, monkeypatch: 
 
 
 @pytest.mark.anyio
+async def test_a_proot_app_fixed_by_a_push_clears_its_package_check_failure(
+    state: State, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(state.discord, "webhook_url", "https://discord.com/api/webhooks/1/t")
+    repo = "proot-apps"
+    run(state, repo, 1, "Daily Package check", conclusion="failure", created=SLOT, branch="master")
+    job(state, repo, 1, 11, "solidcraft", conclusion="failure")
+    job(state, repo, 1, 12, "firefox")
+    github = FakeGitHub()
+    now = [SLOT + datetime.timedelta(hours=1)]
+    async with mock_client(github) as http:
+        state.discord.client = http
+        runner = make(state, http, now)
+        await runner.watch()
+        assert [u.unit for u in state.model.batch_units(f"{ORG}/{repo}", "fail")] == ["solidcraft"]
+        # The fix is pushed; build-on-commit builds solidcraft (and only it) green.
+        run(state, repo, 2, "build-on-commit", created=SLOT + datetime.timedelta(hours=2), branch="master")
+        job(state, repo, 2, 21, "solidcraft")
+        job(state, repo, 2, 22, "Ingest Metadata")
+        now[0] = SLOT + datetime.timedelta(hours=3)
+        await runner.watch()
+    assert state.model.batch_units(f"{ORG}/{repo}", "fail") == []
+    cleared = state.model.batch_unit(f"{ORG}/{repo}", "Daily Package check", "solidcraft")
+    assert cleared and cleared.run_id == 2
+    recovered = github.discord[-1][0]
+    assert recovered["title"] == "proot-apps · \U0001f7e2 recovered" and "`solidcraft`" in recovered["description"]
+
+
+@pytest.mark.anyio
 async def test_units_alert_when_they_start_failing_and_once_when_they_recover(
     state: State, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -247,7 +247,7 @@ but run wide matrices on the same 20 job slots. The list is code (`PROJECTS`), n
 
 | Project | Workflow | Slot | `parallel` cap |
 | --- | --- | --- | --- |
-| `proot-apps` | `package-check.yml` on `master` (it dispatches `build-on-commit.yml` with the same `parallel`) | daily 00:00 UTC | 16 |
+| `proot-apps` | `package-check.yml` on `master` (it publishes the apps whose packages changed itself; a pass in `build-on-commit.yml` clears an app's failure) | daily 00:00 UTC | 16 |
 | `selkies-layers` | `build.yml` on `main` | daily 04:30 UTC | 10 |
 | `wheelie` | `build.yml` on `main`, only when the gap check finds a missing wheel | hourly at :20 | 12 |
 
