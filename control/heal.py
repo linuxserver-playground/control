@@ -46,13 +46,19 @@ async def heal(state: State, delay: float = HEAL_DELAY_SECONDS) -> int:
     if github is None:
         return 0
     fixed = 0
+    names: dict[str, dict[Any, str]] = {}
     for repo, run_id in unfinished:
         try:
             data = (await github.get(f"/repos/{repo}/actions/runs/{run_id}")).json()
+            if repo not in names:
+                path = f"/repos/{repo}/actions/workflows"
+                workflows = await github.paginate(path, {"per_page": 100}, key="workflows")
+                names[repo] = {w["id"]: str(w["name"]) for w in workflows if w.get("id") and w.get("name")}
         except Exception:  # as below: the next completed run tries again
             log.exception("reading %s run %s failed", repo, run_id)
             continue
-        if state.model.upsert_run(Run.from_github(repo, data)) and data.get("status") == "completed":
+        run = Run.from_github(repo, data, names[repo].get(data.get("workflow_id")))
+        if state.model.upsert_run(run) and data.get("status") == "completed":
             fixed += 1
             state.stream.publish("runs", run_id)
     runs = state.model.runs_with_unfinished_jobs()

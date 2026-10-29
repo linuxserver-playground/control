@@ -50,7 +50,13 @@ class FakeGitHub:
             headers["Link"] = f'<{API}/orgs/example-org/repos?per_page=100&page=2>; rel="next"'
             return httpx.Response(200, json=repos[:1], headers=headers)
         if path == f"/repos/{REPO}/actions/runs":
-            return httpx.Response(200, json=fixture("api.runs"), headers=headers)
+            runs = fixture("api.runs")
+            runs["workflow_runs"][0]["name"] = "build sonarr"  # a run-name: the workflow's name comes from its id
+            return httpx.Response(200, json=runs, headers=headers)
+        if path == f"/repos/{REPO}/actions/workflows":
+            return httpx.Response(
+                200, json={"total_count": 1, "workflows": [{"id": 300, "name": "Build image"}]}, headers=headers
+            )
         if path == f"/repos/{REPO}/actions/runs/5001/jobs":
             return httpx.Response(200, json=fixture("api.jobs"), headers=headers)
         if path == f"/repos/{REPO}/pulls":
@@ -78,7 +84,7 @@ async def test_backfill_fills_every_table_and_is_idempotent(state: State) -> Non
     assert counts == {"repos": 2, "runs": 1, "jobs": 1, "pulls": 1, "issues": 1, "releases": 1}
     assert [r.name for r in state.model.repos()] == ["docker-sonarr", "workflows"]
     run = state.model.run(5001)
-    assert run and run.status == "completed" and run.conclusion == "success"
+    assert run and run.status == "completed" and run.conclusion == "success" and run.workflow_name == "Build image"
     job = state.model.job(9001)
     assert job and job.status == "completed" and len(job.steps) == 2
     assert [pr.number for pr in state.model.open_pull_requests()] == [7]

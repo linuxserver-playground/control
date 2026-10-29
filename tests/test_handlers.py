@@ -1,8 +1,9 @@
 from fastapi.testclient import TestClient
 
 from control import handlers
+from control.db import MIGRATIONS, _statements
 from control.github_app import AppCredentials
-from control.model import Model
+from control.model import Model, Run
 from control.state import State
 from control.stream import Broadcaster
 
@@ -31,6 +32,33 @@ def test_workflow_run_progresses_and_never_regresses(state: State) -> None:
     run = state.model.run(5001)
     assert run and run.status == "completed"
     assert state.model.counts()["runs"] == 1
+
+
+def test_a_run_name_never_replaces_the_workflow_name(state: State) -> None:
+    payload = fixture("workflow_run.requested")
+    payload["workflow_run"]["name"] = payload["workflow_run"]["display_title"] = "build changed"
+    handlers.process(state.model, state.stream, "workflow_run", payload)
+    run = state.model.run(5001)
+    assert run and run.workflow_name == "Build image" and run.display_title == "build changed"
+
+
+def test_the_run_name_repair_reads_the_workflow_name_from_deliveries(state: State) -> None:
+    """Migration 12, run again on rows stored before it."""
+    payload = fixture("workflow_run.requested")
+    payload["workflow_run"]["name"] = "build changed"
+    state.db.insert_delivery("d-1", "workflow_run", payload)
+    other = fixture("workflow_run.requested")
+    other["workflow_run"]["id"] = 5002
+    state.db.insert_delivery("d-2", "workflow_run", other)
+    for run_id in (5001, 5002):
+        data = {**payload["workflow_run"], "id": run_id}
+        state.model.upsert_run(Run.from_github(REPO, data))  # as stored before: the run-name
+    with state.db.connect() as conn:
+        for statement in _statements(MIGRATIONS[11]):
+            conn.execute(statement)
+    run, untouched = state.model.run(5001), state.model.run(5002)
+    assert run and run.workflow_name == "Build image"
+    assert untouched and untouched.workflow_name == "build changed"  # its webhook's names agree: not ours to fix
 
 
 def test_a_skipped_run_stays_completed_when_in_progress_arrives_last(state: State) -> None:

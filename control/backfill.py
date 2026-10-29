@@ -115,10 +115,12 @@ class Backfill:
         runs = await self.paginate(
             f"{API}/repos/{repo}/actions/runs", {"per_page": RUNS_PER_REPO}, key="workflow_runs", limit=RUNS_PER_REPO
         )
+        names = await self.workflow_names(repo) if runs else {}
         for data in runs:
-            if not is_build_run(data):
+            name = names.get(data.get("workflow_id"))
+            if not is_build_run({**data, "name": name or data.get("name")}):
                 continue
-            run = Run.from_github(repo, data)
+            run = Run.from_github(repo, data, name)
             existing = self.model.run(run.id)
             self.model.upsert_run(run)
             self.counts["runs"] += 1
@@ -132,6 +134,15 @@ class Backfill:
                 self.model.upsert_job(Job.from_github(repo, job_data))
                 self.counts["jobs"] += 1
             self.stream.publish("runs", run.id)
+
+    async def workflow_names(self, repo: str) -> dict[Any, str]:
+        """Workflow id -> name: a REST run carries only its id, and its `name` may be the run-name."""
+        try:
+            workflows = await self.paginate(f"{API}/repos/{repo}/actions/workflows", {"per_page": 100}, key="workflows")
+        except Exception:  # the run's own name stays the fallback
+            log.warning("reading the workflows of %s failed", repo, exc_info=True)
+            return {}
+        return {w["id"]: str(w["name"]) for w in workflows if isinstance(w, dict) and w.get("id") and w.get("name")}
 
     async def repo_pulls(self, repo: str) -> None:
         for data in await self.paginate(f"{API}/repos/{repo}/pulls", {"state": "open", "per_page": 100}):

@@ -70,11 +70,10 @@ def _repo_name(payload: dict[str, Any]) -> str:
 def workflow_run(model: Model, stream: Broadcaster, payload: dict[str, Any]) -> None:
     data = payload["workflow_run"]
     workflow = payload.get("workflow")
-    if isinstance(workflow, dict) and workflow.get("name") and not data.get("name"):
-        data = {**data, "name": workflow["name"]}
-    if not is_build_run(data):
+    name = str(workflow["name"]) if isinstance(workflow, dict) and workflow.get("name") else None
+    if not is_build_run({**data, "name": name or data.get("name")}):
         return
-    run = Run.from_github(_repo_name(payload), data)
+    run = Run.from_github(_repo_name(payload), data, name)
     if model.upsert_run(run):
         stream.publish("runs", run.id)
 

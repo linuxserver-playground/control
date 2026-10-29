@@ -345,6 +345,19 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX heal_reruns_state ON heal_reruns (state);
     """,
+    # 12: runs stored their run-name as the workflow's name (proot-apps' build-on-commit runs are "build changed",
+    # "build all", "build <app>"), so the batch watcher never saw them. Repair them from their webhooks, which carry
+    # the workflow's own name; one pass over deliveries, and only the runs whose names differ.
+    """
+    CREATE TEMP TABLE run_workflow_names AS
+        SELECT json_extract(payload, '$.workflow_run.id') AS id, json_extract(payload, '$.workflow.name') AS name
+        FROM deliveries
+        WHERE event = 'workflow_run' AND json_extract(payload, '$.workflow.name') IS NOT NULL
+        AND json_extract(payload, '$.workflow.name') != json_extract(payload, '$.workflow_run.name');
+    UPDATE runs SET workflow_name = (SELECT name FROM run_workflow_names WHERE run_workflow_names.id = runs.id)
+        WHERE id IN (SELECT id FROM run_workflow_names);
+    DROP TABLE run_workflow_names;
+    """,
 ]
 
 

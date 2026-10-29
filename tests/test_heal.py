@@ -61,14 +61,16 @@ def test_a_run_left_in_progress_with_no_running_job_is_healed(
         if (token := token_response(request)) is not None:
             return token
         seen.append(request.url.path)
-        return httpx.Response(200, json=completed)
+        if request.url.path.endswith("/actions/workflows"):
+            return httpx.Response(200, json={"total_count": 1, "workflows": [{"id": 300, "name": "Build image"}]})
+        return httpx.Response(200, json={**completed, "name": "build sonarr"})  # a run-name
 
     mock_github(state, monkeypatch, handler)
     assert asyncio.run(heal.heal(state, delay=0)) == 1
-    assert seen == [f"/repos/{REPO}/actions/runs/5001"]
+    assert seen == [f"/repos/{REPO}/actions/runs/5001", f"/repos/{REPO}/actions/workflows"]
     run = state.model.run(5001)
-    assert run and (run.status, run.conclusion) == ("completed", "skipped")
-    assert asyncio.run(heal.heal(state, delay=0)) == 0 and len(seen) == 1
+    assert run and (run.status, run.conclusion, run.workflow_name) == ("completed", "skipped", "Build image")
+    assert asyncio.run(heal.heal(state, delay=0)) == 0 and len(seen) == 2
 
 
 def test_only_a_completed_run_schedules_a_heal(state: State) -> None:

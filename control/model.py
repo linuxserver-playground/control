@@ -138,12 +138,14 @@ class Run(BaseModel):
     updated_at: str
 
     @classmethod
-    def from_github(cls, repo: str, data: dict[str, Any]) -> "Run":
+    def from_github(cls, repo: str, data: dict[str, Any], workflow_name: str | None = None) -> "Run":
+        """`workflow_name` is the workflow's own name. A run's `name` is its `run-name` when the workflow sets one
+        (proot-apps' build-on-commit: "build changed"), so it is only the fallback."""
         now = utcnow()
         return cls(
             id=int(data["id"]),
             repo=repo,
-            workflow_name=data.get("name"),
+            workflow_name=workflow_name or data.get("name"),
             event=data.get("event"),
             branch=data.get("head_branch"),
             head_sha=data.get("head_sha"),
