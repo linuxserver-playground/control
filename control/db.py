@@ -464,6 +464,32 @@ class Database:
             )
         return cursor.rowcount == 1
 
+    def has_delivery(self, delivery_id: str) -> bool:
+        with self.connect() as conn:
+            return conn.execute("SELECT 1 FROM deliveries WHERE delivery_id = ?", (delivery_id,)).fetchone() is not None
+
+    def prune_deliveries(self, before: str, batch: int = 5000) -> int:
+        """Delete deliveries received before `before`, `batch` rows a transaction. Returns how many."""
+        total = 0
+        while True:
+            with self.connect() as conn:
+                cursor = conn.execute(
+                    "DELETE FROM deliveries WHERE id IN (SELECT id FROM deliveries WHERE received_at < ? LIMIT ?)",
+                    (before, batch),
+                )
+            total += cursor.rowcount
+            if cursor.rowcount < batch:
+                return total
+
+    def vacuum_into(self, path: Path) -> None:
+        """A compacted, consistent copy of the database at `path`, taken while it is in use."""
+        with self.connect() as conn:
+            conn.execute("VACUUM INTO ?", (str(path),))
+
+    def size_bytes(self) -> int:
+        """The database file and its write-ahead log."""
+        return sum(p.stat().st_size for p in (self.path, self.path.with_name(self.path.name + "-wal")) if p.exists())
+
     def count_deliveries(self) -> int:
         with self.connect() as conn:
             row = conn.execute("SELECT COUNT(*) AS n FROM deliveries").fetchone()

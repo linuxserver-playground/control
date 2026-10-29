@@ -63,6 +63,8 @@ docker run --rm -p 8080:8080 -e PUID=1000 -e PGID=1000 -e CONTROL_PUBLIC_URL=htt
 | `CONTROL_EVENTS_SECRET` | unset                       | Shared with the `workflows` repo; signs the events POSTed to `/events`. Unset means `/events` answers 503. |
 | `CONTROL_BACKFILL_ON_START` | `false`                 | `true` runs one GitHub API backfill in the background after boot (once the app is configured and installed). |
 | `CONTROL_CONCURRENCY_LIMIT` | `20`                    | GitHub's concurrent job limit for the org; the queue page measures in-progress jobs against it. |
+| `CONTROL_DELIVERIES_KEEP_DAYS` | `14`                 | Webhook deliveries older than this are deleted daily (see *Self-healing*, housekeeping); `0` keeps them all. |
+| `CONTROL_SNAPSHOTS_KEEP` | `3`                       | Daily compacted copies of the database kept in `<data dir>/snapshots/`; `0` turns them off. |
 | `CONTROL_RUN_ARCHIVE` | `true`                        | Attach `run.json` and `logs.zip` to every live release once its run completes (see *Run archive*). |
 | `CONTROL_RUN_ARCHIVE_PER_PASS`, `CONTROL_RUN_ARCHIVE_ATTEMPTS`, `CONTROL_RUN_ARCHIVE_MAX_LOGS_MB` | `3`, `8`, `500` | Runs archived per minute at most; tries before giving up on one (backing off 5 minutes to 6 hours); the largest log archive attached. |
 | `CONTROL_PAGES_CHECK` | `true`                        | Warn once about every image repo without a GitHub Pages site and list them in the discovery record (see *Pages on image repos*). Read-only. |
@@ -544,7 +546,23 @@ GitHub loses webhooks, answers 500s, drops runners and flakes on clones and regi
 that. Control repairs what it can and reports only what stays broken.
 
 **Lost job webhooks** (`control/heal.py`): whenever a run completes, and once at start, control reads the jobs of
-every completed run that still holds an unfinished job from the API, so no job shows as running forever.
+every completed run that still holds an unfinished job from the API, so no job shows as running forever, and every
+run left unfinished for five minutes with no job running.
+
+**Reconcile** (`control/reconcile.py`): the backstop for every lost webhook, every 30 minutes and after every start,
+since a restart is when deliveries are dropped. It asks GitHub to redeliver each delivery since the previous pass
+that never reached control (from the App's delivery log, with the App's JWT; three tries at most per delivery), reads
+every run control holds as unfinished again with its jobs (dropping one GitHub no longer has), reads every open pull
+request and issue again, and adds the org's open ones it lacks (two searches). The pass is `last_reconcile` on
+`/status`. Control never depends on a restart's backfill to be right.
+
+**Housekeeping** (`control/housekeeping.py`), daily: deliveries older than `CONTROL_DELIVERIES_KEEP_DAYS` are deleted
+(the reconcile and backfill cover anything older than a replay would rebuild), and a compacted copy of the database
+goes to `<data dir>/snapshots/` (`CONTROL_SNAPSHOTS_KEEP` newest). Snapshots guard against a bad migration or a
+corrupted file, not against losing the disk. `/status` shows the database's size and the last pass.
+
+**Failing batch units that no longer exist** (`control/batch.py`): a unit's failure is dropped once its workflow
+has run for three days without building it (an app disabled or removed, a layer dropped, a wheel PyPI now ships).
 
 **Pages deploys** (`control/recover.py`): a deploy that failed leaves the previous site up, stale, and repeating one
 is always safe. Control sees a failure from a `reason: pages` run's failed `Pages` job, a live Publish whose

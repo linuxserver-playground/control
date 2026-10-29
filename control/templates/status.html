@@ -36,6 +36,27 @@
       <span class="muted">never</span>; the scheduler runs it every 30 minutes, or <code>python -m control discover</code>
     {% endif %}
   </dd>
+  <dt>Reconcile</dt>
+  <dd>
+    {% if page.last_reconcile %}
+      started {{ page.last_reconcile.started | timestamp }}{% if page.last_reconcile.finished %}, finished {{ page.last_reconcile.finished | timestamp }}{% else %}, <span class="warn">running</span>{% endif %}
+      {% for error in page.last_reconcile.errors %}<span class="bad">{{ error }}</span>{% endfor %}
+      {% if page.last_reconcile.counts %}<span class="muted">{% for k, n in page.last_reconcile.counts.items() %}{{ k }} {{ n }}{{ ", " if not loop.last }}{% endfor %}</span>{% endif %}
+    {% else %}
+      <span class="muted">never</span>; the scheduler runs it every 30 minutes and after every start
+    {% endif %}
+  </dd>
+  <dt>Housekeeping</dt>
+  <dd>
+    {% if page.last_housekeeping %}
+      {{ page.last_housekeeping.started | timestamp }}
+      {% for error in page.last_housekeeping.errors %}<span class="bad">{{ error }}</span>{% endfor %}
+      <span class="muted">{% if page.last_housekeeping.deliveries_pruned is defined %}deliveries pruned {{ page.last_housekeeping.deliveries_pruned }}{% endif %}{% if page.last_housekeeping.snapshot %}, snapshot {{ page.last_housekeeping.snapshot }}{% endif %}</span>
+    {% else %}
+      <span class="muted">never</span>; daily from the scheduler
+    {% endif %}
+  </dd>
+  <dt>Database</dt><dd>{{ (page.db_bytes / 1048576) | round(1) }} MiB</dd>
   <dt>Webhook deliveries</dt><dd>{{ page.deliveries_count }}</dd>
   <dt>Rows</dt><dd>{% for table, n in page.counts.items() %}{{ table }} {{ n }}{{ ", " if not loop.last }}{% endfor %}</dd>
   <dt>Last backfill</dt>

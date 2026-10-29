@@ -441,6 +441,31 @@ async def test_a_proot_app_fixed_by_a_push_clears_its_package_check_failure(
 
 
 @pytest.mark.anyio
+async def test_a_failing_unit_its_workflow_stopped_building_is_retired(
+    state: State, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = "proot-apps"
+    run(state, repo, 1, "Daily Package check", conclusion="failure", created=SLOT, branch="master")
+    job(state, repo, 1, 11, "oldapp", conclusion="failure")
+    job(state, repo, 1, 12, "firefox", conclusion="failure")
+    github = FakeGitHub()
+    now = [SLOT + datetime.timedelta(hours=1)]
+    async with mock_client(github) as http:
+        runner = make(state, http, now)
+        await runner.watch()
+        # oldapp is disabled; every night after builds the rest, and firefox keeps failing.
+        for night in range(1, 5):
+            created = SLOT + night * batch.DAY
+            run(state, repo, 1 + night, "Daily Package check", conclusion="failure", created=created, branch="master")
+            job(state, repo, 1 + night, 100 + night, "firefox", conclusion="failure")
+            now[0] = created + datetime.timedelta(hours=1)
+            await runner.watch()
+            failing = {u.unit for u in state.model.batch_units(f"{ORG}/{repo}", "fail")}
+            # Retired once a run finished more than RETIRE_AFTER after the last one that built it.
+            assert failing == ({"firefox", "oldapp"} if night <= 2 else {"firefox"})
+
+
+@pytest.mark.anyio
 async def test_units_alert_when_they_start_failing_and_once_when_they_recover(
     state: State, monkeypatch: pytest.MonkeyPatch
 ) -> None:

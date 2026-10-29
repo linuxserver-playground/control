@@ -72,6 +72,9 @@ OVERDUE_FLOOR = datetime.timedelta(hours=3)
 OVERDUE_UNKNOWN = datetime.timedelta(hours=12)
 """A run is overdue past twice its usual length (p95 of recent successes), at least an hour more and at least
 OVERDUE_FLOOR; with fewer than three past runs to go by, past OVERDUE_UNKNOWN."""
+RETIRE_AFTER = datetime.timedelta(days=3)
+"""A failing unit that no run of its workflow has built for this long, while that workflow kept running, is gone:
+an app disabled or removed, a layer dropped, a wheel PyPI now ships. Its failure is dropped quietly."""
 STALE_RUN = datetime.timedelta(hours=48)
 """An 'active' run older than this lost its completion webhook; it neither blocks a project nor holds slots."""
 JOB_MAX = datetime.timedelta(hours=6)
@@ -482,6 +485,7 @@ class Batch:
         for project in PROJECTS:
             try:
                 await self.evaluate_runs(project, now, since)
+                self.retire_units(project)
                 await self.watch_dispatch(project, now)
                 await self.watch_active(project, now)
             except Exception:
@@ -569,6 +573,26 @@ class Batch:
         self.model.add_batch_run(record)
         self.state.stream.publish("batch_runs", [repo, run.id])
         return record
+
+    def retire_units(self, project: Project) -> list[str]:
+        """Drop the failures of units their workflow's runs stopped building (RETIRE_AFTER). Returns them."""
+        repo = self.full(project)
+        newest: dict[str, datetime.datetime] = {}
+        for record in self.model.batch_runs(repo, 50):
+            if record.workflow is None or record.completed_at is None:
+                continue
+            at = _at(record.completed_at)
+            newest[record.workflow] = max(newest.get(record.workflow, at), at)
+        retired: list[str] = []
+        for unit in self.model.batch_units(repo, "fail"):
+            latest = newest.get(unit.workflow)
+            if latest is not None and latest - _at(unit.run_created_at) > RETIRE_AFTER:
+                self.model.delete_batch_unit(repo, unit.workflow, unit.unit)
+                retired.append(unit.unit)
+        if retired:
+            log.info("%s: retired failing units no run builds any more: %s", project.repo, ", ".join(retired))
+            self.state.stream.publish("batch_runs", [repo, 0])
+        return retired
 
     def clear_elsewhere(
         self, project: Project, run: Run, workflow: str, outcomes: dict[str, tuple[str, str | None]]

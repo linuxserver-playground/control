@@ -22,6 +22,7 @@ from . import scheduler as sched
 from .backfill import last_backfill
 from .db import Delivery
 from .fleet import helper_branches, helper_repos, last_discovery
+from .housekeeping import last_housekeeping
 from .manage import REASONS
 from .model import (
     PAGES_REASON,
@@ -41,6 +42,7 @@ from .model import (
     is_pages_job,
     stuck_threshold,
 )
+from .reconcile import last_reconcile
 from .state import State, state_of
 from .stream import Broadcaster, sse
 from .templating import package_version, render
@@ -319,6 +321,9 @@ class StatusPage(BaseModel):
     counts: dict[str, int]
     last_backfill: dict[str, Any] | None
     last_discovery: dict[str, Any] | None
+    last_reconcile: dict[str, Any] | None = None
+    last_housekeeping: dict[str, Any] | None = None
+    db_bytes: int = 0
     healing: dict[str, Any] | None = None
     """What self-healing is retrying now (recover.status): Pages sites and failed runs it will re-run."""
 
@@ -783,6 +788,9 @@ def status_page(state: State) -> StatusPage:
         counts=state.model.counts(),
         last_backfill=last_backfill(state),
         last_discovery=last_discovery(state),
+        last_reconcile=last_reconcile(state),
+        last_housekeeping=last_housekeeping(state),
+        db_bytes=state.db.size_bytes(),
         healing=recover.status(state),
     )
 

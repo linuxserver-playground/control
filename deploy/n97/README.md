@@ -74,6 +74,15 @@ assets with the App's existing **Contents: write**, and the Pages check (`contro
 site, enable it on that repo as the new-image recipe says. `CONTROL_RUN_ARCHIVE=false` or `CONTROL_PAGES_CHECK=false`
 in `.env` turn them off.
 
+## Reconcile, retention and backups
+
+The reconcile (`control/reconcile.py`) and the daily housekeeping (`control/housekeeping.py`) run with code
+defaults and need nothing on n97: redelivery uses the App's own JWT, which needs no permission. Deliveries older
+than 14 days are deleted (`CONTROL_DELIVERIES_KEEP_DAYS`), and three daily snapshots of the database are kept in
+`~/control/config/snapshots/` (`CONTROL_SNAPSHOTS_KEEP`). The snapshots stay on this disk: to survive losing it, copy
+`~/control/config/` (the snapshots and `github_app.json`) off the host, for example with the host's own backup job. It
+holds the App's private key, so treat the copy as a secret.
+
 ## Self-healing
 
 Retrying failed Pages deploys and re-running live builds that failed only in an infrastructure step

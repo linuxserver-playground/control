@@ -19,7 +19,9 @@ fleet, and lets org members act (re-run, cancel, dispatch, skip). Python 3.12+, 
   `control/mods.py` the docker-mods side: every branch's `mod.yml` into `mod_manifests` (GraphQL, and one branch on
   a push that touches it) and the GHCR tag check behind the hourly mod check of mods with an `upstream` block;
   `control/archive.py` the run archive: `run.json` and `logs.zip` (after a credential pattern check) attached to each
-  live release once its run completes; `control/heal.py` re-reads runs left unfinished with no job running, and the jobs of completed runs whose job webhooks never
+  live release once its run completes; `control/reconcile.py` the 30-minute backstop for lost webhooks: redelivery from the App's
+  delivery log, every unfinished run and every open thread read again; `control/housekeeping.py` daily delivery
+  retention and database snapshots; `control/heal.py` re-reads runs left unfinished with no job running, and the jobs of completed runs whose job webhooks never
   came; `control/recover.py` self-healing from the scheduler's minute loop: failed Pages deploys redeployed with
   backoff, live builds that failed only in an infrastructure step (`INFRA_STEPS`) re-run once, give-ups grouped
   into one Discord summary an hour; `control/pages.py` the read-only Pages check: one warning per image

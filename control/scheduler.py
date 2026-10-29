@@ -36,7 +36,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel
 
-from . import batch, events, mods, recover, relay, sandbox
+from . import batch, events, housekeeping, mods, reconcile, recover, relay, sandbox
 from .fleet import discover_once, discovery_due
 from .github import GitHub, installation_client
 from .model import Manifest, Model, ModLine, ModManifest, Release, SchedulerDecision
@@ -710,6 +710,8 @@ class Scheduler:
                     if relay.hub_refresh_due(self.state, self.clock()):
                         await relay.dispatch_hub_refresh(self.state, self.github, self.clock())
                     await recover.tick(self.state, self.github, self.clock())  # self-healing; never raises
+                    await reconcile.tick(self.state, self.github, self.clock())  # lost webhooks; never raises
+                    await housekeeping.tick(self.state, self.clock())  # retention and snapshots; never raises
             except asyncio.CancelledError:
                 raise
             except Exception:

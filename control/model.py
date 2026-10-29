@@ -834,6 +834,12 @@ class Model:
         with self.db.connect() as conn:
             return _upsert(conn, "runs", run.model_dump(), ("id",), guard=guard)
 
+    def delete_run(self, run_id: int) -> None:
+        """A run GitHub no longer has (deleted by hand, or with its repository's history)."""
+        with self.db.connect() as conn:
+            conn.execute("DELETE FROM jobs WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+
     def run(self, run_id: int) -> Run | None:
         with self.db.connect() as conn:
             row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
@@ -1071,6 +1077,10 @@ class Model:
     def upsert_batch_unit(self, unit: BatchUnit) -> None:
         with self.db.connect() as conn:
             _upsert(conn, "batch_units", unit.model_dump(), ("repo", "workflow", "unit"))
+
+    def delete_batch_unit(self, repo: str, workflow: str, unit: str) -> None:
+        with self.db.connect() as conn:
+            conn.execute("DELETE FROM batch_units WHERE repo = ? AND workflow = ? AND unit = ?", (repo, workflow, unit))
 
     def batch_units(self, repo: str, state: str | None = None) -> list[BatchUnit]:
         sql = "SELECT * FROM batch_units WHERE repo = ?"
