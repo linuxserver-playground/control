@@ -268,4 +268,6 @@ async def test_helper_repos_are_listed_apart_from_images(state: State) -> None:
     [helper] = page.helpers
     assert (helper.name, helper.branches, helper.success, helper.running) == ("docker-mods", 3, 1, 1)
     assert helper.failing == ["swag-dbip"] and helper.last_run_at == "2026-10-25T10:06:00+00:00"
+    [failure] = helper.failures
+    assert (failure.branch, failure.run_id, failure.conclusion) == ("swag-dbip", 4, "failure")
     assert "example-org/docker-mods" not in views.management_page(state, None).repos

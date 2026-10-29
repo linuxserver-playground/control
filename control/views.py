@@ -111,6 +111,16 @@ class FleetRow(BaseModel):
     """Skip-flag scopes that hold the branch back, plus `archived`."""
 
 
+class HelperFailure(BaseModel):
+    """A helper repo branch whose newest build failed."""
+
+    branch: str
+    run_id: int
+    conclusion: str
+    html_url: str | None
+    at: str
+
+
 class HelperRepo(BaseModel):
     """A `docker-*` repo that is not an image (no image.yml on its default branch), such as docker-mods, with the
     state of each branch's newest build."""
@@ -124,6 +134,8 @@ class HelperRepo(BaseModel):
     running: int
     failing: list[str]
     """Branches whose newest build failed, timed out or could not start."""
+    failures: list[HelperFailure] = []
+    """The same branches with the run that failed, newest first."""
     last_run_at: str | None
 
 
@@ -487,6 +499,7 @@ def fleet_rows(state: State, repos: list[Repo]) -> list[FleetRow]:
 
 def helper_row(state: State, repo: Repo) -> HelperRepo:
     runs = [r for r in state.model.latest_branch_runs(repo.full_name) if r.conclusion != "skipped"]
+    failed = [r for r in runs if r.conclusion in ("failure", "timed_out", "startup_failure")]
     return HelperRepo(
         repo=repo.full_name,
         name=repo.name,
@@ -494,7 +507,13 @@ def helper_row(state: State, repo: Repo) -> HelperRepo:
         branches=len(runs),
         success=sum(r.conclusion == "success" for r in runs),
         running=sum(r.status != "completed" for r in runs),
-        failing=sorted(r.branch or "" for r in runs if r.conclusion in ("failure", "timed_out", "startup_failure")),
+        failing=sorted(r.branch or "" for r in failed),
+        failures=[
+            HelperFailure(
+                branch=r.branch or "", run_id=r.id, conclusion=r.conclusion or "", html_url=r.html_url, at=r.created_at
+            )
+            for r in sorted(failed, key=lambda r: r.created_at, reverse=True)
+        ],
         last_run_at=max((r.created_at for r in runs), default=None),
     )
 
