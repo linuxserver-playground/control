@@ -32,6 +32,10 @@ LAST_DISCOVERY = "last_discovery"
 HELPER_REPOS = "helper_repos"
 """kv key: JSON list of the `docker-*` repos the last discovery found without an image.yml on their default
 branch (docker-mods, say). They are not images: the fleet board lists them apart and never links an image page."""
+HELPER_BRANCHES = "helper_branches"
+"""kv key: JSON `{"at": ..., "repos": {repo: [branch, ...]}}`, the branches each helper repo had at the last
+discovery, less any deleted since. The fleet board counts a helper's branch only while it exists: a deleted mod
+branch's last failed run would otherwise stay red for good."""
 REFRESH_INTERVAL = datetime.timedelta(minutes=30)
 MAX_CANDIDATE_BRANCHES = 50
 """How many non-default branches of one repo we read image.yml from (webtop has 21)."""
@@ -105,11 +109,13 @@ class Discovery:
         self.stream = stream
         self.counts: dict[str, int] = {"repos": 0, "branches": 0, "fetched": 0, "unchanged": 0, "errors": 0}
         self.helpers: list[str] = []
+        self.helper_branches: dict[str, list[str]] = {}
         self.has_pages: dict[str, bool] = {}
         """`has_pages` of every image repo this run read (not archived, image.yml on its default branch), as the repos
         list reports it; pages.py warns about the ones without a site."""
 
     async def run(self) -> dict[str, int]:
+        started = utcnow()
         repos = await self.github.paginate(
             f"/orgs/{self.org}/repos", {"per_page": 100, "type": "all", "sort": "full_name"}
         )
@@ -137,6 +143,7 @@ class Discovery:
             if known.full_name not in seen:
                 self.model.delete_manifests(known.full_name)
         self.model.db.set(HELPER_REPOS, json.dumps(sorted(self.helpers)))
+        self.model.db.set(HELPER_BRANCHES, json.dumps({"at": started, "repos": self.helper_branches}))
         log.info("fleet discovery: %s, helper repos: %s", self.counts, ", ".join(self.helpers) or "none")
         return dict(self.counts)
 
@@ -147,17 +154,14 @@ class Discovery:
             log.info("%s has no image.yml on %s: a helper repo, not an image", repo.full_name, repo.default_branch)
             self.model.delete_manifests(repo.full_name)
             self.helpers.append(repo.full_name)
+            self.helper_branches[repo.full_name] = await self.branches(repo.full_name, limit=1000)
             return []
         sha, data = default
         self.store(repo.full_name, repo.default_branch, sha, data)
         live = [repo.default_branch]
         tags = {str(_section(data, "release").get("tag"))}
         advertised = release_tags(data)[1:]  # the first is the default branch's own
-        branches = [
-            str(b["name"])
-            for b in await self.github.paginate(f"/repos/{repo.full_name}/branches", {"per_page": 100}, limit=200)
-            if isinstance(b, dict) and b.get("name") and b["name"] != repo.default_branch
-        ]
+        branches = [b for b in await self.branches(repo.full_name, limit=200) if b != repo.default_branch]
         # Branches named after an advertised tag first, so the cap never drops one of those.
         candidates = [b for b in branches if b in advertised] + [b for b in branches if b not in advertised]
         if len(candidates) > MAX_CANDIDATE_BRANCHES:
@@ -185,6 +189,10 @@ class Discovery:
             self.stream.publish("manifests", repo.full_name)
         self.counts["branches"] += len(live)
         return live
+
+    async def branches(self, repo: str, limit: int) -> list[str]:
+        found = await self.github.paginate(f"/repos/{repo}/branches", {"per_page": 100}, limit=limit)
+        return [str(b["name"]) for b in found if isinstance(b, dict) and b.get("name")]
 
     async def fetch(self, repo: str, ref: str) -> tuple[str, dict[str, Any]] | None:
         """(blob sha, parsed image.yml) at a ref, or None when the ref or the file does not exist."""
@@ -266,6 +274,29 @@ def helper_repos(state: State) -> set[str]:
     raw = state.db.get(HELPER_REPOS)
     names = json.loads(raw) if raw else []
     return {str(n) for n in names if not state.model.manifests(str(n))} if isinstance(names, list) else set()
+
+
+def helper_branches(state: State, repo: str) -> tuple[str, set[str]] | None:
+    """(when the list was read, the branches) of a helper repo, or None before a discovery has listed them."""
+    raw = state.db.get(HELPER_BRANCHES)
+    loaded = json.loads(raw) if raw else {}
+    names = loaded.get("repos", {}).get(repo) if isinstance(loaded, dict) else None
+    return (str(loaded["at"]), {str(n) for n in names}) if isinstance(names, list) else None
+
+
+def forget_deleted_branch(state: State, payload: dict[str, Any]) -> None:
+    """A push that deletes a helper repo's branch takes it off the fleet board at once, not at the next discovery."""
+    branch = push_branch(payload)
+    repository = payload.get("repository")
+    if not payload.get("deleted") or not branch or not isinstance(repository, dict):
+        return
+    raw = state.db.get(HELPER_BRANCHES)
+    loaded = json.loads(raw) if raw else {}
+    names = loaded.get("repos", {}).get(repository.get("full_name")) if isinstance(loaded, dict) else None
+    if isinstance(names, list) and branch in names:
+        names.remove(branch)
+        state.db.set(HELPER_BRANCHES, json.dumps(loaded))
+        state.stream.publish("repos", repository["full_name"])
 
 
 def last_discovery(state: State) -> dict[str, Any] | None:

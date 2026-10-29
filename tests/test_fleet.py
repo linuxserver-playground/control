@@ -233,6 +233,9 @@ class FakeOrgWithHelper(FakeRepo):
         if request.url.path == "/orgs/example-org/repos":
             mods = {**fixture("api.repos")[0], "name": "docker-mods", "full_name": "example-org/docker-mods"}
             return httpx.Response(200, json=[*fixture("api.repos"), mods])
+        if request.url.path == "/repos/example-org/docker-mods/branches":
+            names = ["master", "universal-git", "swag-dbip", "universal-tshoot"]
+            return httpx.Response(200, json=[{"name": b} for b in names])
         return super().__call__(request)
 
 
@@ -248,6 +251,7 @@ async def test_helper_repos_are_listed_apart_from_images(state: State) -> None:
         (4, "swag-dbip", "push", "completed", "failure"),
         (5, "swag-dbip", "pull_request", "completed", "success"),  # pull request runs do not count
         (6, "universal-tshoot", "workflow_dispatch", "in_progress", None),
+        (7, "sabnzbd-dropped", "push", "completed", "failure"),  # a branch deleted before the discovery
     ]:
         state.model.upsert_run(
             Run.from_github(
@@ -271,3 +275,10 @@ async def test_helper_repos_are_listed_apart_from_images(state: State) -> None:
     [failure] = helper.failures
     assert (failure.branch, failure.run_id, failure.conclusion) == ("swag-dbip", 4, "failure")
     assert "example-org/docker-mods" not in views.management_page(state, None).repos
+
+    # Deleting the failing branch takes it off the board at once; a push to another branch changes nothing.
+    push = {"ref": "refs/heads/universal-git", "repository": {"full_name": "example-org/docker-mods"}}
+    fleet.forget_deleted_branch(state, push)
+    fleet.forget_deleted_branch(state, {**push, "ref": "refs/heads/swag-dbip", "deleted": True})
+    [helper] = views.fleet_page(state).helpers
+    assert (helper.branches, helper.failing) == (2, [])

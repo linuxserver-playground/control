@@ -21,7 +21,7 @@ from . import batch as batches
 from . import scheduler as sched
 from .backfill import last_backfill
 from .db import Delivery
-from .fleet import helper_repos, last_discovery
+from .fleet import helper_branches, helper_repos, last_discovery
 from .manage import REASONS
 from .model import (
     PAGES_REASON,
@@ -498,7 +498,14 @@ def fleet_rows(state: State, repos: list[Repo]) -> list[FleetRow]:
 
 
 def helper_row(state: State, repo: Repo) -> HelperRepo:
-    runs = [r for r in state.model.latest_branch_runs(repo.full_name) if r.conclusion != "skipped"]
+    known = helper_branches(state, repo.full_name)
+    runs = [
+        r
+        for r in state.model.latest_branch_runs(repo.full_name)
+        if r.conclusion != "skipped"
+        # A branch deleted since its last run is gone; one made after the last discovery is not listed yet.
+        and (known is None or r.branch in known[1] or r.created_at > known[0])
+    ]
     failed = [r for r in runs if r.conclusion in ("failure", "timed_out", "startup_failure")]
     return HelperRepo(
         repo=repo.full_name,
