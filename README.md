@@ -63,8 +63,8 @@ docker run --rm -p 8080:8080 -e PUID=1000 -e PGID=1000 -e CONTROL_PUBLIC_URL=htt
 | `CONTROL_EVENTS_SECRET` | unset                       | Shared with the `workflows` repo; signs the events POSTed to `/events`. Unset means `/events` answers 503. |
 | `CONTROL_BACKFILL_ON_START` | `false`                 | `true` runs one GitHub API backfill in the background after boot (once the app is configured and installed). |
 | `CONTROL_CONCURRENCY_LIMIT` | `20`                    | GitHub's concurrent job limit for the org; the queue page measures in-progress jobs against it. |
-| `CONTROL_DELIVERIES_KEEP_DAYS` | `14`                 | Webhook deliveries older than this are deleted daily (see *Self-healing*, housekeeping); `0` keeps them all. |
-| `CONTROL_SNAPSHOTS_KEEP` | `3`                       | Daily compacted copies of the database kept in `<data dir>/snapshots/`; `0` turns them off. |
+| `CONTROL_DELIVERIES_KEEP_DAYS` | `7`                  | Webhook deliveries older than this are deleted daily (see *Self-healing*, housekeeping); `0` keeps them all. |
+| `CONTROL_SNAPSHOTS_KEEP` | `2`                       | Daily compacted copies of the database kept in `<data dir>/snapshots/`; `0` turns them off. |
 | `CONTROL_RUN_ARCHIVE` | `true`                        | Attach `run.json` and `logs.zip` to every live release once its run completes (see *Run archive*). |
 | `CONTROL_RUN_ARCHIVE_PER_PASS`, `CONTROL_RUN_ARCHIVE_ATTEMPTS`, `CONTROL_RUN_ARCHIVE_MAX_LOGS_MB` | `3`, `8`, `500` | Runs archived per minute at most; tries before giving up on one (backing off 5 minutes to 6 hours); the largest log archive attached. |
 | `CONTROL_PAGES_CHECK` | `true`                        | Warn once about every image repo without a GitHub Pages site and list them in the discovery record (see *Pages on image repos*). Read-only. |
@@ -558,8 +558,10 @@ request and issue again, and adds the org's open ones it lacks (two searches). T
 
 **Housekeeping** (`control/housekeeping.py`), daily: deliveries older than `CONTROL_DELIVERIES_KEEP_DAYS` are deleted
 (the reconcile and backfill cover anything older than a replay would rebuild), and a compacted copy of the database
-goes to `<data dir>/snapshots/` (`CONTROL_SNAPSHOTS_KEEP` newest). Snapshots guard against a bad migration or a
-corrupted file, not against losing the disk. `/status` shows the database's size and the last pass.
+goes to `<data dir>/snapshots/` (`CONTROL_SNAPSHOTS_KEEP` newest), unless the disk has less free than twice the
+database. Snapshots guard against a bad migration or a corrupted file, not against losing the disk. Intake stores only
+the events a handler reads (`handlers.STORED_EVENTS`); others, such as the `check_run` and `check_suite` an older App
+still subscribes to, are answered and dropped. `/status` shows the database's size, the free disk and the last pass.
 
 **Failing batch units that no longer exist** (`control/batch.py`): a unit's failure is dropped once its workflow
 has run for three days without building it (an app disabled or removed, a layer dropped, a wheel PyPI now ships).

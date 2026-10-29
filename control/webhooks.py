@@ -49,13 +49,16 @@ async def github_webhook(
     if not isinstance(payload, dict):
         raise HTTPException(400, "body is not a JSON object")
 
+    if x_github_event not in handlers.STORED_EVENTS:
+        log.debug("dropped %s %s: no handler reads it", x_github_event, payload.get("action", ""))
+        return Response(status_code=202)
     stored = state.db.insert_delivery(x_github_delivery, x_github_event, payload)
     if not stored:
         log.info("duplicate delivery %s ignored", x_github_delivery)
         return Response(status_code=202)
 
     # Both `installation` and `installation_repositories` carry the installation; "deleted" means it is gone.
-    if x_github_event in ("installation", "installation_repositories"):
+    if x_github_event in handlers.INSTALLATION_EVENTS:
         installation = payload.get("installation") or {}
         if payload.get("action") == "deleted":
             state.db.delete(INSTALLATION_ID)

@@ -7,6 +7,7 @@ set up in app.py). `/api/stream` is the server-sent events feed the live pages r
 
 import contextlib
 import datetime
+import shutil
 import urllib.parse
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -324,6 +325,7 @@ class StatusPage(BaseModel):
     last_reconcile: dict[str, Any] | None = None
     last_housekeeping: dict[str, Any] | None = None
     db_bytes: int = 0
+    disk_free_bytes: int = 0
     healing: dict[str, Any] | None = None
     """What self-healing is retrying now (recover.status): Pages sites and failed runs it will re-run."""
 
@@ -791,6 +793,7 @@ def status_page(state: State) -> StatusPage:
         last_reconcile=last_reconcile(state),
         last_housekeeping=last_housekeeping(state),
         db_bytes=state.db.size_bytes(),
+        disk_free_bytes=shutil.disk_usage(state.settings.data_dir).free,
         healing=recover.status(state),
     )
 

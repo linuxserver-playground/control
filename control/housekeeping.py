@@ -2,12 +2,14 @@
 Housekeeping, once a day from the scheduler's loop:
 
 - **Delivery retention.** Every webhook is stored whole so a handler added later can replay it, which makes
-  `deliveries` most of the database and grew it by about 17,000 rows a day in the playground. Deliveries older than
-  `deliveries_keep_days` are deleted (in batches, so webhook intake never waits long on the lock); a replay then
-  rebuilds that window, and the backfill and reconcile cover anything older. SQLite reuses the freed pages.
+  `deliveries` most of the database: 2.2 GB after the playground's first week, about 17,000 deliveries a day.
+  Deliveries older than `deliveries_keep_days`, and any of an event no handler reads (stored before intake dropped
+  them), are deleted in batches, so webhook intake never waits long on the lock; a replay then rebuilds that window,
+  and the backfill and reconcile cover anything older. SQLite reuses the freed pages.
 - **Snapshots.** A compacted copy of the database (`VACUUM INTO`, consistent while control runs) goes to
   `<data dir>/snapshots/`, keeping the newest `snapshots_keep`. They guard against a bad migration or a corrupted
-  file, not against losing the disk: copy the data dir off the host for that (deploy/n97/README.md).
+  file, not against losing the disk: copy the data dir off the host for that (deploy/n97/README.md). A snapshot is
+  skipped while the disk has less free than twice the database.
 
 Each pass is `last_housekeeping` on /status. Never raises.
 """
@@ -18,9 +20,11 @@ import asyncio
 import datetime
 import json
 import logging
+import shutil
 from pathlib import Path
 from typing import Any
 
+from . import handlers
 from .state import State
 
 log = logging.getLogger(__name__)
@@ -53,11 +57,16 @@ async def tick(state: State, now: datetime.datetime) -> dict[str, Any] | None:
     if settings.deliveries_keep_days > 0:
         before = (now - datetime.timedelta(days=settings.deliveries_keep_days)).isoformat(timespec="seconds")
         try:
-            record["deliveries_pruned"] = await asyncio.to_thread(state.db.prune_deliveries, before, PRUNE_BATCH)
+            record["deliveries_pruned"] = await asyncio.to_thread(
+                state.db.prune_deliveries, before, handlers.STORED_EVENTS, PRUNE_BATCH
+            )
         except Exception as exc:
             log.exception("housekeeping: pruning deliveries failed")
             record["errors"].append(f"prune: {type(exc).__name__}: {exc}")
-    if settings.snapshots_keep > 0:
+    free = shutil.disk_usage(settings.data_dir).free
+    if settings.snapshots_keep > 0 and free < 2 * state.db.size_bytes():
+        record["errors"].append(f"snapshot skipped: {free // 1048576} MiB free, under twice the database")
+    elif settings.snapshots_keep > 0:
         try:
             path = await asyncio.to_thread(snapshot, state, now, settings.snapshots_keep)
             record["snapshot"] = path.name

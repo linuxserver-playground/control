@@ -56,7 +56,7 @@
       <span class="muted">never</span>; daily from the scheduler
     {% endif %}
   </dd>
-  <dt>Database</dt><dd>{{ (page.db_bytes / 1048576) | round(1) }} MiB</dd>
+  <dt>Database</dt><dd>{{ (page.db_bytes / 1048576) | round(1) }} MiB, {{ (page.disk_free_bytes / 1073741824) | round(1) }} GiB free on its disk</dd>
   <dt>Webhook deliveries</dt><dd>{{ page.deliveries_count }}</dd>
   <dt>Rows</dt><dd>{% for table, n in page.counts.items() %}{{ table }} {{ n }}{{ ", " if not loop.last }}{% endfor %}</dd>
   <dt>Last backfill</dt>

@@ -468,14 +468,17 @@ class Database:
         with self.connect() as conn:
             return conn.execute("SELECT 1 FROM deliveries WHERE delivery_id = ?", (delivery_id,)).fetchone() is not None
 
-    def prune_deliveries(self, before: str, batch: int = 5000) -> int:
-        """Delete deliveries received before `before`, `batch` rows a transaction. Returns how many."""
+    def prune_deliveries(self, before: str, keep_events: frozenset[str], batch: int = 5000) -> int:
+        """Delete deliveries received before `before`, and any of an event not in `keep_events`, `batch` rows a
+        transaction. Returns how many."""
+        marks = ", ".join("?" for _ in keep_events)
         total = 0
         while True:
             with self.connect() as conn:
                 cursor = conn.execute(
-                    "DELETE FROM deliveries WHERE id IN (SELECT id FROM deliveries WHERE received_at < ? LIMIT ?)",
-                    (before, batch),
+                    "DELETE FROM deliveries WHERE id IN (SELECT id FROM deliveries "
+                    f"WHERE received_at < ? OR event NOT IN ({marks}) LIMIT ?)",
+                    (before, *sorted(keep_events), batch),
                 )
             total += cursor.rowcount
             if cursor.rowcount < batch:

@@ -38,9 +38,9 @@ PERMISSIONS: dict[str, str] = {
 
 # installation and installation_repositories are delivered to every app without being listed, and
 # GitHub rejects a manifest that names them; package events cannot be subscribed from a manifest at all.
+# check_run and check_suite were subscribed once and never read; an App created before has them ticked in its
+# settings, where they only cost deliveries (control drops them unstored, see handlers.STORED_EVENTS).
 EVENTS: list[str] = [
-    "check_run",
-    "check_suite",
     "issue_comment",
     "issues",
     "pull_request",

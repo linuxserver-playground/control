@@ -78,10 +78,15 @@ in `.env` turn them off.
 
 The reconcile (`control/reconcile.py`) and the daily housekeeping (`control/housekeeping.py`) run with code
 defaults and need nothing on n97: redelivery uses the App's own JWT, which needs no permission. Deliveries older
-than 14 days are deleted (`CONTROL_DELIVERIES_KEEP_DAYS`), and three daily snapshots of the database are kept in
+than 7 days are deleted (`CONTROL_DELIVERIES_KEEP_DAYS`), and two daily snapshots of the database are kept in
 `~/control/config/snapshots/` (`CONTROL_SNAPSHOTS_KEEP`). The snapshots stay on this disk: to survive losing it, copy
 `~/control/config/` (the snapshots and `github_app.json`) off the host, for example with the host's own backup job. It
 holds the App's private key, so treat the copy as a secret.
+
+The App created for the playground still subscribes to **Check run** and **Check suite**, which nothing reads:
+untick both under the App's settings, *Permissions & events*, *Subscribe to events*. Until then control answers
+them and stores nothing. The database file keeps its largest size (SQLite reuses the freed pages); to shrink it
+once, stop control and run `sqlite3 ~/control/config/control.db VACUUM`.
 
 ## Self-healing
 

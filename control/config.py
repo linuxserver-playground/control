@@ -65,10 +65,10 @@ class Settings(BaseModel):
     batch_live: tuple[str, ...] = ("wheelie", "proot-apps", "selkies-layers")
     """Batch projects control dispatches for real. The others are sized and recorded as dry runs, because their
     own cron still fires until the repo's `SCHEDULED_BY_CONTROL` variable is set. Env CONTROL_BATCH_LIVE (csv)."""
-    deliveries_keep_days: int = 14
+    deliveries_keep_days: int = 7
     """Webhook deliveries older than this are deleted daily (housekeeping.py); 0 keeps them all. Env
     CONTROL_DELIVERIES_KEEP_DAYS."""
-    snapshots_keep: int = 3
+    snapshots_keep: int = 2
     """Daily database snapshots kept in `<data dir>/snapshots/`; 0 turns them off. Env CONTROL_SNAPSHOTS_KEEP."""
     run_archive: bool = True
     """Attach `run.json` and `logs.zip` to every live release once its run completes (archive.py): GitHub deletes

@@ -179,3 +179,9 @@ HANDLERS: dict[str, Handler] = {
     f"{CONTROL_EVENT_PREFIX}build.started": control_build,
     f"{CONTROL_EVENT_PREFIX}build.summary": control_build,
 }
+
+INSTALLATION_EVENTS = frozenset({"installation", "installation_repositories"})
+"""Delivered to every App unasked; webhook intake reads the installation id from them."""
+STORED_EVENTS = frozenset(HANDLERS) | INSTALLATION_EVENTS
+"""The deliveries control stores. Anything else (check_run and check_suite, which an older App subscribed to) is
+answered and dropped: kept whole, they were a third of the database and nothing read them."""

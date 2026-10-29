@@ -25,7 +25,7 @@ from typing import Any
 
 import httpx
 
-from . import heal
+from . import handlers, heal
 from .github import GitHub
 from .github_app import app_jwt
 from .model import Issue, PullRequest
@@ -127,6 +127,8 @@ async def redeliver(state: State, since: datetime.datetime) -> int:
     for guid, items in attempts.items():
         if any(200 <= int(i.get("status_code") or 0) < 300 for i in items) or state.db.has_delivery(guid):
             continue
+        if items[0].get("event") not in handlers.STORED_EVENTS:
+            continue  # control would answer and drop it
         if sum(1 for i in items if i.get("redelivery")) >= REDELIVER_ATTEMPTS:
             continue
         newest = max(items, key=lambda i: str(i["delivered_at"]))

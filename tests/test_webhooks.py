@@ -17,11 +17,25 @@ def test_signature_helper() -> None:
 
 
 def test_valid_signature_stores_delivery(client: TestClient, configured: AppCredentials, state: State) -> None:
-    response = deliver(client, configured.webhook_secret, "ping", PING, delivery_id="ping-1")
+    payload = {"action": "created", "repository": {"full_name": "example-org/docker-x"}}
+    response = deliver(client, configured.webhook_secret, "issue_comment", payload, delivery_id="c-1")
     assert response.status_code == 202
     assert state.db.count_deliveries() == 1
     (stored,) = state.db.recent_deliveries()
-    assert (stored.event, stored.delivery_id, stored.action, stored.repo) == ("ping", "ping-1", None, None)
+    assert (stored.event, stored.delivery_id, stored.action, stored.repo) == (
+        "issue_comment",
+        "c-1",
+        "created",
+        "example-org/docker-x",
+    )
+
+
+def test_events_no_handler_reads_are_answered_and_dropped(
+    client: TestClient, configured: AppCredentials, state: State
+) -> None:
+    for event, payload in (("ping", PING), ("check_run", {"action": "completed"}), ("check_suite", {})):
+        assert deliver(client, configured.webhook_secret, event, payload, delivery_id=event).status_code == 202
+    assert state.db.count_deliveries() == 0
 
 
 def test_invalid_signature_is_401(client: TestClient, configured: AppCredentials, state: State) -> None:
