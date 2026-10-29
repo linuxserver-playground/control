@@ -33,6 +33,30 @@ def test_workflow_run_progresses_and_never_regresses(state: State) -> None:
     assert state.model.counts()["runs"] == 1
 
 
+def test_a_skipped_run_stays_completed_when_in_progress_arrives_last(state: State) -> None:
+    """A run whose jobs are all skipped is requested, in progress and completed in one second."""
+    at = "2026-10-29T11:01:22Z"
+    payloads = {name: fixture(f"workflow_run.{name}") for name in ("in_progress", "completed")}
+    for payload in payloads.values():
+        payload["workflow_run"]["updated_at"] = at
+    payloads["completed"]["workflow_run"]["conclusion"] = "skipped"
+    handlers.process(state.model, state.stream, "workflow_run", payloads["completed"])
+    handlers.process(state.model, state.stream, "workflow_run", payloads["in_progress"])
+    run = state.model.run(5001)
+    assert run and (run.status, run.conclusion) == ("completed", "skipped")
+
+    # A re-run is a new attempt: it moves the run back to in progress.
+    rerun = fixture("workflow_run.in_progress")
+    rerun["workflow_run"].update(run_attempt=2, updated_at="2026-10-29T12:00:00Z")
+    handlers.process(state.model, state.stream, "workflow_run", rerun)
+    run = state.model.run(5001)
+    assert run and (run.status, run.attempt) == ("in_progress", 2)
+    # And a late delivery of the first attempt cannot undo it.
+    handlers.process(state.model, state.stream, "workflow_run", payloads["completed"])
+    run = state.model.run(5001)
+    assert run and (run.status, run.attempt) == ("in_progress", 2)
+
+
 def test_workflow_job_keeps_steps_runner_and_labels(state: State) -> None:
     seed(state, "workflow_job.queued")
     job = state.model.job(9001)

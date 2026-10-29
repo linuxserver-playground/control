@@ -821,8 +821,16 @@ class Model:
     # -- runs -----------------------------------------------------------------------------------------------------
 
     def upsert_run(self, run: Run) -> bool:
+        """A re-run (a higher attempt) always wins. Within one attempt a newer `updated_at` wins, but a completed
+        run never goes back: a skipped run is requested, in progress and completed in the same second, and a late
+        `in_progress` delivery with the same `updated_at` would otherwise leave it running for good."""
+        guard = (
+            "excluded.attempt > runs.attempt OR (excluded.attempt = runs.attempt "
+            "AND excluded.updated_at >= runs.updated_at "
+            "AND (runs.status IS NOT 'completed' OR excluded.status = 'completed'))"
+        )
         with self.db.connect() as conn:
-            return _upsert(conn, "runs", run.model_dump(), ("id",), guard="excluded.updated_at >= runs.updated_at")
+            return _upsert(conn, "runs", run.model_dump(), ("id",), guard=guard)
 
     def run(self, run_id: int) -> Run | None:
         with self.db.connect() as conn:
@@ -946,6 +954,19 @@ class Model:
                 "ORDER BY jobs.run_id"
             ).fetchall()
         return [(str(row["repo"]), int(row["run_id"])) for row in rows]
+
+    def runs_left_unfinished(self, since: str, before: str) -> list[tuple[str, int]]:
+        """(repo, run id) of runs not marked completed, created after `since` and last updated before `before`, with
+        no unfinished job: a lost or out-of-order run webhook. A run still waiting on its jobs is left to them."""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT repo, id FROM runs WHERE (status IS NULL OR status != 'completed') "
+                "AND created_at > ? AND updated_at < ? "
+                "AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.run_id = runs.id "
+                "AND (jobs.status IS NULL OR jobs.status != 'completed')) ORDER BY id",
+                (since, before),
+            ).fetchall()
+        return [(str(row["repo"]), int(row["id"])) for row in rows]
 
     def jobs_with_status(self, status: str) -> list[Job]:
         with self.db.connect() as conn:
