@@ -155,6 +155,17 @@ def test_a_registry_login_failure_is_infrastructure() -> None:
         ([step("Set up buildx", "cancelled")], True),
         ([step("Build", "cancelled")], False),
         ([], True),  # no step at all: the runner never started or was lost
+        # The workflow's own second attempt at a checkout failed too: still infrastructure.
+        ([step("Check out repository", "failure"), step("Check out repository (retry)", "failure", 2)], True),
+        # The first attempt failed, its twin succeeded, the image failed: the image's problem, no re-run.
+        (
+            [
+                step("Check out repository", "failure"),
+                step("Check out repository (retry)", "success", 2),
+                step("Build", "failure", 5),
+            ],
+            False,
+        ),
     ],
 )
 def test_only_plain_infrastructure_steps_qualify(steps: list[dict[str, Any]], infra: bool) -> None:

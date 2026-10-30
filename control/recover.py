@@ -99,7 +99,9 @@ inputs were made and checked by earlier steps, and repeating them changes nothin
 only names top-level steps, so a composite that mixes a download with a check (`Read manifest`, `Emit build.json`:
 pip installs and validation) is left out, as are `Build`, `Test`, `Fail on test failure`, `Resolve upstream
 version`, the generated-file and shellcheck steps and every other step: those fail again on a re-run or are the
-image's own problem. `Post <step>` (an action's cleanup) counts like its step."""
+image's own problem. `Post <step>` (an action's cleanup) counts like its step, and so does `<step> (retry)`, the
+workflow's own second attempt at a checkout (the artifact steps retry inside their composite). A re-run is what
+is left when that second attempt failed too."""
 RUNNER_LOST = "the runner"
 """What a failed job with no failed step failed in: the runner was lost or never started."""
 CONSEQUENCE_STEPS = frozenset({"Fail if any job failed"})
@@ -135,17 +137,24 @@ def _log_action(state: State, action: str, target: str, result: str, detail: str
 # -- judging a failed run -------------------------------------------------------------------------------------------
 
 
+RETRY_SUFFIX = " (retry)"
+"""The workflow's second attempt at a checkout: the first attempt continues on error, this twin runs when it failed."""
+
+
 def is_infra_step(name: str) -> bool:
+    name = name.removesuffix(RETRY_SUFFIX)
     return name in INFRA_STEPS or (name.startswith("Post ") and name.removeprefix("Post ") in INFRA_STEPS)
 
 
 def failing_step(job: Job) -> str | None:
     """The step a failed job failed in: the first that failed, else the first cancelled (a runner lost mid-step,
-    a timeout), else None."""
+    a timeout), else None. A first attempt whose retry twin succeeded did not fail the job and is passed over."""
     steps = sorted(job.steps, key=lambda s: s.number if s.number is not None else 0)
+    twins = (s for s in steps if s.name.endswith(RETRY_SUFFIX) and s.conclusion == "success")
+    retried = {s.name.removesuffix(RETRY_SUFFIX) for s in twins}
     for conclusion in ("failure", "cancelled"):
         for step in steps:
-            if step.conclusion == conclusion:
+            if step.conclusion == conclusion and step.name not in retried:
                 return step.name
     return None
 
