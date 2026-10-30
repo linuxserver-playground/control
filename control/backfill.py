@@ -16,6 +16,7 @@ from typing import Any
 
 import httpx
 
+from .github import RETRY_DELAYS, RETRY_STATUSES
 from .github_app import API
 from .model import Issue, Job, Model, PullRequest, Release, Repo, Run, is_build_run
 from .state import LAST_BACKFILL, State
@@ -54,18 +55,25 @@ class Backfill:
         self.counts: dict[str, int] = {"repos": 0, "runs": 0, "jobs": 0, "pulls": 0, "issues": 0, "releases": 0}
 
     async def get(self, url: str, params: dict[str, Any] | None = None) -> httpx.Response:
-        """One GET with the rate limit respected: wait before the window is exhausted, and once more on a 403/429."""
-        for attempt in (1, 2):
+        """One GET with the rate limit respected: wait before the window is exhausted, once more on a 403/429, and
+        again after a 5xx (RETRY_DELAYS), so one bad answer does not end a pass of thousands of requests."""
+        limited = False
+        for attempt, delay in enumerate((*RETRY_DELAYS, None)):
             response = await self.http.get(url, params=params, headers=self.headers)
             self.requests += 1
             remaining = response.headers.get("X-RateLimit-Remaining")
             reset = response.headers.get("X-RateLimit-Reset")
             if (
                 response.status_code in (403, 429)
-                and attempt == 1
+                and not limited
                 and (remaining == "0" or "Retry-After" in response.headers)
             ):
+                limited = True
                 await self.sleep(_wait_seconds(reset, response.headers.get("Retry-After")))
+                continue
+            if response.status_code in RETRY_STATUSES and delay is not None:
+                log.warning("GET %s: %s, retrying in %.0fs (attempt %s)", url, response.status_code, delay, attempt + 1)
+                await self.sleep(delay)
                 continue
             response.raise_for_status()
             if remaining is not None and remaining.isdigit() and int(remaining) < RATE_LIMIT_FLOOR:

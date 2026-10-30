@@ -29,8 +29,27 @@ RUN_QUIET = datetime.timedelta(minutes=5)
 """How long a run with no unfinished job may sit unfinished before control asks the API: its jobs' webhooks and its
 own completion normally follow within seconds."""
 
+HEAL_INTERVAL = datetime.timedelta(minutes=5)
+"""How often the scheduler's loop heals on its own. A completed run triggers a heal too, which covers busy hours; this
+covers the quiet ones, when the one lost completion has no other run to repair it (reconcile.py comes every 30)."""
+
+_last_tick: datetime.datetime | None = None
+
 RUN_WINDOW = datetime.timedelta(days=2)
 """Older runs are left alone, so a run deleted on GitHub is not asked about forever."""
+
+
+async def tick(state: State, now: datetime.datetime) -> int | None:
+    """One heal when HEAL_INTERVAL has passed; how many runs and jobs it corrected, or None. Never raises."""
+    global _last_tick
+    if _last_tick is not None and now - _last_tick < HEAL_INTERVAL:
+        return None
+    _last_tick = now
+    try:
+        return await heal(state, delay=0)
+    except Exception:
+        log.exception("heal tick failed")
+        return 0
 
 
 async def heal(state: State, delay: float = HEAL_DELAY_SECONDS) -> int:

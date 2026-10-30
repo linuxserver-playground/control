@@ -76,3 +76,27 @@ def test_a_run_left_in_progress_with_no_running_job_is_healed(
 def test_only_a_completed_run_schedules_a_heal(state: State) -> None:
     assert heal.schedule_heal(state, {"action": "in_progress"}) is None
     assert json.dumps(fixture("workflow_run.completed")["action"]) == '"completed"'
+
+
+def test_the_loop_heals_every_five_minutes(
+    state: State, credentials: AppCredentials, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lost completion in a quiet hour has no other run's completion to trigger a heal; the scheduler's tick does."""
+    seed(state, "workflow_run.requested", "workflow_job.in_progress", "workflow_run.completed")
+    install(state, credentials)
+    monkeypatch.setattr(heal, "_last_tick", None)
+    completed: dict[str, Any] = fixture("workflow_job.completed")["workflow_job"]
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if (token := token_response(request)) is not None:
+            return token
+        seen.append(request.url.path)
+        return httpx.Response(200, json={"total_count": 1, "jobs": [completed]})
+
+    mock_github(state, monkeypatch, handler)
+    now = datetime.datetime(2026, 10, 30, 18, 0, tzinfo=datetime.UTC)
+    assert asyncio.run(heal.tick(state, now)) == 1
+    assert asyncio.run(heal.tick(state, now + datetime.timedelta(minutes=4))) is None
+    assert asyncio.run(heal.tick(state, now + heal.HEAL_INTERVAL)) == 0
+    assert seen == [f"/repos/{REPO}/actions/runs/5001/jobs"]

@@ -2,6 +2,7 @@
 
 import asyncio
 import datetime
+import json
 from typing import Any
 
 import httpx
@@ -88,6 +89,11 @@ class FakeGitHub:
 def fresh_process(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(reconcile, "_started", False)
 
+    async def no_sleep(self: GitHub, seconds: float) -> None:
+        pass
+
+    monkeypatch.setattr(GitHub, "sleep", no_sleep)
+
 
 def test_a_pass_repairs_lost_deliveries_runs_and_threads(
     state: State, credentials: AppCredentials, monkeypatch: pytest.MonkeyPatch
@@ -118,8 +124,15 @@ def test_a_pass_repairs_lost_deliveries_runs_and_threads(
     assert [i.number for i in state.model.open_issues()] == [12]
     assert reconcile.last_reconcile(state) == record
 
-    # Not due again for 30 minutes; due at once after a restart.
+    # A pass that redelivered something comes back after 5 minutes, not 30; a clean one waits the full interval.
     assert asyncio.run(reconcile.tick(state, GitHub(state.http, "ghs_token"), NOW)) is None
+    later = NOW + reconcile.RECONCILE_RETRY
+    again = asyncio.run(reconcile.tick(state, GitHub(state.http, "ghs_token"), later))
+    assert again is not None and again["counts"]["redelivered"] >= 1  # the fake never delivers, so still troubled
+    clean = {**again, "counts": {**again["counts"], "redelivered": 0}}
+    state.db.set(reconcile.LAST_RECONCILE, json.dumps(clean))  # a clean pass waits the full interval
+    assert not reconcile.due(state, later + reconcile.RECONCILE_RETRY)
+    assert reconcile.due(state, later + reconcile.RECONCILE_INTERVAL)
     monkeypatch.setattr(reconcile, "_started", False)
     assert asyncio.run(reconcile.tick(state, GitHub(state.http, "ghs_token"), NOW)) is not None
 
@@ -141,3 +154,38 @@ def test_a_failing_step_does_not_stop_the_others(
     record = asyncio.run(reconcile.tick(state, GitHub(state.http, "ghs_token"), NOW))
     assert record and record["counts"] == {"runs": 0, "threads": 0}
     assert len(record["errors"]) == 1 and record["errors"][0].startswith("redelivered: HTTPStatusError")
+
+
+def test_one_run_github_cannot_answer_for_does_not_stop_the_pass(
+    state: State, credentials: AppCredentials, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GitHub's 2026-10-30 outage: one 502 among the unfinished runs ended the whole runs step for 30 minutes."""
+    install(state, credentials)
+    requested = fixture("workflow_run.requested")["workflow_run"]
+    state.model.upsert_run(Run.from_github(REPO, requested, "Build image"))
+    state.model.upsert_run(Run.from_github(REPO, {**requested, "id": 5002}, "Build image"))
+    completed = {**fixture("workflow_run.completed")["workflow_run"], "name": "build changed"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/app/hook/deliveries":
+            return httpx.Response(200, json=[])
+        if path.endswith("/actions/runs/5001"):
+            return httpx.Response(502, json={"message": "Bad Gateway"})  # again and again
+        if path.endswith("/actions/runs/5002"):
+            return httpx.Response(200, json={**completed, "id": 5002})
+        if path.endswith("/actions/workflows"):
+            return httpx.Response(200, json={"total_count": 1, "workflows": [{"id": 300, "name": "Build image"}]})
+        if path.endswith("/actions/runs/5002/jobs"):
+            return httpx.Response(200, json={"total_count": 0, "jobs": []})
+        if path == "/search/issues":
+            return httpx.Response(200, json={"total_count": 0, "items": []})
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    mock_github(state, monkeypatch, handler)
+    record = asyncio.run(reconcile.tick(state, GitHub(state.http, "ghs_token"), NOW))
+    assert record and record["counts"] == {"redelivered": 0, "runs": 1, "threads": 0}
+    assert len(record["errors"]) == 1 and record["errors"][0].startswith("runs: 1 could not be read; first: ")
+    run = state.model.run(5002)
+    assert run and run.status == "completed"
+    assert state.model.run(5001) is not None and reconcile.troubled(record)

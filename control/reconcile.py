@@ -8,10 +8,13 @@ run completes; this is the backstop, from the scheduler's loop every RECONCILE_I
   times, and goes through the same handlers as the original. That repairs what a restart or an outage dropped.
 - **Runs.** Every run control holds as unfinished, created within RUN_WINDOW, is read again with its jobs, and one
   GitHub no longer has is dropped, so a lost completion never holds the fleet pages or a batch slot until a timeout.
+  One run GitHub cannot answer for is skipped, not the pass.
 - **Threads.** Every open pull request and issue control holds is read again, and the org's open ones it lacks are
   added (one search each), so a lost close or open never lingers on the fleet pages or for triage.
 
-Each pass is one log line and `last_reconcile` on /status. Never raises.
+Each pass is one log line and `last_reconcile` on /status. Never raises. A pass that redelivered anything or hit an
+error is followed by another after RECONCILE_RETRY, not RECONCILE_INTERVAL: both mean GitHub is dropping or
+refusing things right now, and that is when the backstop earns its keep.
 """
 
 from __future__ import annotations
@@ -36,6 +39,8 @@ log = logging.getLogger(__name__)
 LAST_RECONCILE = "last_reconcile"
 """kv key: JSON summary of the last pass (started, finished, counts, errors), shown on /status."""
 RECONCILE_INTERVAL = datetime.timedelta(minutes=30)
+RECONCILE_RETRY = datetime.timedelta(minutes=5)
+"""The interval after a pass that found lost deliveries or could not finish a step."""
 REDELIVER_LOOKBACK = datetime.timedelta(hours=24)
 """The furthest back a pass reads GitHub's delivery log, after a long stop; normally it reads since the last pass."""
 REDELIVER_MARGIN = datetime.timedelta(minutes=10)
@@ -66,7 +71,15 @@ def due(state: State, now: datetime.datetime) -> bool:
     last = last_reconcile(state)
     if not _started or not last or not last.get("started"):
         return True
-    return now - datetime.datetime.fromisoformat(str(last["started"])) >= RECONCILE_INTERVAL
+    interval = RECONCILE_RETRY if troubled(last) else RECONCILE_INTERVAL
+    return now - datetime.datetime.fromisoformat(str(last["started"])) >= interval
+
+
+def troubled(last: dict[str, Any]) -> bool:
+    """Whether the pass found GitHub dropping deliveries or failing requests."""
+    counts = last.get("counts")
+    redelivered = counts.get("redelivered") if isinstance(counts, dict) else None
+    return bool(last.get("errors")) or bool(redelivered)
 
 
 async def tick(state: State, github: GitHub, now: datetime.datetime) -> dict[str, Any] | None:
@@ -83,7 +96,7 @@ async def tick(state: State, github: GitHub, now: datetime.datetime) -> dict[str
     state.db.set(LAST_RECONCILE, json.dumps(record))
     steps: tuple[tuple[str, Callable[[], Awaitable[int]]], ...] = (
         ("redelivered", partial(redeliver, state, since)),
-        ("runs", partial(runs, state, github, now)),
+        ("runs", partial(runs, state, github, now, record["errors"])),
         ("threads", partial(threads, state, github)),
     )
     for name, step in steps:
@@ -141,17 +154,25 @@ async def redeliver(state: State, since: datetime.datetime) -> int:
 # -- runs ------------------------------------------------------------------------------------------------------------
 
 
-async def runs(state: State, github: GitHub, now: datetime.datetime) -> int:
-    """Read every unfinished run of the last RUN_WINDOW again, with its jobs. Returns how many runs and jobs changed."""
+async def runs(state: State, github: GitHub, now: datetime.datetime, errors: list[str] | None = None) -> int:
+    """Read every unfinished run of the last RUN_WINDOW again, with its jobs. Returns how many runs and jobs changed.
+    A run GitHub cannot answer for (a 502 under load) is logged, summarised in `errors` and left for the next pass."""
     since = _iso(now - RUN_WINDOW)
     names: dict[str, dict[Any, str]] = {}
     changed = 0
+    failed: list[str] = []
     for run in state.model.active_runs():
         if run.created_at < since:
             continue
-        changed += await heal.read_run(state, github, run.repo, run.id, names)
-        if state.model.run(run.id) is not None:
-            changed += await heal.read_jobs(state, github, run.repo, run.id)
+        try:
+            changed += await heal.read_run(state, github, run.repo, run.id, names)
+            if state.model.run(run.id) is not None:
+                changed += await heal.read_jobs(state, github, run.repo, run.id)
+        except Exception as exc:  # one run's failure must not stop the others
+            log.exception("reconcile: reading %s run %s failed", run.repo, run.id)
+            failed.append(f"{run.repo} run {run.id}: {type(exc).__name__}: {exc}")
+    if failed and errors is not None:
+        errors.append(f"runs: {len(failed)} could not be read; first: {failed[0]}")
     return changed
 
 

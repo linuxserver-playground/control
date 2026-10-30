@@ -1,10 +1,13 @@
 """
 The authenticated GitHub REST client the scheduler, fleet discovery and member actions share: one
 installation token, the standard headers, `raise_for_status` everywhere, and pagination over `Link`
-headers. The backfill keeps its own copy with rate-limit sleeping because it is the only caller that
-makes thousands of requests in a row.
+headers. Reads are asked again after a 502, 503 or 504 (GitHub's outage of 2026-10-30 answered one request in
+a few hundred with a 502, and each one ended a whole reconcile or backfill pass); writes never are. The backfill
+keeps its own copy with rate-limit sleeping because it is the only caller that makes thousands of requests in a
+row.
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -14,6 +17,12 @@ from .github_app import API
 from .state import State
 
 log = logging.getLogger(__name__)
+
+RETRY_STATUSES = frozenset({502, 503, 504})
+"""Answers GitHub gives while degraded; a read asked again a moment later usually succeeds."""
+RETRY_DELAYS = (1.0, 4.0)
+"""Seconds before the second and third attempt of a read. Writes are never repeated: a dispatch that answered 502
+may still have happened."""
 
 
 def headers_for(token: str) -> dict[str, str]:
@@ -36,11 +45,32 @@ class GitHub:
         self.token = token
         self.headers = headers_for(token)
 
+    async def sleep(self, seconds: float) -> None:
+        """The wait between attempts; tests replace it."""
+        await asyncio.sleep(seconds)
+
+    async def _read(self, url: str, params: dict[str, Any] | None, headers: dict[str, str]) -> httpx.Response:
+        """One GET, asked again after a 5xx or a dropped connection (RETRY_DELAYS), then `raise_for_status`."""
+        for attempt, delay in enumerate((*RETRY_DELAYS, None)):
+            try:
+                response = await self.http.get(url, params=params, headers=headers)
+            except httpx.TransportError:
+                if delay is None:
+                    raise
+                log.warning("GET %s: connection failed, retrying in %.0fs", url, delay)
+                await self.sleep(delay)
+                continue
+            if response.status_code in RETRY_STATUSES and delay is not None:
+                log.warning("GET %s: %s, retrying in %.0fs (attempt %s)", url, response.status_code, delay, attempt + 1)
+                await self.sleep(delay)
+                continue
+            response.raise_for_status()
+            return response
+        raise AssertionError("unreachable")
+
     async def get(self, path: str, params: dict[str, Any] | None = None) -> httpx.Response:
         url = path if path.startswith("https://") else f"{API}{path}"
-        response = await self.http.get(url, params=params, headers=self.headers)
-        response.raise_for_status()
-        return response
+        return await self._read(url, params, self.headers)
 
     async def get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
         return (await self.get(path, params)).json()
@@ -48,9 +78,7 @@ class GitHub:
     async def get_text(self, path: str, params: dict[str, Any] | None = None) -> str:
         """A file's raw bytes from the contents API (`/repos/{repo}/contents/{path}`), as text."""
         headers = {**self.headers, "Accept": "application/vnd.github.raw+json"}
-        response = await self.http.get(f"{API}{path}", params=params, headers=headers)
-        response.raise_for_status()
-        return response.text
+        return (await self._read(f"{API}{path}", params, headers)).text
 
     async def post(self, path: str, json: dict[str, Any] | None = None) -> httpx.Response:
         response = await self.http.post(f"{API}{path}", json=json, headers=self.headers)

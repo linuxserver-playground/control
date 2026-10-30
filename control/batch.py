@@ -9,7 +9,8 @@ Sizing: `parallel = clamp(limit - reserve - busy, minimum, min(maximum, the work
 - every job in progress outside the batch projects;
 - every job queued outside them: an image build waiting for a runner takes one within seconds;
 - for each batch project with a run going, the width it was started with or its jobs in progress, whichever is
-  more: between two matrix stages a run briefly holds nothing, then takes its width again.
+  more: between two matrix stages a run briefly holds nothing, then takes its width again. A push or cron run was
+  not started by control, so it holds the workflow default, not the width of control's last dispatch.
 
 Queued jobs of the batch projects are left out. A run holds most of its matrix back with `max-parallel` and GitHub
 shows those jobs as queued (a proot-apps package check queues about a hundred), so they are not demand and never
@@ -262,7 +263,9 @@ def capacity(state: State, now: datetime.datetime, exclude: str | None = None) -
         if project.repo != exclude:
             runs = active_runs(state.model, org, project, now)
             last = last_live_dispatch(state.model, project)
-            if last and (now - _at(last.at) < PENDING or any(_at(r.created_at) >= _at(last.at) for r in runs)):
+            # Only a dispatched run carries the width control chose; a push or cron run has the workflow default.
+            dispatched = [r for r in runs if r.event in (None, "workflow_dispatch")]
+            if last and (now - _at(last.at) < PENDING or any(_at(r.created_at) >= _at(last.at) for r in dispatched)):
                 width = int(last.info.get("parallel") or DEFAULT_PARALLEL)
             elif runs:
                 width = DEFAULT_PARALLEL

@@ -132,6 +132,28 @@ async def test_backfill_retries_once_after_a_secondary_limit(state: State) -> No
     assert response.status_code == 200 and attempts == 2 and sleeps == [3.0]
 
 
+@pytest.mark.anyio
+async def test_backfill_asks_again_after_a_502(state: State) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(502, json={"message": "Bad Gateway"})
+        return httpx.Response(200, json=[], headers={"X-RateLimit-Remaining": "100"})
+
+    sleeps: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    async with mock_client(handler) as http:
+        backfill = Backfill(http, "t", "example-org", state.model, state.stream, sleep)
+        response = await backfill.get(f"{API}/orgs/example-org/repos")
+    assert response.status_code == 200 and attempts == 2 and sleeps == [1.0]
+
+
 def test_backfill_once_records_outcome(
     client: TestClient, state: State, configured: AppCredentials, monkeypatch: pytest.MonkeyPatch
 ) -> None:

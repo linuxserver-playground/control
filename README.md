@@ -545,16 +545,23 @@ repo that loses its site again is reported again. Every discovery lists the repo
 GitHub loses webhooks, answers 500s, drops runners and flakes on clones and registry calls; nobody should babysit
 that. Control repairs what it can and reports only what stays broken.
 
-**Lost job webhooks** (`control/heal.py`): whenever a run completes, and once at start, control reads the jobs of
-every completed run that still holds an unfinished job from the API, so no job shows as running forever, and every
-run left unfinished for five minutes with no job running.
+**Lost job webhooks** (`control/heal.py`): whenever a run completes, every five minutes from the scheduler's loop,
+and once at start, control reads the jobs of every completed run that still holds an unfinished job from the API, so
+no job shows as running forever, and every run left unfinished for five minutes with no job running. The loop's heal
+is for quiet hours, when the one lost completion has no other run's completion to trigger it.
 
 **Reconcile** (`control/reconcile.py`): the backstop for every lost webhook, every 30 minutes and after every start,
 since a restart is when deliveries are dropped. It asks GitHub to redeliver each delivery since the previous pass
 that never reached control (from the App's delivery log, with the App's JWT; three tries at most per delivery), reads
-every run control holds as unfinished again with its jobs (dropping one GitHub no longer has), reads every open pull
-request and issue again, and adds the org's open ones it lacks (two searches). The pass is `last_reconcile` on
-`/status`. Control never depends on a restart's backfill to be right.
+every run control holds as unfinished again with its jobs (dropping one GitHub no longer has, skipping one it cannot
+answer for), reads every open pull request and issue again, and adds the org's open ones it lacks (two searches). The
+pass is `last_reconcile` on `/status`. A pass that redelivered anything or hit an error is followed by another after
+five minutes: GitHub is dropping or refusing things right now, and that is when the backstop earns its keep. Control
+never depends on a restart's backfill to be right.
+
+**Degraded GitHub** (`control/github.py`): every read is asked again after a 502, 503, 504 or a dropped connection
+(twice, 1 s then 4 s), the backfill's too. Writes never are: a dispatch that answered 502 may still have happened.
+During GitHub's 2026-10-30 incident one 502 in a few hundred requests ended whole reconcile and backfill passes.
 
 **Housekeeping** (`control/housekeeping.py`), daily: deliveries older than `CONTROL_DELIVERIES_KEEP_DAYS` are deleted
 (the reconcile and backfill cover anything older than a replay would rebuild), and a compacted copy of the database

@@ -222,6 +222,16 @@ def test_capacity_counts_running_and_waiting_but_never_held_jobs(state: State) -
     assert cap.batch == {"proot-apps": 12} and cap.free == 0 and cap.busy
     assert cap.width(10) == 2  # never below the minimum
 
+    # A push run after that dispatch was not started by control: it holds the workflow default, not 12 (2026-10-30,
+    # a proot-apps push building 29 apps 4 wide was counted as 12 and left the fleet "busy" at 10 jobs).
+    state.model.delete_run(2)
+    run(state, "proot-apps", 4, "build-on-commit", status="in_progress", branch="master", event="push")
+    for n in range(2):
+        job(state, "proot-apps", 4, 500 + n, f"base{n}", status="in_progress")
+    later = SLOT + datetime.timedelta(minutes=20)  # the dispatch is no longer pending either
+    cap = batch.capacity(state, later, exclude="selkies-layers")
+    assert cap.batch == {"proot-apps": 4} and cap.free == 8
+
 
 def test_capacity_holds_a_fresh_dispatch_before_its_run_appears(state: State) -> None:
     state.model.add_decision(
