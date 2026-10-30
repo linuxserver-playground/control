@@ -1225,6 +1225,16 @@ class Model:
                 "UPDATE builds SET discord_message_id = ? WHERE repo = ? AND run_id = ?", (message_id, repo, run_id)
             )
 
+    def set_build_result(self, repo: str, run_id: int, result: str, failed_job: str | None, now: str) -> bool:
+        """Overrule a build's result (a run that failed after its summary said success). True when a row changed."""
+        with self.db.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE builds SET result = ?, failed_job = ?, updated_at = ? "
+                "WHERE repo = ? AND run_id = ? AND result IS NOT ?",
+                (result, failed_job, now, repo, run_id, result),
+            )
+            return cursor.rowcount > 0
+
     def build(self, repo: str, run_id: int) -> Build | None:
         with self.db.connect() as conn:
             row = conn.execute("SELECT * FROM builds WHERE repo = ? AND run_id = ?", (repo, run_id)).fetchone()

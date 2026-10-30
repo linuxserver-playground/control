@@ -25,7 +25,7 @@ from . import archive, handlers
 from .config import Settings
 from .db import utcnow
 from .github import installation_client
-from .model import IGNORED_WORKFLOW_NAMES, Build, Model
+from .model import IGNORED_WORKFLOW_NAMES, Build, Model, is_build_run
 from .state import State, state_of
 from .webhooks import signature_valid
 
@@ -444,6 +444,50 @@ async def announce(state: State, build: Build, event_type: str) -> None:
     message_id = await state.discord.post(embeds=[embed])
     if message_id:
         state.model.set_build_message(build.repo, build.run_id, message_id)
+
+
+FAILED_CONCLUSIONS = frozenset({"failure", "cancelled", "timed_out", "startup_failure"})
+
+
+def schedule_conclusion_check(state: State, payload: dict[str, Any]) -> asyncio.Task[Any] | None:
+    """Fire-and-forget from the webhook handler: a completed run that did not succeed."""
+    data = payload.get("workflow_run") or {}
+    if payload.get("action") != "completed" or data.get("conclusion") not in FAILED_CONCLUSIONS:
+        return None
+    return state.spawn(reconcile_conclusion(state, payload))
+
+
+async def reconcile_conclusion(state: State, payload: dict[str, Any]) -> bool:
+    """A run that concluded failure after its `build.summary` said success.
+
+    The summary is posted by the Publish job before its last steps, from the outcomes it folds in; a step it did not
+    fold in (the bundle download, until 2026-10-30) failed the job after a green summary, and Discord showed a green
+    build with no version (docker-grocy). GitHub's conclusion is the run's truth: unless the build released (a release
+    that stands is a success whatever failed after it, a Pages deploy is retried on its own), the build becomes a
+    failure of job "publish" and its message turns red. Never raises. True when the build was overruled."""
+    data = payload.get("workflow_run") or {}
+    repo = str((payload.get("repository") or {}).get("full_name") or "")
+    try:
+        run_id = int(data.get("id") or 0)
+    except (TypeError, ValueError):
+        return False
+    if not repo or not run_id or not is_build_run({**data, "name": data.get("name")}):
+        return False
+    build = state.model.build(repo, run_id)
+    if build is None or build.result != "success" or build.release_url:
+        return False
+    conclusion = str(data.get("conclusion"))
+    result = "cancelled" if conclusion == "cancelled" else "failure"
+    if not state.model.set_build_result(repo, run_id, result, "publish", utcnow()):
+        return False
+    log.warning(
+        "%s run %s concluded %s after its summary said success; the build is now a %s", repo, run_id, conclusion, result
+    )
+    build = state.model.build(repo, run_id)
+    if build is not None:
+        state.stream.publish("builds", [build.repo, build.run_id])
+        await announce(state, build, "build.reconciled")
+    return True
 
 
 async def notify_hub(state: State, build: Build) -> None:

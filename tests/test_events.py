@@ -438,3 +438,48 @@ def test_only_a_completed_pr_report_run_refreshes_the_messages(state: State) -> 
         return [await t if t else None for t in tasks]
 
     assert asyncio.run(run()) == [0, None, None]
+
+
+def test_run_that_fails_after_a_green_summary_turns_the_build_red(
+    client: TestClient, state: State, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Publish job's bundle download failed after the build jobs passed: the summary said success with no bundle
+    and no release, the job went red. GitHub's conclusion overrules the summary (docker-grocy, 2026-10-30)."""
+    from control.events import reconcile_conclusion, schedule_conclusion_check
+
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, json.loads(request.content)))
+        return httpx.Response(200, json={"id": "msg-1"})
+
+    mock_discord(state, monkeypatch, handler)
+    summary = fixture("control.build.summary")
+    del summary["release_url"]
+    summary["bundle"] = None
+    assert post_event(client, summary).status_code == 202
+    assert calls[-1][0] == "POST" and calls[-1][1]["embeds"][0]["color"] == GREEN
+
+    completed = fixture("workflow_run.completed")
+    completed["workflow_run"]["conclusion"] = "failure"
+    assert schedule_conclusion_check(state, {**completed, "action": "requested"}) is None
+    assert asyncio.run(reconcile_conclusion(state, completed)) is True
+    build = state.model.build(REPO, 5001)
+    assert build and build.result == "failure" and build.failed_job == "publish"
+    embed = calls[-1][1]["embeds"][0]
+    assert calls[-1][0] == "PATCH" and embed["color"] == RED and embed["title"].endswith("failed")
+    # Settled: a second delivery changes nothing and posts nothing.
+    assert asyncio.run(reconcile_conclusion(state, completed)) is False
+    assert len(calls) == 2
+
+
+def test_a_released_build_keeps_its_success_when_the_run_fails_later(client: TestClient, state: State) -> None:
+    """A Pages deploy or a step after the Release can fail the run; the release stands, so the build does."""
+    from control.events import reconcile_conclusion
+
+    assert post_event(client, fixture("control.build.summary")).status_code == 202
+    completed = fixture("workflow_run.completed")
+    completed["workflow_run"]["conclusion"] = "failure"
+    assert asyncio.run(reconcile_conclusion(state, completed)) is False
+    build = state.model.build(REPO, 5001)
+    assert build and build.result == "success"

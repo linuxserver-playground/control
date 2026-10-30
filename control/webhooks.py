@@ -74,9 +74,10 @@ async def github_webhook(
         relay.schedule_site_refresh(state, payload)  # a successful hub Deploy makes the website refresh
         archive.wake(state, payload)  # a completed released run gets its record and logs onto its Release
         heal.schedule_heal(state, payload)  # a completed run's jobs whose own webhook never came
-        from .events import schedule_pr_report_refresh  # events imports this module
+        from .events import schedule_conclusion_check, schedule_pr_report_refresh  # events imports this module
 
         schedule_pr_report_refresh(state, payload)  # Discord links the report comment a PR report run wrote
+        schedule_conclusion_check(state, payload)  # a run that failed after a green summary turns its build red
         from .scheduler import schedule_mod_followup  # scheduler imports events, which imports this module
 
         schedule_mod_followup(state, payload)  # a mod with version lines builds its next missing line at once
