@@ -352,20 +352,30 @@ async def test_skipped_outcomes(state: State) -> None:
 
 
 @pytest.mark.anyio
-async def test_waiting_on_assets_alerts_after_six_then_daily(state: State, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_waiting_on_assets_pings_every_check_amber_then_red(
+    state: State, monkeypatch: pytest.MonkeyPatch
+) -> None:
     manifest = live(state)
     monkeypatch.setattr(state.discord, "webhook_url", "https://discord.com/api/webhooks/1/t")
     github = FakeDispatch()
-    waiting = rv.AssetsNotReady("no asset of release v2 matches '_linux64\\\\.AppImage$' (uploaded: none)")
-    for n in range(1, 31):
+    waiting = rv.AssetsNotReady(
+        "no asset of release v2 matches '_linux64\\\\.AppImage$' (uploaded: rpcs3-v2_linux64.app)"
+    )
+    for n in range(1, 7):
         decision, github = await run_check(state, manifest, FakeResolver(error=waiting), github)
         assert decision.outcome == "skipped" and decision.detail["reason"] == "assets not ready"
         assert state.model.consecutive_waits("sonarr", "main") == n
-        assert len(github.discord) == (0 if n < 6 else 1 if n < 30 else 2)
-    (first, _) = github.discord
-    assert first["title"] == "sonarr main \u00b7 \U0001f7e1 waiting for upstream assets"
-    assert first["color"] == events.AMBER
-    assert "6 checks in a row" in first["description"] and "renamed the asset" in first["description"]
+        assert len(github.discord) == n
+    first, fifth = github.discord[0], github.discord[4]
+    assert (
+        first["title"] == "sonarr main \u00b7 \U0001f7e1 waiting for upstream assets" and first["color"] == events.AMBER
+    )
+    assert "1 check in a row" in first["description"] and "rpcs3-v2_linux64.app" in first["description"]
+    assert github.discord[3]["color"] == events.AMBER
+    assert (
+        fifth["title"] == "sonarr main \u00b7 \U0001f534 upstream assets still missing" and fifth["color"] == events.RED
+    )
+    assert "5 checks in a row" in fifth["description"] and "renamed the asset" in fifth["description"]
     assert not github.posts
     # A check that resolves ends the streak.
     decision, github = await run_check(state, manifest, FakeResolver(), github)

@@ -70,10 +70,10 @@ GENERATED_FILES = frozenset(
 only in these needs no release."""
 ERROR_ALERT_AFTER = 6
 """Consecutive resolver failures for one branch before Discord hears about it (once per streak)."""
-ASSETS_ALERT_AFTER = 6
-"""Consecutive checks a branch has waited on `require_assets` before Discord hears about it, then once a day
-(every 24 checks) while it keeps waiting. Six hours covers an upstream that cuts the release first and uploads
-after; longer usually means the asset was renamed and the pattern no longer matches."""
+ASSETS_RED_AFTER = 4
+"""Every check a branch spends waiting on `require_assets` posts to Discord: amber for the first four (an upload
+still in progress), red from the fifth on. A release that long without its asset usually means upstream renamed
+it, and nobody else says so: the build never starts, so it is never red."""
 TICK_SECONDS = 60.0
 RESOLVE_TIMEOUT = 180.0
 HOURS_PER_WEEK = 24 * 7
@@ -656,19 +656,23 @@ class Scheduler:
         await self.state.discord.post(embeds=[embed])
 
     async def alert_on_waiting_assets(self, image: str, branch: str, message: str, kind: str = KIND_UPSTREAM) -> None:
-        """One amber embed when a branch has waited on `require_assets` ASSETS_ALERT_AFTER checks in a row, and one a
-        day while it keeps waiting. The build is not red, so nothing else says the image is stuck; and a release
-        that long without its asset usually means upstream renamed it, which needs a person to update the pattern
-        and the Dockerfile before the image builds again."""
+        """One embed per check while a branch waits on `require_assets`: amber for the first ASSETS_RED_AFTER checks
+        of a streak, red after. The message names the release, the pattern and the assets that were uploaded, so a
+        renamed asset (`.AppImage` to `.app`) is read off the embed and fixed in image.yml and the Dockerfile."""
         if self.dry_run:
             return
         count = self.model.consecutive_waits(image, branch, kind)
-        if count < ASSETS_ALERT_AFTER or (count - ASSETS_ALERT_AFTER) % 24:
-            return
-        text = f"The upstream check has waited on `require_assets` for {count} checks in a row:\n`{message}`\n"
-        text += "If the release has been out that long, upstream may have renamed the asset: update "
-        text += "`require_assets` in image.yml and the Dockerfile, or the branch never builds again."
-        embed = self.alert_embed(image, branch, "waiting for upstream assets", text, events.AMBER)
+        hours = f"{count} check{'s' if count != 1 else ''} in a row"
+        if count <= ASSETS_RED_AFTER:
+            headline, color = "waiting for upstream assets", events.AMBER
+            text = f"The upstream check has waited on `require_assets` for {hours}:\n`{message}`\n"
+            text += "Nothing is dispatched until the asset is uploaded; the check runs again next hour."
+        else:
+            headline, color = "upstream assets still missing", events.RED
+            text = f"The upstream check has waited on `require_assets` for {hours}:\n`{message}`\n"
+            text += "Upstream has probably renamed the asset: update `require_assets` in image.yml and the "
+            text += "Dockerfile, or the branch never builds again."
+        embed = self.alert_embed(image, branch, headline, text, color)
         await self.state.discord.post(embeds=[embed])
 
     async def announce(self, decision: Decision) -> Decision:
