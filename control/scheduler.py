@@ -70,6 +70,10 @@ GENERATED_FILES = frozenset(
 only in these needs no release."""
 ERROR_ALERT_AFTER = 6
 """Consecutive resolver failures for one branch before Discord hears about it (once per streak)."""
+ASSETS_ALERT_AFTER = 6
+"""Consecutive checks a branch has waited on `require_assets` before Discord hears about it, then once a day
+(every 24 checks) while it keeps waiting. Six hours covers an upstream that cuts the release first and uploads
+after; longer usually means the asset was renamed and the pattern no longer matches."""
 TICK_SECONDS = 60.0
 RESOLVE_TIMEOUT = 180.0
 HOURS_PER_WEEK = 24 * 7
@@ -327,7 +331,9 @@ class Scheduler:
             resolver = self.resolver or resolve_in_thread
             resolved = await resolver(manifest.manifest, self.github.token if self.github else None)
         except rv.AssetsNotReady as exc:
-            return self.record(image, branch, kind, "skipped", {"reason": "assets not ready", "message": str(exc)})
+            decision = self.record(image, branch, kind, "skipped", {"reason": "assets not ready", "message": str(exc)})
+            await self.alert_on_waiting_assets(image, branch, str(exc), kind)
+            return decision
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
             decision = self.record(image, branch, kind, "error", {"message": message})
@@ -391,7 +397,10 @@ class Scheduler:
                 await self.alert_on_errors(image, branch, str(error["message"]), kind)
             return decision
         if skipped := next((r for r in results if r["state"] == "skipped"), None):
-            return self.record(image, branch, kind, "skipped", detail_of(skipped))
+            decision = self.record(image, branch, kind, "skipped", detail_of(skipped))
+            if skipped.get("reason") == "assets not ready":
+                await self.alert_on_waiting_assets(image, branch, str(skipped.get("message")), kind)
+            return decision
         return self.record(image, branch, kind, "unchanged", detail_of(results[0]))
 
     async def _check_mod_line(
@@ -630,6 +639,22 @@ class Scheduler:
             f"The upstream resolver failed {ERROR_ALERT_AFTER} times in a row:\n`{message}`",
             events.RED,
         )
+        await self.state.discord.post(embeds=[embed])
+
+    async def alert_on_waiting_assets(self, image: str, branch: str, message: str, kind: str = KIND_UPSTREAM) -> None:
+        """One amber embed when a branch has waited on `require_assets` ASSETS_ALERT_AFTER checks in a row, and one a
+        day while it keeps waiting. The build is not red, so nothing else says the image is stuck; and a release
+        that long without its asset usually means upstream renamed it, which needs a person to update the pattern
+        and the Dockerfile before the image builds again."""
+        if self.dry_run:
+            return
+        count = self.model.consecutive_waits(image, branch, kind)
+        if count < ASSETS_ALERT_AFTER or (count - ASSETS_ALERT_AFTER) % 24:
+            return
+        text = f"The upstream check has waited on `require_assets` for {count} checks in a row:\n`{message}`\n"
+        text += "If the release has been out that long, upstream may have renamed the asset: update "
+        text += "`require_assets` in image.yml and the Dockerfile, or the branch never builds again."
+        embed = self.alert_embed(image, branch, "waiting for upstream assets", text, events.AMBER)
         await self.state.discord.post(embeds=[embed])
 
     async def announce(self, decision: Decision) -> Decision:

@@ -1481,6 +1481,22 @@ class Model:
             rows = conn.execute(sql, params).fetchall()
         return [SchedulerDecision(**dict(row)) for row in rows]
 
+    def consecutive_waits(self, image: str, branch: str, kind: str = "upstream") -> int:
+        """How many of the newest decisions of a branch were skipped for assets not ready, counting back to the
+        first decision that was not."""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT outcome, detail FROM scheduler_decisions WHERE image = ? AND branch = ? AND kind = ? "
+                "ORDER BY id DESC LIMIT 200",
+                (image, branch, kind),
+            ).fetchall()
+        count = 0
+        for row in rows:
+            if row["outcome"] != "skipped" or '"assets not ready"' not in (row["detail"] or ""):
+                break
+            count += 1
+        return count
+
     def consecutive_errors(self, image: str, branch: str, kind: str = "upstream") -> int:
         """How many of the newest decisions of a branch are errors, counting back to the last non-error."""
         with self.db.connect() as conn:

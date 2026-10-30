@@ -1,5 +1,5 @@
 # Vendored from linuxserver-playground/workflows scripts/resolve_version.py at commit
-# f873079677cc1577fbc860ba6b2552daaa6e9fa7.
+# 02b0d333dc2593350ca0a53eb0e611b86026941b.
 # Do not edit here: change it in the workflows repo and copy it back. tests/test_vendor.py fails
 # when this file and the source checkout differ, so the build and the scheduler resolve alike.
 # End of vendoring header.
@@ -64,7 +64,8 @@ class ResolveError(RuntimeError):
 
 
 class AssetsNotReady(ResolveError):
-    """A ``require_assets`` URL is not yet published. The scheduler treats this as 'try later'."""
+    """A ``require_assets`` entry is not yet published: a URL that does not answer 200, or a release with no
+    uploaded asset matching an ``asset`` pattern. The scheduler treats this as 'try later'."""
 
 
 # --------------------------------------------------------------------------------------------
@@ -592,12 +593,59 @@ def derive_semver(clean: str, today: _dt.date | None = None) -> str | None:
     return None
 
 
-def check_required_assets(templates: list[str] | None, version: str) -> None:
-    for template in templates or []:
-        url = template.replace("${VERSION}", version).replace("$VERSION", version)
-        resp = http_get(url, method="HEAD")
-        if resp.status != 200:
-            raise AssetsNotReady(f"required asset {url} returned HTTP {resp.status}")
+RELEASE_SOURCES = ("github_release", "codeberg_release", "gitea_release")
+"""The sources whose releases carry assets; ``require_assets`` patterns read their asset lists."""
+
+
+def _substitute_version(template: str, version: str) -> str:
+    return template.replace("${VERSION}", version).replace("$VERSION", version)
+
+
+def release_assets(source: dict[str, Any], tag: str) -> list[str]:
+    """The names of the uploaded assets of the release tagged ``tag``, read by tag from the source's forge, as a
+    Dockerfile reads them. An asset whose upload never finished (GitHub's ``state: open``) does not count."""
+    kind = source["type"]
+    if kind not in RELEASE_SOURCES:
+        raise ResolveError(f"require_assets patterns need one of {', '.join(RELEASE_SOURCES)}, not {kind}")
+    repo = source["repo"]
+    quoted = urllib.parse.quote(tag, safe="")
+    headers = None
+    if kind == "github_release":
+        url = f"https://api.github.com/repos/{repo}/releases/tags/{quoted}"
+        headers = github_headers()
+    elif kind == "codeberg_release":
+        url = f"https://codeberg.org/api/v1/repos/{repo}/releases/tags/{quoted}"
+    else:
+        url = f"{source['base_url'].rstrip('/')}/api/v1/repos/{repo}/releases/tags/{quoted}"
+    resp = http_get(url, headers=headers)
+    if resp.status == 404:
+        raise AssetsNotReady(f"release {tag} of {repo} is not published")
+    if resp.status != 200:
+        raise ResolveError(f"GET {url} returned HTTP {resp.status}")
+    assets = resp.json().get("assets") or []
+    return [str(a["name"]) for a in assets if a.get("name") and a.get("state", "uploaded") == "uploaded"]
+
+
+def check_required_assets(source: dict[str, Any], tag: str, version: str) -> None:
+    """Every ``require_assets`` entry must be published before the version counts: a URL template
+    (``${VERSION}`` substituted) answers HEAD with 200, and an ``{asset: <regex>}`` entry matches the name of an
+    uploaded asset of the resolved release (``${VERSION}`` substituted as literal text). The release's assets are
+    read once, by the tag the source returned, so the check sees exactly what the build will download."""
+    names: list[str] | None = None
+    for entry in source.get("require_assets") or []:
+        if isinstance(entry, str):
+            url = _substitute_version(entry, version)
+            resp = http_get(url, method="HEAD")
+            if resp.status != 200:
+                raise AssetsNotReady(f"required asset {url} returned HTTP {resp.status}")
+            continue
+        pattern = str(entry["asset"])
+        if names is None:
+            names = release_assets(source, tag)
+        regex = re.compile(_substitute_version(pattern, re.escape(version)))
+        if not any(regex.search(name) for name in names):
+            listed = ", ".join(names) if names else "none"
+            raise AssetsNotReady(f"no asset of release {tag} matches {pattern!r} (uploaded: {listed})")
 
 
 # --------------------------------------------------------------------------------------------
@@ -674,7 +722,7 @@ def resolve(manifest: dict[str, Any], manifest_dir: str | Path = ".", today: _dt
     clean = sanitize(upstream)
     if not clean:
         raise ResolveError(f"version {upstream!r} is empty after sanitising")
-    check_required_assets(source.get("require_assets"), upstream)
+    check_required_assets(source, raw, upstream)
     return {
         "upstream": upstream,
         "upstream_clean": clean,
