@@ -1,5 +1,5 @@
 # Vendored from linuxserver-playground/workflows scripts/resolve_version.py at commit
-# 02b0d333dc2593350ca0a53eb0e611b86026941b.
+# e9a6e445255c0340e19b69f883f075de19a136c1.
 # Do not edit here: change it in the workflows repo and copy it back. tests/test_vendor.py fails
 # when this file and the source checkout differ, so the build and the scheduler resolve alike.
 # End of vendoring header.
@@ -601,25 +601,28 @@ def _substitute_version(template: str, version: str) -> str:
     return template.replace("${VERSION}", version).replace("$VERSION", version)
 
 
-def release_assets(source: dict[str, Any], tag: str) -> list[str]:
-    """The names of the uploaded assets of the release tagged ``tag``, read by tag from the source's forge, as a
-    Dockerfile reads them. An asset whose upload never finished (GitHub's ``state: open``) does not count."""
+def _release_api(source: dict[str, Any], repo: str, tag: str | None) -> tuple[str, dict[str, str] | None]:
+    """The URL of one release on the source's forge: the release tagged ``tag``, or the latest when ``tag`` is None."""
     kind = source["type"]
     if kind not in RELEASE_SOURCES:
         raise ResolveError(f"require_assets patterns need one of {', '.join(RELEASE_SOURCES)}, not {kind}")
-    repo = source["repo"]
-    quoted = urllib.parse.quote(tag, safe="")
-    headers = None
+    quoted = f"tags/{urllib.parse.quote(tag, safe='')}" if tag is not None else "latest"
     if kind == "github_release":
-        url = f"https://api.github.com/repos/{repo}/releases/tags/{quoted}"
-        headers = github_headers()
-    elif kind == "codeberg_release":
-        url = f"https://codeberg.org/api/v1/repos/{repo}/releases/tags/{quoted}"
-    else:
-        url = f"{source['base_url'].rstrip('/')}/api/v1/repos/{repo}/releases/tags/{quoted}"
+        return f"https://api.github.com/repos/{repo}/releases/{quoted}", github_headers()
+    base = "https://codeberg.org" if kind == "codeberg_release" else source["base_url"].rstrip("/")
+    return f"{base}/api/v1/repos/{repo}/releases/{quoted}", None
+
+
+def release_assets(source: dict[str, Any], tag: str, repo: str | None = None) -> list[str]:
+    """The names of the uploaded assets of a release, read as a Dockerfile reads them: the source repository's
+    release tagged ``tag``, or, with ``repo``, the latest release of that other repository (an architecture built
+    from a sibling repository whose versions the source does not follow). An asset whose upload never finished
+    (GitHub's ``state: open``) does not count."""
+    url, headers = _release_api(source, repo or str(source.get("repo", "")), None if repo else tag)
     resp = http_get(url, headers=headers)
     if resp.status == 404:
-        raise AssetsNotReady(f"release {tag} of {repo} is not published")
+        what = f"the latest release of {repo}" if repo else f"release {tag} of {source['repo']}"
+        raise AssetsNotReady(f"{what} is not published")
     if resp.status != 200:
         raise ResolveError(f"GET {url} returned HTTP {resp.status}")
     assets = resp.json().get("assets") or []
@@ -629,9 +632,10 @@ def release_assets(source: dict[str, Any], tag: str) -> list[str]:
 def check_required_assets(source: dict[str, Any], tag: str, version: str) -> None:
     """Every ``require_assets`` entry must be published before the version counts: a URL template
     (``${VERSION}`` substituted) answers HEAD with 200, and an ``{asset: <regex>}`` entry matches the name of an
-    uploaded asset of the resolved release (``${VERSION}`` substituted as literal text). The release's assets are
-    read once, by the tag the source returned, so the check sees exactly what the build will download."""
-    names: list[str] | None = None
+    uploaded asset of the resolved release (``${VERSION}`` substituted as literal text), or, with ``repo``, of the
+    latest release of that other repository. Each release's assets are read once, by the tag the source returned,
+    so the check sees exactly what the build will download."""
+    names: dict[str | None, list[str]] = {}
     for entry in source.get("require_assets") or []:
         if isinstance(entry, str):
             url = _substitute_version(entry, version)
@@ -640,12 +644,14 @@ def check_required_assets(source: dict[str, Any], tag: str, version: str) -> Non
                 raise AssetsNotReady(f"required asset {url} returned HTTP {resp.status}")
             continue
         pattern = str(entry["asset"])
-        if names is None:
-            names = release_assets(source, tag)
+        repo = entry.get("repo")
+        if repo not in names:
+            names[repo] = release_assets(source, tag, repo)
         regex = re.compile(_substitute_version(pattern, re.escape(version)))
-        if not any(regex.search(name) for name in names):
-            listed = ", ".join(names) if names else "none"
-            raise AssetsNotReady(f"no asset of release {tag} matches {pattern!r} (uploaded: {listed})")
+        if not any(regex.search(name) for name in names[repo]):
+            listed = ", ".join(names[repo]) if names[repo] else "none"
+            where = f"the latest release of {repo}" if repo else f"release {tag}"
+            raise AssetsNotReady(f"no asset of {where} matches {pattern!r} (uploaded: {listed})")
 
 
 # --------------------------------------------------------------------------------------------
