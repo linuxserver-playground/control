@@ -1481,6 +1481,17 @@ class Model:
             rows = conn.execute(sql, params).fetchall()
         return [SchedulerDecision(**dict(row)) for row in rows]
 
+    def last_counted_decision(self, image: str, branch: str, kind: str) -> SchedulerDecision | None:
+        """The newest decision of a kind that stands for its slot: a skip for assets not ready does not, so a
+        weekly package check held back by a late upload is tried again next hour, not next week."""
+        for decision in self.branch_decisions(image, branch, limit=200):
+            if decision.kind != kind:
+                continue
+            if decision.outcome == "skipped" and decision.info.get("reason") == "assets not ready":
+                continue
+            return decision
+        return None
+
     def consecutive_waits(self, image: str, branch: str, kind: str = "upstream") -> int:
         """How many of the newest decisions of a branch were skipped for assets not ready, counting back to the
         first decision that was not."""

@@ -608,6 +608,37 @@ async def test_package_check(state: State) -> None:
 
 
 @pytest.mark.anyio
+async def test_release_and_package_checks_hold_while_assets_are_not_ready(state: State) -> None:
+    """A build dispatched while the upstream check waits on `require_assets` would fail on the same missing
+    asset at its resolve step, so nothing is dispatched; and the held package check keeps its weekly slot."""
+    manifest = live(state)
+    waiting = rv.AssetsNotReady("no asset of release v2 matches 'x' (uploaded: none)")
+    decision, _ = await run_check(state, manifest, FakeResolver(error=waiting))
+    assert decision.detail["reason"] == "assets not ready"
+    github = FakeGitHub()
+    async with mock_client(github) as http:
+        sched = scheduler.Scheduler(state, GitHub(http, "ghs_token"))
+        release = await sched.check_release(manifest)
+        packages = await sched.check_packages(manifest)
+    for held in (release, packages):
+        assert held.outcome == "skipped" and held.detail["reason"] == "assets not ready"
+        assert "no asset of release v2" in held.detail["message"]
+        upstream = state.model.last_decision("sonarr", "main", "upstream")
+        assert upstream and held.detail["upstream_check"] == upstream.at
+    assert not github.posts
+    assert state.model.last_counted_decision("sonarr", "main", "packages") is None  # the slot is still due
+    # Once the upstream check passes, the package check goes out.
+    decision, _ = await run_check(state, manifest, FakeResolver())
+    assert decision.outcome == "dispatch"
+    dispatcher = FakeDispatch()
+    async with mock_client(dispatcher) as http:
+        sched = scheduler.Scheduler(state, GitHub(http, "ghs_token"))
+        packages = await sched.check_packages(manifest)
+    assert packages.outcome == "dispatch"
+    assert state.model.last_counted_decision("sonarr", "main", "packages") is not None
+
+
+@pytest.mark.anyio
 async def test_tick_runs_each_check_once_per_slot(state: State, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(batch, "PROJECTS", ())  # test_batch.py covers the batch projects
     manifest = live(state, seen=NOW - datetime.timedelta(weeks=2))  # long enough known for the weekly slot

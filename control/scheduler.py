@@ -303,6 +303,15 @@ class Scheduler:
             "run_id": last.id,
         }
 
+    def waiting_on_assets(self, image: str, branch: str) -> dict[str, Any] | None:
+        """Why not to dispatch any build of a branch now: its newest upstream check found `require_assets` not
+        published yet, and the build's own resolve step would fail on the same missing asset. The release and
+        package checks hold until an hourly upstream check passes."""
+        last = self.model.last_decision(image, branch, KIND_UPSTREAM)
+        if last and last.outcome == "skipped" and last.info.get("reason") == "assets not ready":
+            return {"reason": "assets not ready", "message": last.info.get("message"), "upstream_check": last.at}
+        return None
+
     def in_cooldown(self, image: str, branch: str, now: datetime.datetime) -> str | None:
         last = self.model.last_decision(image, branch, outcome="dispatch")
         if last and now - datetime.datetime.fromisoformat(last.at) < COOLDOWN:
@@ -492,6 +501,8 @@ class Scheduler:
         now = self.clock()
         if blocked := self.blocked(manifest, image):
             return self.record(image, branch, kind, "skipped", blocked)
+        if waiting := self.waiting_on_assets(image, branch):
+            return self.record(image, branch, kind, "skipped", waiting)
         last_run = self.model.latest_run_for_branch(repo, branch)
         if last_run and now - datetime.datetime.fromisoformat(last_run.created_at) < SETTLE:
             why = {"reason": "recent run", "run_url": last_run.html_url, "run_id": last_run.id}
@@ -542,6 +553,9 @@ class Scheduler:
         image = manifest.image
         if blocked := self.blocked(manifest, image):
             return self.record(image, manifest.branch, kind, "skipped", blocked)
+        if waiting := self.waiting_on_assets(image, manifest.branch):
+            # Recorded as skipped, but the tick does not count it for the weekly slot (model.last_counted_decision).
+            return self.record(image, manifest.branch, kind, "skipped", waiting)
         why = {"reason": "weekly package check"}
         return await self.dispatch(manifest.repo, manifest.branch, image, kind, "packages", why)
 
@@ -711,7 +725,7 @@ class Scheduler:
                 decisions.append(await self.check_release(manifest))
             if not manifest.package_check:
                 continue
-            last = self.model.last_decision(image, manifest.branch, KIND_PACKAGES)
+            last = self.model.last_counted_decision(image, manifest.branch, KIND_PACKAGES)
             since = last.at if last else manifest.created_at
             if due(last_package_slot(manifest.repo, manifest.branch, at), since):
                 decisions.append(await self.check_packages(manifest))
