@@ -3,8 +3,9 @@ The `/events` endpoint the shared workflow POSTs to (CONVENTIONS §10): a contro
 HMAC-SHA256 over the raw body using the per-org `CONTROL_EVENTS_SECRET`, validated against the `contracts`
 schema, stored in `deliveries` as `control:<type>` so it replays like a webhook, then applied and
 announced on Discord. A live build gets one message, posted on `build.started` and edited into the
-summary; dev and pr builds only get the summary, and a package check only when it fails (the release build
-it dispatches is what counts). A released build links its page on the website, the single pane of glass;
+summary; dev and pr builds only get the summary, and a package check that released nothing only when it
+fails (one that found a change releases from the same run and is announced like any release). A released
+build links its page on the website, the single pane of glass;
 that page reaches the website minutes later (hub, then site), so its summary says "publishing" and points at
 control until publish.py sees the page live and edits it into the final form. Any other build links the
 report GitHub shows: a pull request build its report comment, a dev or failed build its run's job summary.
@@ -197,13 +198,14 @@ def released(build: Build) -> bool:
 
 
 def is_package_check(build: Build) -> bool:
-    """A live `reason: packages` run compares package tables and never releases (the follow-up build does)."""
+    """A live `reason: packages` run that released nothing: the installed packages had not changed. One that
+    found a change releases from the same run and is an ordinary release."""
     return build.mode == "live" and build.reason == "packages" and not build.release_url
 
 
 def announced(build: Build) -> bool:
-    """Whether Discord hears of this build. A package check only when it failed: whether it found new packages
-    or not, what matters is the release build it dispatches, which is announced on its own."""
+    """Whether Discord hears of this build. A package check that released nothing only when it failed: nothing
+    changed, and there is nothing to say."""
     if is_package_check(build):
         return build.result == "failure"
     return True

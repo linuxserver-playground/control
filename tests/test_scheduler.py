@@ -510,10 +510,14 @@ async def test_release_check_ignores_generated_files_behind_skip_ci(state: State
     assert decision.outcome == "unchanged" and decision.detail["reason"] == "generated files only"
     assert decision.detail["head"] == HEAD and decision.detail["released"] == RELEASED and github.posts == []
     assert github.gets[-1] == f"/repos/{REPO}/compare/{RELEASED}...{HEAD}"
-    # One real file among them and the release is owed, [skip ci] or not.
+    # The package table the release itself commits afterwards is one of them: no rebuild for it.
     github = FakeGitHub(
         head=HEAD, message="Update package versions [skip ci]", files=[*generated, "package_versions.txt"]
     )
+    decision, github = await run_release(state, manifest, github, clock=lambda: NOW)
+    assert decision.outcome == "unchanged" and decision.detail["reason"] == "generated files only"
+    # One real file among them and the release is owed, [skip ci] or not.
+    github = FakeGitHub(head=HEAD, message="Fix the run script [skip ci]", files=[*generated, "root/etc/x/run"])
     decision, github = await run_release(state, manifest, github, clock=lambda: NOW)
     assert decision.outcome == "dispatch" and len(github.posts) == 1
     assert decision.detail["dispatch_reason"] == "rebuild"

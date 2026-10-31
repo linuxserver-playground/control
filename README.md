@@ -173,8 +173,9 @@ upstream check sees no version drift. The check reads the head sha (`GET /repos/
 commit the branch's newest Release tag points at (`GET /repos/{r}/git/ref/tags/{tag}`; an annotated tag is
 followed to its commit) and dispatches `reason: rebuild` when they differ, recording both shas. A head
 whose subject ends with `[skip ci]` is compared with the released commit
-(`GET /repos/{r}/compare/{released}...{head}`): when every changed file is one the build generates
-(`README.md`, `AGENTS.md`, `LICENSE`, `.github/workflows/build.yml`) the outcome is `unchanged` with
+(`GET /repos/{r}/compare/{released}...{head}`): when every changed file is one the build commits itself
+(`README.md`, `AGENTS.md`, `LICENSE`, `.github/FUNDING.yml`, `root/donate.txt`, the two workflows, and
+`package_versions.txt`, which every release commits afterwards) the outcome is `unchanged` with
 "generated files only"; any other file means a release is owed. Nothing is dispatched while a skip flag
 matches, a run of the branch is queued or in progress, the branch's last run is younger than 15 minutes
 (the Release webhook or the build's follow-up commit may still be on the way), the 2-hour cooldown holds, or
@@ -183,7 +184,9 @@ only the live branches in `manifests` are walked.
 
 **Package check**: every live branch whose manifest does not set `build.package_check: false`, once a week
 at an hour of the week fixed by the same hash, dispatches `reason: packages` unless a skip flag matches or a
-run is in progress. Every schedule is "due" when the slot has passed and no decision of that kind was
+run is in progress. That one run compares the fresh package table with the committed one and releases only when
+it changed; every live release commits the table afterwards as `Update package versions [skip ci]`, which the
+release check (above) treats like the generated files: no rebuild for it. Every schedule is "due" when the slot has passed and no decision of that kind was
 recorded since, so a restart never double-fires and a missed slot runs at the next tick (every 60 s). The
 hourly checks run at the first tick for a branch that was never checked; the weekly one counts from the
 moment discovery first stored the branch, so a fresh start (or a new branch) waits for its own slot instead
@@ -409,8 +412,9 @@ its hash, so a retried POST is a no-op) and replays with the webhooks.
   embed is posted and its message id kept on the row (not for a package check).
 - `build.summary` fills the row (result, failed job, version, upstream, platforms, test outcome, release or
   artifact URL, the whole bundle as `bundle_json`) and edits the started message into the summary, or posts
-  one for dev/pr builds. A package check (`reason: packages` on a live branch, which never releases) is only
-  announced when it fails: what it found matters through the release build it dispatches, announced on its own.
+  one for dev/pr builds. A package check that released nothing (`reason: packages` on a live branch, the
+  installed packages unchanged) is only announced when it fails; one that found a change releases from the same
+  run and is announced like any release.
 
 ### Discord embeds
 
@@ -591,7 +595,7 @@ steps of `image-build.yml`, whose inputs earlier steps made and checked and whic
 | Step | Why it is infrastructure |
 | --- | --- |
 | `Set up job`, `Complete job`, a job with no failed step | GitHub assigning the runner and fetching actions; the runner lost or never started |
-| `Check out repository`, `Check out shared workflows`, `Check out repository (package check)` | a git clone from GitHub |
+| `Check out repository`, `Check out shared workflows`, `Check out repository (live)` | a git clone from GitHub |
 | `Free disk space`, `Set up buildx` | the runner's preinstalled toolchains (best effort), downloading BuildKit |
 | `Log in to GHCR` | the registry login |
 | `Upload manifest`, `Download manifest`, `Upload bundle files`, `Upload image (not pushed)`, `Download bundle files`, `Upload bundle` | the artifact service |

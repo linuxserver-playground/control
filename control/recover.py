@@ -79,7 +79,7 @@ INFRA_STEPS: dict[str, str] = {
     "Complete job": "the runner's own teardown",
     "Check out repository": "a git clone from GitHub",
     "Check out shared workflows": "a git clone from GitHub",
-    "Check out repository (package check)": "a git clone from GitHub",
+    "Check out repository (live)": "a git clone from GitHub",
     "Free disk space": "deleting the runner's preinstalled toolchains, best effort",
     "Set up buildx": "downloading and starting BuildKit",
     "Log in to GHCR": "the registry login",

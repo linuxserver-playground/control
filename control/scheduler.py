@@ -7,8 +7,8 @@ discovery found:
   released from its Release tags (`[T-]<upstream>-ls<N>`, CONVENTIONS §3), and dispatch a build when they
   differ;
 - release check, in the same hourly pass: the branch head must be the commit its newest Release points at,
-  or a `rebuild` is dispatched. A package check commits `Update package versions` and then dispatches the
-  build itself; when that dispatch fails the head would stay unreleased forever, since no version drifts;
+  or one that differs from it only in the files the build itself commits afterwards (`Update generated files
+  [skip ci]`, `Update package versions [skip ci]`), or a `rebuild` is dispatched;
 - package check, once a week per branch with `build.package_check` on, spread across the week's hours. A
   branch that was never checked waits for its slot too, so a fresh start does not fire the whole fleet;
 - mod check, once an hour per docker-mods branch with an `upstream` block in mod.yml, spread like the upstream
@@ -64,10 +64,19 @@ SETTLE = datetime.timedelta(minutes=15)
 """The release check leaves a branch alone while its last run is younger than this: the Release webhook or
 the build's own follow-up commit may still be on the way."""
 GENERATED_FILES = frozenset(
-    {"README.md", "AGENTS.md", "LICENSE", ".github/workflows/build.yml", ".github/workflows/pr-report.yml"}
+    {
+        "README.md",
+        "AGENTS.md",
+        "LICENSE",
+        ".github/FUNDING.yml",
+        "root/donate.txt",
+        ".github/workflows/build.yml",
+        ".github/workflows/pr-report.yml",
+        "package_versions.txt",
+    }
 )
-"""Files the build regenerates and commits with `[skip ci]`; a head that differs from the released commit
-only in these needs no release."""
+"""Files the build itself commits with `[skip ci]` (the generated files before it builds, the package table after
+it releases); a head that differs from the released commit only in these needs no release."""
 ERROR_ALERT_AFTER = 6
 """Consecutive resolver failures for one branch before Discord hears about it (once per streak)."""
 ASSETS_RED_AFTER = 4
