@@ -67,8 +67,10 @@ DEFER = datetime.timedelta(hours=3)
 """How long after its slot a project may wait for a busy fleet or its own previous run (half the period at most)."""
 PENDING = datetime.timedelta(minutes=15)
 """A dispatch whose run has not appeared yet still holds its width; past this, it is reported as never started."""
-NOT_STARTED = datetime.timedelta(hours=1)
-"""A run still queued this long after it was created is reported."""
+NOT_STARTED = datetime.timedelta(hours=2)
+"""A run none of whose jobs has started this long after it was created is reported. The jobs decide, not the run's
+status: a lost or reordered `in_progress` webhook leaves a running run queued in the model, and the package check's
+160 jobs behind `max-parallel` keep it going past an hour by design (2026-10-31)."""
 OVERDUE_FLOOR = datetime.timedelta(hours=3)
 OVERDUE_UNKNOWN = datetime.timedelta(hours=12)
 """A run is overdue past twice its usual length (p95 of recent successes), at least an hour more and at least
@@ -646,19 +648,22 @@ class Batch:
         await self.post(self.embed(project, "dispatched run never appeared", text, events.RED))
 
     async def watch_active(self, project: Project, now: datetime.datetime) -> None:
-        """Runs that sit queued, or run far past their usual length: reported once per run attempt."""
+        """Runs none of whose jobs has started, or that run far past their usual length: reported once per run
+        attempt. A run whose jobs have started is running whatever status the model holds for it."""
         for run in active_runs(self.model, self.state.settings.github_org, project, now):
-            if run.status != "in_progress":
+            first_job = min((j.started_at for j in self.model.jobs_for_run(run.id) if j.started_at), default=None)
+            if run.status != "in_progress" and first_job is None:
                 age = now - _at(run.created_at)
                 if age <= NOT_STARTED:
                     continue
                 key = f"batch_alerted:queued:{run.id}:{run.attempt}"
                 headline = "run not started"
                 text = (
-                    f"[{run.workflow_name} #{run.run_number}]({run.html_url}) has been {run.status} for {_hours(age)}."
+                    f"[{run.workflow_name} #{run.run_number}]({run.html_url}) has been {run.status} for "
+                    f"{_hours(age)} and none of its jobs has started."
                 )
             else:
-                age = now - _at(run.started_at or run.created_at)
+                age = now - _at(run.started_at or first_job or run.created_at)
                 limit = overdue_after(self.model.run_durations(run.repo, str(run.workflow_name)))
                 if age <= limit:
                     continue

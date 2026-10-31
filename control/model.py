@@ -823,12 +823,15 @@ class Model:
     # -- runs -----------------------------------------------------------------------------------------------------
 
     def upsert_run(self, run: Run) -> bool:
-        """A re-run (a higher attempt) always wins. Within one attempt a newer `updated_at` wins, but a completed
-        run never goes back: a skipped run is requested, in progress and completed in the same second, and a late
-        `in_progress` delivery with the same `updated_at` would otherwise leave it running for good."""
+        """A re-run (a higher attempt) always wins. Within one attempt a newer `updated_at` wins, and with the same
+        `updated_at` the status only moves forward (queued, in progress, completed): a dispatched run is requested
+        and started in the same second, and GitHub delivers the two webhooks in either order, so a `requested` that
+        lands after the `in_progress` would otherwise leave the run queued until it completed (proot-apps' package
+        check, 2026-10-31). A completed run never goes back either way."""
         guard = (
             "excluded.attempt > runs.attempt OR (excluded.attempt = runs.attempt "
-            "AND excluded.updated_at >= runs.updated_at "
+            "AND (excluded.updated_at > runs.updated_at OR (excluded.updated_at = runs.updated_at "
+            f"AND {STATUS_RANK.format('excluded.status')} >= {STATUS_RANK.format('runs.status')})) "
             "AND (runs.status IS NOT 'completed' OR excluded.status = 'completed'))"
         )
         with self.db.connect() as conn:

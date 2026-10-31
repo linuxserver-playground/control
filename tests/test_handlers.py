@@ -34,6 +34,22 @@ def test_workflow_run_progresses_and_never_regresses(state: State) -> None:
     assert state.model.counts()["runs"] == 1
 
 
+def test_a_late_requested_delivery_does_not_requeue_a_started_run(state: State) -> None:
+    """A dispatched run is requested and started in the same second, and GitHub delivers the two webhooks in either
+    order (proot-apps' package check sat 'queued' in the model for its whole hour, 2026-10-31)."""
+    seed(state, "workflow_run.in_progress")
+    late = fixture("workflow_run.requested")
+    late["workflow_run"]["updated_at"] = fixture("workflow_run.in_progress")["workflow_run"]["updated_at"]
+    handlers.process(state.model, state.stream, "workflow_run", late)
+    run = state.model.run(5001)
+    assert run and run.status == "in_progress"
+    # A newer updated_at still wins whatever its status: GitHub's own correction, or a re-queued attempt.
+    late["workflow_run"]["updated_at"] = "2026-10-24T12:00:06Z"
+    handlers.process(state.model, state.stream, "workflow_run", late)
+    run = state.model.run(5001)
+    assert run and run.status == "queued"
+
+
 def test_a_run_name_never_replaces_the_workflow_name(state: State) -> None:
     payload = fixture("workflow_run.requested")
     payload["workflow_run"]["name"] = payload["workflow_run"]["display_title"] = "build changed"

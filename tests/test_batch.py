@@ -616,6 +616,63 @@ async def test_dispatch_without_a_run_and_overdue_runs_alert_once(
     ]
 
 
+@pytest.mark.anyio
+async def test_a_queued_run_whose_jobs_started_is_running(state: State, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The package check's 160 jobs run behind max-parallel for over an hour, and a reordered `in_progress` webhook
+    can leave the run queued in the model: its jobs say whether it runs (2026-10-31)."""
+    monkeypatch.setattr(state.discord, "webhook_url", "https://discord.com/api/webhooks/1/t")
+    for n in range(3):
+        start = SLOT - batch.DAY * (n + 1)
+        run(
+            state,
+            "proot-apps",
+            50 + n,
+            "Daily Package check",
+            created=start,
+            updated=start + batch.HOUR,
+            branch="master",
+        )
+    # Queued in the model for 90 minutes, one job running: nothing to say.
+    run(
+        state,
+        "proot-apps",
+        60,
+        "Daily Package check",
+        status="queued",
+        created=SLOT - batch.HOUR * 1.5,
+        branch="master",
+    )
+    job(state, "proot-apps", 60, 601, "cryptomator", status="in_progress", at=SLOT - batch.HOUR)
+    # Queued for 90 minutes with no job started: not yet; past two hours it is reported as not started.
+    run(
+        state,
+        "proot-apps",
+        61,
+        "Daily Package check",
+        status="queued",
+        created=SLOT - batch.HOUR * 1.5,
+        branch="master",
+    )
+    github = FakeGitHub()
+    async with mock_client(github) as http:
+        state.discord.client = http
+        now = [SLOT]
+        runner = make(state, http, now)
+        await runner.watch()
+        assert github.discord == []
+        now[0] = SLOT + batch.HOUR
+        await runner.watch()
+        (embed,) = github.discord[0]
+        assert embed["title"] == "proot-apps · \U0001f7e1 run not started"
+        assert "#61" in embed["description"] and "none of its jobs has started" in embed["description"]
+        # Five hours in with a job started, the queued run is overdue like a running one, not "not started".
+        now[0] = SLOT + batch.HOUR * 3.5
+        await runner.watch()
+        titles = [embeds[0]["title"] for embeds in github.discord]
+        assert titles == ["proot-apps · \U0001f7e1 run not started", "proot-apps · \U0001f7e1 run overdue"]
+        assert "#60" in github.discord[1][0]["description"]
+
+
 def test_overdue_threshold() -> None:
     assert batch.overdue_after([]) == batch.OVERDUE_UNKNOWN
     assert batch.overdue_after([600.0] * 5) == batch.OVERDUE_FLOOR
