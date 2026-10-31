@@ -465,11 +465,21 @@ def fleet_rows(state: State, repos: list[Repo]) -> list[FleetRow]:
             decision = state.model.last_decision(image, branch, sched.KIND_UPSTREAM)
             info = decision.info if decision else {}
             upstream = info.get("upstream") or (build.upstream_clean if build else None)
-            released = info.get("released")
-            if released is None and release is not None:
-                release_tag = "latest" if branch == repo.default_branch else branch
-                others = [b for b in branches if b != branch]
+            # The newest Release is the authority for what is released. A decision's `released` is what the
+            # scheduler saw when it ran, so for the hour after a build it dispatched it names the version before
+            # that build; and the tag a branch publishes comes from its manifest (`3.24`, `resolute`), not from
+            # the assumption that the default branch publishes `latest`.
+            released = None
+            if release is not None:
+                if manifest is not None:
+                    release_tag = sched.release_tag_of(manifest, repo.default_branch)
+                    others = [sched.release_tag_of(m, repo.default_branch) for b, m in manifests.items() if b != branch]
+                else:
+                    release_tag = "latest" if branch == repo.default_branch else branch
+                    others = [b for b in branches if b != branch]
                 released = sched.released_from_tag(release.tag, release_tag, others)
+            if released is None:
+                released = info.get("released")
             if released is None and build is not None:
                 released = build.upstream_clean
             matching = [skip for skip in skips if skip.matches(image, branch, upstream)]

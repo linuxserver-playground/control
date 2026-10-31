@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from control import handlers, views
+from control.fleet import manifest_row
 from control.model import DEFAULT_STUCK_SECONDS, Job, is_stuck, p95, stuck_threshold
 from control.state import State
 from control.stream import Broadcaster, sse
@@ -100,6 +101,51 @@ def test_fleet_board_extra_live_branch_and_prefixed_release(client: TestClient, 
     assert rows[("sonarr", "develop")].result == "failure"
     assert rows[("sonarr", "develop")].released == "develop-5.0.1.1234-ls7"
     assert rows[("sonarr", "main")].released == "4.0.20.3014-ls1"  # the develop release is not the default's
+
+
+def test_fleet_drift_reads_the_release_tag_from_the_manifest(client: TestClient, state: State) -> None:
+    """An os base publishes its default branch under a named tag (`3.24`), not `latest`: its release
+    `3.24-<hash>-lsN` must compare equal to the upstream `<hash>`, not read as `3.24-<hash>` and show ahead."""
+    seed(state, *FINISHED_SEED)
+    state.model.upsert_manifest(
+        manifest_row(
+            REPO,
+            "main",
+            "sha-main",
+            {"name": "sonarr", "release": {"branch": "main", "tag": "3.24"}, "upstream": {"version": {"type": "os"}}},
+        )
+    )
+    release = fixture("release.published")
+    release["release"].update(tag_name="3.24-3ad40b41-ls6", published_at="2026-10-31T06:00:00Z")
+    handlers.process(state.model, state.stream, "release", release)
+    state.model.add_decision(
+        "sonarr",
+        "main",
+        "skipped",
+        json.dumps({"reason": "os image: builds on the package check", "upstream": "3ad40b41"}),
+    )
+    rows = {(r.image, r.branch): r for r in views.fleet_page(state).rows}
+    row = rows[("sonarr", "main")]
+    assert row.released == "3.24-3ad40b41-ls6" and row.upstream == "3ad40b41" and row.drift == "same"
+
+
+def test_fleet_drift_prefers_the_newest_release_over_a_stale_decision(client: TestClient, state: State) -> None:
+    """The upstream check that dispatched a build recorded the version released before it. Once the build's
+    Release exists, the row compares against the Release, not that decision, so the branch is not "ahead" for
+    the hour until the next check."""
+    seed(state, *FINISHED_SEED)
+    release = fixture("release.published")
+    release["release"].update(tag_name="4.0.21.0001-ls2", published_at="2026-10-31T06:00:00Z")
+    handlers.process(state.model, state.stream, "release", release)
+    state.model.add_decision(
+        "sonarr",
+        "main",
+        "dispatch",
+        json.dumps({"reason": "upstream changed", "upstream": "4.0.21.0001", "released": "4.0.20.3014"}),
+    )
+    rows = {(r.image, r.branch): r for r in views.fleet_page(state).rows}
+    row = rows[("sonarr", "main")]
+    assert row.released == "4.0.21.0001-ls2" and row.upstream == "4.0.21.0001" and row.drift == "same"
 
 
 def test_runs_page_shows_live_run_then_recent(client: TestClient, state: State) -> None:
