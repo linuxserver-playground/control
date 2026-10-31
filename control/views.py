@@ -112,6 +112,8 @@ class FleetRow(BaseModel):
     package_check: bool = True
     skip: list[str] = []
     """Skip-flag scopes that hold the branch back, plus `archived`."""
+    skips: list[Skip] = []
+    """The same flags with their reason, who set them and when, so a board can say why a branch is held."""
 
 
 class HelperFailure(BaseModel):
@@ -470,7 +472,8 @@ def fleet_rows(state: State, repos: list[Repo]) -> list[FleetRow]:
                 released = sched.released_from_tag(release.tag, release_tag, others)
             if released is None and build is not None:
                 released = build.upstream_clean
-            flags = [skip.scope for skip in skips if skip.matches(image, branch, upstream)]
+            matching = [skip for skip in skips if skip.matches(image, branch, upstream)]
+            flags = [skip.scope for skip in matching]
             scheduled = manifest is not None and state.settings.scheduler and not repo.archived
             rows.append(
                 FleetRow(
@@ -499,6 +502,7 @@ def fleet_rows(state: State, repos: list[Repo]) -> list[FleetRow]:
                     else None,
                     package_check=manifest.package_check if manifest else True,
                     skip=(["archived"] if repo.archived else []) + flags,
+                    skips=matching,
                 )
             )
     return rows

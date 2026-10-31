@@ -71,6 +71,20 @@ def test_fleet_board_rows(client: TestClient, state: State) -> None:
     assert "/api/stream" in page.text  # the live refresh script
 
 
+def test_fleet_board_rows_carry_skip_reasons(client: TestClient, state: State) -> None:
+    seed(state, *FINISHED_SEED)
+    state.model.set_skip("sonarr", "upstream 4.0.21 breaks the arm64 build", "octocat")
+    state.model.set_skip("radarr/main", None, "octocat")
+    rows = views.FleetPage.model_validate(client.get("/api/fleet.json").json()).rows
+    radarr, sonarr = rows
+    assert sonarr.skip == ["sonarr"] and [s.scope for s in sonarr.skips] == ["sonarr"]
+    assert sonarr.skips[0].reason == "upstream 4.0.21 breaks the arm64 build" and sonarr.skips[0].set_by == "octocat"
+    assert radarr.skip == ["radarr/main"] and radarr.skips[0].reason is None
+    page = client.get("/")
+    assert "upstream 4.0.21 breaks the arm64 build" in page.text
+    assert "no reason given" in page.text  # the title of radarr's flag
+
+
 def test_fleet_board_extra_live_branch_and_prefixed_release(client: TestClient, state: State) -> None:
     seed(state, *FINISHED_SEED)
     summary = fixture("control.build.summary")

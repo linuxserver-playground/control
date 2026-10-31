@@ -34,7 +34,7 @@
       <td>{{ row.upstream or "—" }}</td>
       <td><span class="pill {{ row.drift | kind }}">{{ row.drift }}</span></td>
       <td class="muted" title="{{ row.next_check | timestamp }}">{{ row.next_check | until }}</td>
-      <td>{% for flag in row.skip %}<span class="pill neutral">{{ flag }}</span> {% endfor %}</td>
+      <td>{% for flag in row.skip %}{% set info = row.skips | selectattr("scope", "equalto", flag) | first %}<span class="pill neutral" title="{% if info %}{{ info.reason or "no reason given" }} · {{ info.set_by }} · {{ info.set_at }}{% endif %}">{{ flag }}</span>{% if info and info.reason %} <span class="muted">{{ info.reason }}</span>{% endif %} {% endfor %}</td>
       {% if member %}
       <td class="actions" style="margin:0">
         {{ dispatch_button(row.repo, row.branch, "manual", "Build", csrf, path) }}
