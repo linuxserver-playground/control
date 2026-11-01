@@ -48,7 +48,7 @@ import httpx
 from pydantic import BaseModel
 
 from . import events
-from .model import BatchRun, BatchUnit, Job, Model, Run, SchedulerDecision, p95
+from .model import DISPATCH_GRACE, BatchRun, BatchUnit, Job, Model, Run, SchedulerDecision, p95
 from .vendor import wheelie_gaps as gaps
 
 if TYPE_CHECKING:
@@ -267,7 +267,10 @@ def capacity(state: State, now: datetime.datetime, exclude: str | None = None) -
             last = last_live_dispatch(state.model, project)
             # Only a dispatched run carries the width control chose; a push or cron run has the workflow default.
             dispatched = [r for r in runs if r.event in (None, "workflow_dispatch")]
-            if last and (now - _at(last.at) < PENDING or any(_at(r.created_at) >= _at(last.at) for r in dispatched)):
+            if last and (
+                now - _at(last.at) < PENDING
+                or any(_at(r.created_at) >= _at(last.at) - DISPATCH_GRACE for r in dispatched)
+            ):
                 width = int(last.info.get("parallel") or DEFAULT_PARALLEL)
             elif runs:
                 width = DEFAULT_PARALLEL

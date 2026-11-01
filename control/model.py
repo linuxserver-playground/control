@@ -118,6 +118,12 @@ def pages_only_sql(alias: str) -> str:
 BUILD_RUN_SQL = f"NOT {pages_only_sql('runs')}"
 """Runs that are builds: the scheduler's in-flight and settle checks and branch health never see a Pages deploy."""
 
+DISPATCH_GRACE = datetime.timedelta(seconds=60)
+"""How far before a dispatch decision's time its run may have been created. GitHub stamps the run when it accepts
+the dispatch POST; control stamps the decision when the POST returns, so the run is often a second older than the
+decision, and the package check proot-apps ran at 00:00:42 was reported as never appeared against its 00:00:43
+decision (2026-11-01). One minute is far shorter than any two dispatches of a branch are apart."""
+
 
 class Run(BaseModel):
     id: int
@@ -909,18 +915,18 @@ class Model:
         exclude_run_id: int | None = None,
         pages: bool = False,
     ) -> Run | None:
-        """The first run of `event` on a branch created after `after`: how a dispatch decision finds its run,
-        and how a package check finds the release build it dispatched (`exclude_run_id` keeps it from
-        matching itself). Builds only, or with `pages` the Pages deploys only."""
-        limit = (datetime.datetime.fromisoformat(after) + datetime.timedelta(seconds=within_seconds)).isoformat(
-            timespec="seconds"
-        )
+        """The first run of `event` on a branch created after `after` (less `DISPATCH_GRACE`): how a dispatch
+        decision finds its run, and how a package check finds the release build it dispatched (`exclude_run_id`
+        keeps it from matching itself). Builds only, or with `pages` the Pages deploys only."""
+        at = datetime.datetime.fromisoformat(after)
+        since = (at - DISPATCH_GRACE).isoformat(timespec="seconds")
+        limit = (at + datetime.timedelta(seconds=within_seconds)).isoformat(timespec="seconds")
         with self.db.connect() as conn:
             row = conn.execute(
                 "SELECT * FROM runs WHERE repo = ? AND branch = ? AND event = ? AND created_at >= ? "
                 f"AND created_at <= ? AND id IS NOT ? AND {pages_only_sql('runs') if pages else BUILD_RUN_SQL} "
                 "ORDER BY created_at LIMIT 1",
-                (repo, branch, event, after, limit, exclude_run_id),
+                (repo, branch, event, since, limit, exclude_run_id),
             ).fetchone()
         return Run(**dict(row)) if row else None
 

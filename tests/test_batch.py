@@ -246,6 +246,38 @@ def test_capacity_holds_a_fresh_dispatch_before_its_run_appears(state: State) ->
     assert "proot-apps" not in batch.capacity(state, SLOT + datetime.timedelta(minutes=2)).batch
 
 
+@pytest.mark.anyio
+async def test_a_run_stamped_a_second_before_its_dispatch_is_the_dispatched_run(
+    state: State, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GitHub creates the run when it accepts the POST; control records the decision when the POST returns. The
+    package check proot-apps ran at 00:00:42 was reported as never appeared against its 00:00:43 decision
+    (2026-11-01)."""
+    monkeypatch.setattr(state.discord, "webhook_url", "https://discord.com/api/webhooks/1/t")
+    state.model.add_decision(
+        "proot-apps", "master", "dispatch", json.dumps({"parallel": 14}), "batch", SLOT.isoformat()
+    )
+    run(
+        state,
+        "proot-apps",
+        70,
+        "Daily Package check",
+        status="in_progress",
+        created=SLOT - datetime.timedelta(seconds=1),
+        branch="master",
+    )
+    found = state.model.run_after(f"{ORG}/proot-apps", "master", "workflow_dispatch", SLOT.isoformat())
+    assert found is not None and found.id == 70
+    # The hold keeps the width control chose once the pending window has passed.
+    assert batch.capacity(state, SLOT + datetime.timedelta(minutes=20)).batch == {"proot-apps": 14}
+    github = FakeGitHub()
+    async with mock_client(github) as http:
+        state.discord.client = http
+        runner = make(state, http, [SLOT + datetime.timedelta(minutes=20)])
+        await runner.watch()
+    assert github.discord == []
+
+
 # -- the schedule -------------------------------------------------------------------------------------------------
 
 
