@@ -123,6 +123,8 @@ class Discovery:
         for data in repos:
             if not isinstance(data, dict) or not str(data.get("name", "")).startswith("docker-"):
                 continue
+            if data.get("is_template"):
+                continue  # a template (Labs' docker-template) is copied into new repos; it is neither image nor helper
             repo = Repo.from_github(data)
             self.model.upsert_repo(repo)
             seen.add(repo.full_name)

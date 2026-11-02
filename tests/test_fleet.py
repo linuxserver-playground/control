@@ -227,12 +227,18 @@ def test_push_webhook_schedules_a_refresh(
 
 
 class FakeOrgWithHelper(FakeRepo):
-    """The image repo plus docker-mods, a docker-* repo without an image.yml."""
+    """The image repo plus docker-mods, a docker-* repo without an image.yml, and a template repo, which is skipped."""
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         if request.url.path == "/orgs/example-org/repos":
             mods = {**fixture("api.repos")[0], "name": "docker-mods", "full_name": "example-org/docker-mods"}
-            return httpx.Response(200, json=[*fixture("api.repos"), mods])
+            template = {
+                **fixture("api.repos")[0],
+                "name": "docker-template",
+                "full_name": "example-org/docker-template",
+                "is_template": True,
+            }
+            return httpx.Response(200, json=[*fixture("api.repos"), mods, template])
         if request.url.path == "/repos/example-org/docker-mods/branches":
             names = ["master", "universal-git", "swag-dbip", "universal-tshoot"]
             return httpx.Response(200, json=[{"name": b} for b in names])
