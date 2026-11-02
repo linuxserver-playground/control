@@ -41,7 +41,7 @@ repo's content); `control/templating.py` Jinja filters; `control/app.py` wires i
   live-refresh script); `_jobs.html` holds the shared job and step macros, `_actions.html` the member forms.
 - `tests/` pytest, one temp data dir per test; `tests/fixtures/` minimal realistic webhook, control-event
   and REST payloads (`seed()` in `conftest.py` runs them through the handlers); `root/` the s6 services;
-  `deploy/n97/` the operator files; `deploy/n97-labs/` the second instance, for the Labs org.
+  `deploy/n97/` the operator files.
 
 ## Checks
 
@@ -57,7 +57,7 @@ All three must pass before a commit. Match the existing style: short modules, do
 
 A push to `main` is a deploy: Publish (`.github/workflows/publish.yml`) runs Check, publishes
 `ghcr.io/linuxserver-playground/control:latest`, and the `updater` service on n97 recreates the container
-within 5 minutes (Labs control's own updater does the same for `control-labs`, so one push deploys both). Control
+within 5 minutes. Control
 drives only what its org has: a feature for one org's repositories (batch projects, the hub, the site) skips an org
 without them rather than needing a setting. A red `main` ships nothing. Settings and secrets live only in `~/control/.env` on n97; a new
 setting needs a default that works without it, plus a line in `deploy/n97/README.md` for the operator.
