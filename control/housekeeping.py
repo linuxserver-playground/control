@@ -8,7 +8,7 @@ Housekeeping, once a day from the scheduler's loop:
   and the backfill and reconcile cover anything older. SQLite reuses the freed pages.
 - **Snapshots.** A compacted copy of the database (`VACUUM INTO`, consistent while control runs) goes to
   `<data dir>/snapshots/`, keeping the newest `snapshots_keep`. They guard against a bad migration or a corrupted
-  file, not against losing the disk: copy the data dir off the host for that (deploy/n97/README.md). A snapshot is
+  file, not against losing the disk: copy the data dir off the host for that (deploy/README.md). A snapshot is
   skipped while the disk has less free than twice the database.
 
 Each pass is `last_housekeeping` on /status. Never raises.

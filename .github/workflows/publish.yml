@@ -1,7 +1,6 @@
 # Runs the checks, then builds the control plane image for amd64 and arm64 on native runners and publishes a
-# multi-arch ghcr.io/linuxserver-playground/control:latest on every push to main. n97 deploys it by itself:
-# the updater beside the container pulls :latest every few minutes (deploy/n97/README.md), so merging to main
-# is the deploy.
+# multi-arch ghcr.io/linuxserver-playground/control:latest on every push to main. A deployment with the updater
+# from deploy/compose.yml pulls :latest every few minutes, so merging to main is the deploy.
 name: Publish image
 
 on:

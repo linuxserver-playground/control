@@ -1,0 +1,39 @@
+---
+# An example deployment: control and an optional updater that ships every push to main. Run it from a directory
+# holding .env (mode 600, never committed) and config/ (the database and the GitHub App's key). Put control behind
+# a reverse proxy that terminates TLS and forwards to port 8080 with the X-Forwarded-* headers.
+services:
+  control:
+    image: ghcr.io/linuxserver-playground/control:latest
+    container_name: control
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+    env_file: ./.env
+    volumes:
+      - ./config:/config
+    # Publish nothing when the proxy shares a Docker network with control; otherwise bind to localhost:
+    # ports:
+    #   - 127.0.0.1:8080:8080
+
+  updater:
+    # Optional: pull :latest every 5 minutes and recreate control only when the digest changed, so merging to main
+    # is the deploy. Leave it out to update by hand.
+    image: docker:29-cli
+    container_name: control-updater
+    restart: unless-stopped
+    working_dir: ${PWD}
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          docker compose -p control pull -q control && docker compose -p control up -d control
+          sleep 300
+        done
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # compose resolves ./config and ./.env as host paths, so the directory is mounted at the same path
+      - ${PWD}:${PWD}:ro

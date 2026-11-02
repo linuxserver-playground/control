@@ -364,7 +364,7 @@ member:
 
 The site (`https://linuxserver-playground.github.io/site/`, static) renders every fleet page from the JSON
 above and lets members act from there. Production will serve site and control from one registrable domain,
-so **the session cookie is the one credential**; the playground origins differ (github.io vs duckdns.org),
+so **the session cookie is the one credential**; where the site and control are on different domains, as in the playground,
 and the team tests with Chromium, which still sends a `SameSite=None; Secure` cookie on credentialed
 cross-site fetches. A bearer-token handoff was considered and dropped for now: it only becomes necessary for
 browsers that partition or block third-party cookies (Safari), and it would reintroduce a token the page
