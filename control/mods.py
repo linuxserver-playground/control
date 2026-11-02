@@ -114,16 +114,21 @@ async def tag_exists(http: httpx.AsyncClient, org: str, tag: str) -> bool:
     return True
 
 
+def _expected(error: Any) -> bool:
+    """A NOT_FOUND on a branch's `file` (a branch without mod.yml, such as master) or on the repository itself (an
+    org without docker-mods, such as Labs). Either leaves the rest of the answer usable."""
+    if not (isinstance(error, dict) and error.get("type") == "NOT_FOUND"):
+        return False
+    path = error.get("path") or [None]
+    return path[-1] == "file" or path == ["repository"]
+
+
 async def refs_page(github: GitHub, org: str, after: str | None) -> Any:
-    """One page of the refs query. A branch without mod.yml (master) comes back as a NOT_FOUND error on its `file`
-    beside the data of every other branch; those errors are expected, any other raises."""
+    """One page of the refs query. Expected NOT_FOUND errors (`_expected`) come back beside the data; any other
+    raises."""
     variables = {"owner": org, "name": REPO_NAME, "after": after}
     body = (await github.post("/graphql", {"query": REFS, "variables": variables})).json()
-    errors = [
-        e
-        for e in body.get("errors") or []
-        if not (isinstance(e, dict) and e.get("type") == "NOT_FOUND" and (e.get("path") or [None])[-1] == "file")
-    ]
+    errors = [e for e in body.get("errors") or [] if not _expected(e)]
     if errors:
         raise GraphQLError(errors)
     return body.get("data")
@@ -183,11 +188,7 @@ async def refresh_branch(
     """One branch after a push: read its mod.yml now and keep, replace or drop its row, as discovery would."""
     variables = {"owner": org, "name": REPO_NAME, "ref": f"refs/heads/{branch}"}
     body = (await github.post("/graphql", {"query": REF, "variables": variables})).json()
-    errors = [
-        e
-        for e in body.get("errors") or []
-        if not (isinstance(e, dict) and e.get("type") == "NOT_FOUND" and (e.get("path") or [None])[-1] == "file")
-    ]
+    errors = [e for e in body.get("errors") or [] if not _expected(e)]
     if errors:
         raise GraphQLError(errors)
     repository = (body.get("data") or {}).get("repository") or {}

@@ -576,3 +576,15 @@ async def test_the_next_line_goes_out_when_the_last_build_finishes(state: State)
         "mod_version": "1.28rc1",
         "line": "unstable",
     }
+
+
+@pytest.mark.anyio
+async def test_an_org_without_docker_mods_discovers_nothing(state: State) -> None:
+    """Labs has no docker-mods: GitHub answers with a NOT_FOUND on the repository, which is not a failure."""
+    missing = {
+        "data": {"repository": None},
+        "errors": [{"type": "NOT_FOUND", "path": ["repository"], "message": "Could not resolve to a Repository"}],
+    }
+    async with mock_client(lambda request: httpx.Response(200, json=missing)) as http:
+        counts = await mods.discover(GitHub(http, "ghs_token"), "example-org", state.model, state.stream)
+    assert counts["branches"] == 0 and state.model.mod_manifests() == []
