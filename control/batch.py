@@ -352,7 +352,10 @@ class Batch:
 
     async def tick(self) -> list[Decision]:
         now = self.now()
-        decisions = [await self.check(project) for project in PROJECTS if self.due(project, now)]
+        # Only the projects this org has: a control for another org (Labs) has none of them.
+        have = {repo.full_name for repo in self.model.repos()}
+        due = [project for project in PROJECTS if self.full(project) in have and self.due(project, now)]
+        decisions = [await self.check(project) for project in due]
         if not self.scheduler.dry_run:
             await self.watch()
         return decisions

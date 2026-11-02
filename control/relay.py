@@ -36,12 +36,19 @@ def is_hub_deploy_success(state: State, payload: dict[str, Any]) -> bool:
     )
 
 
+def in_org(state: State, name: str) -> bool:
+    """Whether the org has this repository, as control last saw it. A second control for another org (Labs: no site
+    repository of its own, and no hub until it is created) then nudges only what exists there."""
+    return state.model.repo(f"{state.settings.github_org}/{name}") is not None
+
+
 def consumers(state: State) -> tuple[str, ...]:
-    """The repos that rebuild from hub data: the configured list, always including the site repo."""
+    """The repos that rebuild from hub data: the configured list, always including the site repo, less any the org
+    does not have."""
     names = list(state.settings.hub_consumers)
     if state.settings.site_repo not in names:
         names.insert(0, state.settings.site_repo)
-    return tuple(names)
+    return tuple(name for name in names if in_org(state, name))
 
 
 async def dispatch_site_refresh(state: State, payload: dict[str, Any]) -> bool:
@@ -90,7 +97,10 @@ def hub_refresh_due(state: State, now: datetime.datetime | None = None) -> bool:
 
 
 async def dispatch_hub_refresh(state: State, github: GitHub, now: datetime.datetime | None = None) -> bool:
-    """`workflow_dispatch` of the hub's Refresh on main, the same as its cron. Never raises."""
+    """`workflow_dispatch` of the hub's Refresh on main, the same as its cron. Never raises; does nothing in an
+    org without a hub repository."""
+    if not in_org(state, state.settings.hub_repo):
+        return False
     at = now or datetime.datetime.now(datetime.UTC)
     repo = f"{state.settings.github_org}/{state.settings.hub_repo}"
     try:

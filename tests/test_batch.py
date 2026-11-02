@@ -8,10 +8,10 @@ from fastapi.testclient import TestClient
 
 from control import batch, events, scheduler
 from control.github import GitHub
-from control.model import Job, Run
+from control.model import Job, Repo, Run
 from control.state import State
 
-from .conftest import mock_client
+from .conftest import fixture, mock_client
 
 ORG = "example-org"
 SLOT = datetime.datetime(2026, 10, 24, 4, 30, tzinfo=datetime.UTC)
@@ -303,6 +303,23 @@ async def test_live_project_is_dispatched_with_the_free_width(state: State, monk
         )
     ]
     assert batch.capacity(state, now[0]).batch == {"selkies-layers": 12}  # held while its run starts
+
+
+@pytest.mark.anyio
+async def test_tick_checks_only_the_projects_the_org_has(state: State, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Labs control: an org without selkies-layers, proot-apps or wheelie checks none of them."""
+    live(state, monkeypatch, "selkies-layers")
+    github = FakeGitHub()
+    now = [SLOT + datetime.timedelta(minutes=1)]
+    async with mock_client(github) as http:
+        assert await make(state, http, now, dry_run=True).tick() == []
+        state.model.upsert_repo(
+            Repo.from_github(
+                {**fixture("api.repos")[0], "full_name": f"{ORG}/selkies-layers", "name": "selkies-layers"}
+            )
+        )
+        decisions = await make(state, http, now, dry_run=True).tick()
+    assert [d.image for d in decisions] == ["selkies-layers"]
 
 
 @pytest.mark.anyio
