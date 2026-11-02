@@ -20,14 +20,13 @@ Usage: python -m control            serve
 
 import argparse
 import asyncio
-import logging
 import sys
 from collections.abc import Awaitable, Callable
 
 import httpx
 import uvicorn
 
-from . import batch, handlers, scheduler
+from . import batch, handlers, logs, scheduler
 from .app import build_state
 from .backfill import backfill_once
 from .config import Settings
@@ -40,7 +39,7 @@ from .templating import package_version
 
 
 def main(argv: list[str]) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logs.configure()
     command = argv[0] if argv else "serve"
     if command == "serve":
         uvicorn.run(
