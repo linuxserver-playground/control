@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from control import publish
+from control.github import GitHub
 from control.state import State
 
 from .conftest import REPO, fixture, mock_discord, post_event
@@ -167,3 +168,60 @@ def test_a_long_group_is_split_at_the_discord_limit() -> None:
     assert len(posts) > 1 and all(len(p) <= publish.DISCORD_LIMIT for p in posts)
     assert all(p.startswith("✅ 120 releases reached the website after 30 to 34 min:") for p in posts)
     assert sum(p.count("\n- **") for p in posts) == 120
+
+
+@pytest.mark.anyio
+async def test_overdue_page_says_when_the_hub_has_it_but_its_site_is_stale(
+    state: State, world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-11-04: the hub ingested steam a minute after its release, but GitHub Pages kept serving an older deploy
+    while reporting every new one successful. The alert said the hub had not ingested it; now it says what is wrong
+    and control starts redeploying the hub."""
+    hub_data: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.startswith("https://api.github.com/repos/example-org/hub/contents/images/sonarr/builds/"):
+            assert request.url.params["ref"] == "data"
+            return httpx.Response(200 if f"/builds/{TAG}.json" in url and hub_data else 404, json={})
+        if request.url.path.endswith("/hub/deploy.json"):
+            return httpx.Response(200, json={"run_id": 41887591125, "run_attempt": 1})
+        return world(request)
+
+    mock_discord(state, monkeypatch, handler)
+    monkeypatch.setattr(publish, "installation_client", lambda s: _client(s))
+    hub_data.append(TAG)
+    await publish.check_once(state, now=lambda: at(31))
+    build = state.model.build(REPO, 5001)
+    assert build and build.publish_note == (
+        "the hub has ingested it, but its Pages site still serves an older deploy "
+        "(run https://github.com/example-org/hub/actions/runs/41887591125); control is redeploying the hub "
+        "(hub runs: https://github.com/example-org/hub/actions/workflows/deploy.yml)"
+    )
+    row = state.model.pages_heal("example-org/hub")
+    assert row is not None and row.state == "retrying"
+    # The post's links go out in brackets, so Discord shows no preview boxes.
+    post = world.posts()[0]
+    assert "(run <https://github.com/example-org/hub/actions/runs/41887591125>)" in post
+    assert "Release: <https://github.com/" in post
+
+
+@pytest.mark.anyio
+async def test_overdue_page_the_hub_lacks_is_still_not_ingested(
+    state: State, world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/contents/images/" in str(request.url):
+            return httpx.Response(404, json={})
+        return world(request)
+
+    mock_discord(state, monkeypatch, handler)
+    monkeypatch.setattr(publish, "installation_client", lambda s: _client(s))
+    await publish.check_once(state, now=lambda: at(31))
+    build = state.model.build(REPO, 5001)
+    assert build and build.publish_note and build.publish_note.startswith("the hub has not ingested it")
+    assert state.model.pages_heal("example-org/hub") is None
+
+
+async def _client(state: State) -> GitHub:
+    return GitHub(state.http, "ghs_token")

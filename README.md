@@ -68,7 +68,7 @@ docker run --rm -p 8080:8080 -e PUID=1000 -e PGID=1000 -e CONTROL_PUBLIC_URL=htt
 | `CONTROL_RUN_ARCHIVE` | `true`                        | Attach `run.json` and `logs.zip` to every live release once its run completes (see *Run archive*). |
 | `CONTROL_RUN_ARCHIVE_PER_PASS`, `CONTROL_RUN_ARCHIVE_ATTEMPTS`, `CONTROL_RUN_ARCHIVE_MAX_LOGS_MB` | `3`, `8`, `500` | Runs archived per minute at most; tries before giving up on one (backing off 5 minutes to 6 hours); the largest log archive attached. |
 | `CONTROL_PAGES_CHECK` | `true`                        | Warn once about every image repo without a GitHub Pages site and list them in the discovery record (see *Pages on image repos*). Read-only. |
-| `CONTROL_HEAL_PAGES`  | `true`                        | Redeploy an image repo's Pages site when a deploy failed, with backoff (see *Self-healing*). |
+| `CONTROL_HEAL_PAGES`  | `true`                        | Redeploy an image repo's Pages site when a deploy failed, and the hub's when its site was not updated, with backoff (see *Self-healing*). |
 | `CONTROL_HEAL_PAGES_BACKOFF_MINUTES`, `CONTROL_HEAL_PAGES_ATTEMPTS` | `5,30,120,1440`, `4` | The wait before each Pages retry (csv; the last step repeats) and the retries before control gives up and reports. |
 | `CONTROL_HEAL_RERUNS` | `true`                        | Re-run the failed jobs of a live build once when only an infrastructure step failed (see *Self-healing*). |
 | `CONTROL_HEAL_RERUN_DELAY_MINUTES`, `CONTROL_HEAL_RERUN_WINDOW_HOURS` | `5`, `6` | How long after the failure the re-run goes out; how long control may wait for free slots before it gives up and reports. |
@@ -490,9 +490,14 @@ refreshes and deploys, longer when a burst of releases queues. So the build's Di
 summary as "passed, publishing", linking control instead of a page that would 404, and `control/publish.py` checks
 every held build's page once a minute. When it answers the message becomes the final summary with its CI report
 link. Past `CONTROL_PUBLISH_DEADLINE_MINUTES` the message turns into "not on the site" and a separate post (an edit
-does not notify) says where it is stuck, read from the hub's own data: the hub has not ingested the release, or the
-hub has it and the site has not published it, with the runs to look at. A page that turns up later is announced
-with a short follow-up; after `CONTROL_PUBLISH_EXPIRY_HOURS` control stops watching and says so.
+does not notify) says where it is stuck, read from the hub's own data: the hub rejected the release, has not
+ingested it, has ingested it (its `data` branch has the build) while its Pages site still serves an older deploy
+(the run its `deploy.json` names; this also starts control's redeploys of the hub, *Self-healing*), or has it and the
+site has not published it, with the runs to look at. A page that turns up later is announced with a short follow-up;
+after `CONTROL_PUBLISH_EXPIRY_HOURS` control stops watching and says so.
+
+Every link in a message's text goes to Discord in `<...>` (`notify.no_previews`), so GitHub links show as links, not
+as large preview boxes. Embeds never unfurl their links and are left alone.
 
 ## Run archive
 
@@ -586,6 +591,13 @@ deploy that succeeds, whoever started it. A retry waits while a non-PR run of th
 deploys anyway) and while the fleet has no free slot. After `CONTROL_HEAL_PAGES_ATTEMPTS` retries (about a day) it
 gives up; a repo with no Pages site (*Pages on image repos*) is never retried. Each dispatch is a scheduler
 decision of kind `heal` (a Pages deploy never starts a branch's build cooldown) and an action by `control`.
+
+The hub's Pages site is healed the same way, as one more row. GitHub can report a Pages deploy successful that never
+goes live (2026-11-04: five hub deploys in an hour, the site stuck on the one before), so the hub's Deploy checks
+that its site serves its run's `deploy.json`, deploying up to three times, and fails when it never does. A Deploy
+that failed in one of its Pages steps (`recover.HUB_PAGES_STEPS`), or an overdue release that is in the hub's data
+but not on its site, starts the retries; each dispatches the hub's `deploy.yml` on main, and any Deploy that succeeds
+clears them. A Deploy that failed in its ingest or data publish is not retried.
 
 **Infrastructure failures of live builds**: a failed first attempt of a push or dispatch run on a live branch (never
 a pull request run, so never a fork) is judged once from its jobs, `CONTROL_HEAL_RERUN_DELAY_MINUTES` after it

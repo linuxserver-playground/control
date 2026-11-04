@@ -470,3 +470,87 @@ def test_events_feed_the_pages_outcome(client: TestClient, state: State) -> None
     assert post_event(client, summary).status_code == 202
     row = state.model.pages_heal(REPO)
     assert row is not None and row.state == "retrying" and row.run_id == 5001
+
+
+# -- the hub's Pages ------------------------------------------------------------------------------------------------
+
+HUB = "example-org/hub"
+HUB_STEPS_STALE = [
+    step("Ingest every pending release"),
+    step("Deploy to Pages", number=2),
+    step("Check that Pages serves the deploy", "failure", 3),
+    step("Deploy to Pages again", number=4),
+    step("Check that Pages serves the second deploy", "failure", 5),
+    step("Deploy to Pages a last time", number=6),
+    step("Check that Pages serves the last deploy", "failure", 7),
+]
+
+
+def hub_deploy(state: State, run_id: int, conclusion: str, steps: list[dict[str, Any]], at: datetime.datetime) -> None:
+    state.model.upsert_repo(Repo.from_github({**fixture("api.repos")[0], "full_name": HUB, "name": "hub"}))
+    data = {
+        "id": run_id,
+        "name": "Deploy",
+        "event": "repository_dispatch",
+        "head_branch": "main",
+        "head_sha": "b" * 40,
+        "status": "completed",
+        "conclusion": conclusion,
+        "html_url": f"https://github.com/{HUB}/actions/runs/{run_id}",
+        "created_at": iso(at - 10 * MINUTE),
+        "updated_at": iso(at),
+        "run_attempt": 1,
+    }
+    state.model.upsert_run(Run.from_github(HUB, data))
+    job = {**job_data(run_id, run_id * 10, "deploy / deploy", conclusion, steps, at), "html_url": None}
+    state.model.upsert_job(Job.from_github(HUB, job))
+
+
+@pytest.mark.anyio
+async def test_a_hub_deploy_pages_never_served_is_redeployed_until_one_is(
+    state: State, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-11-04: GitHub reported the hub's Pages deploys successful for an hour while the site served an older one.
+    The Deploy now fails when its site never shows its run, and control dispatches the Deploy again with backoff."""
+    world = World()
+    hub_deploy(state, 70, "failure", HUB_STEPS_STALE, T0)
+    assert await tick(state, world, monkeypatch, T0 + MINUTE) == 0
+    row = state.model.pages_heal(HUB)
+    assert row is not None and row.state == "retrying" and row.note == "Pages still served an older deploy after three"
+    assert await tick(state, world, monkeypatch, T0 + 5 * MINUTE) == 1
+    assert world.posts == [(f"/repos/{HUB}/actions/workflows/deploy.yml/dispatches", {"ref": "main"})]
+    action = state.model.recent_actions(1)[0]
+    assert (action.actor, action.target, action.result) == ("control", f"{HUB}@main (deploy.yml)", "ok")
+    # That Deploy works: the retries stop.
+    hub_deploy(
+        state,
+        71,
+        "success",
+        [step("Deploy to Pages"), step("Check that Pages serves the deploy", number=2)],
+        T0 + 9 * MINUTE,
+    )
+    await tick(state, world, monkeypatch, T0 + 10 * MINUTE)
+    row = state.model.pages_heal(HUB)
+    assert row is not None and row.state == "ok"
+    assert await tick(state, world, monkeypatch, T0 + 10 * 60 * MINUTE) == 0 and len(world.posts) == 1
+
+
+@pytest.mark.anyio
+async def test_a_hub_deploy_that_failed_before_pages_is_left_alone(
+    state: State, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ingest or data publish failure is not Pages' doing, and a redeploy would only fail the same way."""
+    world = World()
+    hub_deploy(state, 72, "failure", [step("Ingest every pending release", "failure")], T0)
+    assert await tick(state, world, monkeypatch, T0 + 10 * MINUTE) == 0
+    assert state.model.pages_heal(HUB) is None and world.posts == []
+
+
+def test_a_first_serve_check_that_continued_still_counts_as_a_success() -> None:
+    steps = [step("Deploy to Pages"), step("Check that Pages serves the deploy", "failure", 2)]
+    steps += [step("Deploy to Pages again", number=3), step("Check that Pages serves the second deploy", number=4)]
+    job = Job.from_github(HUB, {**job_data(73, 730, "deploy / deploy", "success", steps), "html_url": None})
+    assert recover.pages_outcome(job, HUB) == (True, None)
+    # And the hub's other workflows say nothing about Pages.
+    refresh = Job.from_github(HUB, {**job_data(74, 740, "refresh / refresh", "failure", steps), "html_url": None})
+    assert recover.pages_outcome(refresh, HUB) is None

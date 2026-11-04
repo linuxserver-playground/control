@@ -9,10 +9,13 @@ message into its final form.
 
 Nothing is left dangling: past `publish_deadline_minutes` the message says the page is overdue and a separate
 post (which notifies, where an edit does not) says where it is stuck, from the hub's own data: the hub rejected
-the release (with the reason from its status API), has not ingested it yet, or has it and the site has not
-published it. Releases that cross the deadline in the same check for the same reason share one post, since a burst
-of them waits on the same deploy. Control keeps watching; a page that turns up later clears the warning with a
-short follow-up, and after `publish_expiry_hours` control stops and says so once more.
+the release (with the reason from its status API), has not ingested it yet, has ingested it (its `data` branch has
+the build) while its Pages site still serves an older deploy (its `deploy.json` names the run), or has it and the site
+has not published it. A stale hub site also starts control's redeploys of the hub (recover.py), since GitHub can
+report a Pages deploy successful that never goes live. Releases that cross the deadline in the same check for the
+same reason share one post, since a burst of them waits on the same deploy. Control keeps watching; a page that
+turns up later clears the warning with a short follow-up, and after `publish_expiry_hours` control stops and says so
+once more.
 """
 
 from __future__ import annotations
@@ -20,13 +23,16 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+import time
 from collections.abc import Callable
 from typing import NamedTuple
 
 import httpx
 
+from . import recover
 from .db import utcnow
 from .events import announce, site_build_url
+from .github import installation_client
 from .model import Build
 from .state import State
 
@@ -81,6 +87,31 @@ async def hub_rejection(http: httpx.AsyncClient, hub_url: str, image: str, tag: 
     return str(error) if error else None
 
 
+async def hub_ingested(state: State, image: str, tag: str) -> bool | None:
+    """Whether the hub's `data` branch has the build, whatever its Pages site serves; None when it cannot be read."""
+    github = await installation_client(state)
+    if github is None:
+        return None
+    settings = state.settings
+    path = f"/repos/{settings.github_org}/{settings.hub_repo}/contents/images/{image}/builds/{tag}.json"
+    try:
+        await github.get(path, {"ref": "data"})
+    except httpx.HTTPStatusError as exc:
+        return False if exc.response.status_code == 404 else None
+    except httpx.HTTPError:
+        return None
+    return True
+
+
+async def hub_served_run(http: httpx.AsyncClient, hub_url: str) -> int | None:
+    """The Deploy run whose site the hub's Pages serves (its `deploy.json`), cache-busted; None when unknown."""
+    try:
+        response = await http.get(f"{hub_url}/deploy.json", params={"at": str(int(time.time()))}, timeout=15)
+        return int(response.json()["run_id"]) if response.status_code == 200 else None
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        return None
+
+
 async def diagnose(state: State, build: Build) -> str:
     """Where a release is stuck on its way to the website, in a sentence with the runs to look at."""
     settings = state.settings
@@ -94,8 +125,25 @@ async def diagnose(state: State, build: Build) -> str:
         rejection = await hub_rejection(state.http, settings.hub_url, build.image, str(build.version_tag))
         if rejection:
             return f"the hub rejected it: {rejection}"
+        if await hub_ingested(state, build.image, str(build.version_tag)):
+            return await _stale_hub(state, hub_runs)
         return f"the hub has not ingested it (hub runs: {hub_runs})"
     return f"the hub has it, the site has not published it (site runs: {site_runs})"
+
+
+async def _stale_hub(state: State, hub_runs: str) -> str:
+    """The note for a build the hub has ingested but its Pages site does not serve, and the start of control's
+    redeploys of the hub. The note names no release, so every release behind the same stale site shares one post."""
+    settings = state.settings
+    served = await hub_served_run(state.http, settings.hub_url)
+    hub = recover.hub_repo(state)
+    which = f" (run https://github.com/{hub}/actions/runs/{served})" if served else ""
+    note = f"the hub has ingested it, but its Pages site still serves an older deploy{which}"
+    if not settings.heal_pages:
+        return f"{note} (hub runs: {hub_runs})"
+    at = utcnow()
+    recover.observe_pages(state, hub, False, at, None, "the hub's Pages site served an older deploy", at)
+    return f"{note}; control is redeploying the hub (hub runs: {hub_runs})"
 
 
 async def check_once(state: State, now: Callable[[], str] = utcnow) -> None:

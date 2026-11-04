@@ -69,7 +69,7 @@ def test_callback_converts_persists_and_redirects_to_install(
     assert response.headers["location"] == "https://github.com/apps/octoapp/installations/new"
     saved = state.credentials.load()
     assert saved and saved.slug == "octoapp"
-    assert posted == ["GitHub App **octoapp** created: https://github.com/apps/octoapp"]
+    assert posted == ["GitHub App **octoapp** created: <https://github.com/apps/octoapp>"]
     # The state token is single use.
     assert state.db.get(SETUP_STATE) is None
     # And a second conversion is refused now that the app exists.

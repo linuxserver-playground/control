@@ -83,8 +83,9 @@ class Settings(BaseModel):
     """Warn once (log and Discord) about every image repo without a GitHub Pages site, whose build files then never
     reach the website, and list them in the discovery record (pages.py). Read-only: control never enables Pages."""
     heal_pages: bool = True
-    """Redeploy an image repo's Pages site (`reason: pages` on its default branch) when a deploy failed, backing off
-    (recover.py). A failed deploy leaves the previous site up, stale; repeating one is always safe."""
+    """Redeploy an image repo's Pages site (`reason: pages` on its default branch) when a deploy failed, and the hub's
+    (its Deploy again) when its site was not updated, backing off (recover.py). A failed deploy leaves the previous
+    site up, stale; repeating one is always safe."""
     heal_pages_backoff_minutes: tuple[int, ...] = (5, 30, 120, 1440)
     """Wait before each retry: the first after the failure, each next after the previous dispatch; the last step
     repeats. Env CONTROL_HEAL_PAGES_BACKOFF_MINUTES (csv)."""

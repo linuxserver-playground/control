@@ -23,7 +23,7 @@ fleet, and lets org members act (re-run, cancel, dispatch, skip). Python 3.12+, 
   delivery log, every unfinished run and every open thread read again; `control/housekeeping.py` daily delivery
   retention and database snapshots; `control/heal.py` re-reads runs left unfinished with no job running, and the jobs of completed runs whose job webhooks never
   came; `control/recover.py` self-healing from the scheduler's minute loop: failed Pages deploys redeployed with
-  backoff, live builds that failed only in an infrastructure step (`INFRA_STEPS`) re-run once, give-ups grouped
+  backoff (the image repos' and the hub's, whose Deploy fails when Pages never serves it), live builds that failed only in an infrastructure step (`INFRA_STEPS`) re-run once, give-ups grouped
   into one Discord summary an hour; `control/pages.py` the read-only Pages check: one warning per image
   repo whose `has_pages` is false (control never enables Pages);
   `control/batch.py` the batch build projects (selkies-layers, proot-apps, wheelie): sizing `parallel` from the

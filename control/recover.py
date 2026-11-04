@@ -13,6 +13,14 @@ one row per repo so at most one retry is ever pending, and clears it at the firs
 started it. After `heal_pages_attempts` retries without one it gives up and reports. A repo without a Pages site
 (pages.py reports those) is never retried.
 
+**The hub's Pages.** The hub's Deploy ends by deploying its Pages site, and checks that the site then serves its run's
+`deploy.json`, deploying up to three times (the hub's `scripts/pages_serves.sh`): on 2026-11-04 GitHub reported five
+hub deploys in a row successful while the site kept serving an older one, for over an hour. A Deploy that fails in one
+of its Pages steps (HUB_PAGES_STEPS) starts the same retries, one row for the hub repo, and a retry dispatches the
+hub's `deploy.yml` on main; any Deploy that succeeds clears it. A Deploy that failed elsewhere (the ingest, the data
+publish) is not Pages' fault and is left to people. publish.py starts the retries too when an overdue release turns
+out to be in the hub's data but not on its site.
+
 **Re-runs.** A live build run (push or dispatch on a live branch, first attempt) that failed is judged once from its
 jobs: every failed job's failing step must be plain infrastructure (INFRA_STEPS: checkout, runner setup, registry
 login, artifacts, publishing tags already built and tested, the release upload), not the image build, the tests or
@@ -64,6 +72,23 @@ PAGES_LIVE_STEP = "Pages (live)"
 """The live Publish's deploy step. It is `continue-on-error`, so only a step reported failed counts; its success
 is not read as a deploy, which the summary's PAGES_FIELD or the next `Pages` job says."""
 PUBLISH_JOB = "Publish"
+HUB_DEPLOY_JOBS = ("deploy", "deploy / deploy")
+"""The hub's Deploy job, alone (Labs' hub calls it from its own workflow too) or as the caller's run names it."""
+HUB_DEPLOY_FILE = "deploy.yml"
+HUB_PAGES_STEPS = frozenset(
+    {
+        "Upload the Pages artifact",
+        "Deploy to Pages",
+        "Upload the Pages artifact again",
+        "Deploy to Pages again",
+        "Upload the Pages artifact a last time",
+        "Deploy to Pages a last time",
+        "Check that Pages serves the last deploy",
+    }
+)
+"""The steps of the hub's Deploy (`deploy-run.yml`) whose failure means its Pages site was not updated, while the data
+was. Keep in step with the hub's step names."""
+HUB_STALE_STEP = "Check that Pages serves the last deploy"
 PAGES_SCAN = datetime.timedelta(hours=6)
 """Deploys that finished this long ago are still read each minute; each is taken into account once."""
 
@@ -257,8 +282,24 @@ def observe_pages(state: State, repo: str, ok: bool, at: str, run_id: int | None
     state.model.upsert_pages_heal(row)
 
 
-def pages_outcome(job: Job) -> tuple[bool, str | None] | None:
-    """(succeeded, why not) for a job that deployed Pages, or None for one that says nothing about it."""
+def hub_repo(state: State) -> str:
+    return f"{state.settings.github_org}/{state.settings.hub_repo}"
+
+
+def pages_outcome(job: Job, hub: str | None = None) -> tuple[bool, str | None] | None:
+    """(succeeded, why not) for a job that deployed Pages, or None for one that says nothing about it. `hub` is the
+    hub repo, whose Deploy job counts when it succeeded or failed in a Pages step."""
+    if hub and job.repo == hub:
+        if job.name not in HUB_DEPLOY_JOBS:
+            return None
+        if job.conclusion == "success":
+            return True, None
+        # The first two serve checks continue on error, so read every step that failed, not the first.
+        failed = [s.name for s in job.steps if s.conclusion in ("failure", "cancelled")]
+        if HUB_STALE_STEP in failed:
+            return False, "Pages still served an older deploy after three"
+        pages = [name for name in failed if name in HUB_PAGES_STEPS]
+        return (False, f"{pages[0]} failed") if pages else None
     if is_pages_job(job.name):
         if job.conclusion == "success":
             return True, None
@@ -273,8 +314,9 @@ def pages_outcome(job: Job) -> tuple[bool, str | None] | None:
 
 def scan_pages(state: State, now: datetime.datetime) -> None:
     """Read every deploy that finished lately, oldest first, into the rows."""
-    for job in state.model.pages_outcomes(_iso(now - PAGES_SCAN)):
-        outcome = pages_outcome(job)
+    hub = hub_repo(state)
+    for job in state.model.pages_outcomes(_iso(now - PAGES_SCAN), hub):
+        outcome = pages_outcome(job, hub)
         if outcome is not None and job.completed_at:
             observe_pages(state, job.repo, outcome[0], job.completed_at, job.run_id, outcome[1], _iso(now))
 
@@ -315,6 +357,8 @@ async def _retry_pages(state: State, github: GitHub, row: PagesHeal, now: dateti
         _give_up_pages(state, row, f"no deploy succeeded after {_plural(row.attempts, 'retry', 'retries')}", at)
         return False
     repo = state.model.repo(row.repo)
+    if row.repo == hub_repo(state) and repo is not None:
+        return await _retry_hub(state, github, row, now)
     if repo is None or repo.archived or not repo.is_image:
         state.model.upsert_pages_heal(row.model_copy(update={"state": "ok", "next_attempt_at": None, "updated_at": at}))
         log.info("heal: %s is gone or archived; its Pages retries stop", row.repo)
@@ -352,6 +396,32 @@ async def _retry_pages(state: State, github: GitHub, row: PagesHeal, now: dateti
     )
     _log_action(state, "dispatch", f"{row.repo}@{branch} ({PAGES_REASON})", "ok" if ok else "error", text)
     log.info("heal: %s on %s; next look in %s", text, row.repo, wait)
+    return True
+
+
+async def _retry_hub(state: State, github: GitHub, row: PagesHeal, now: datetime.datetime) -> bool:
+    """A retry for the hub: its Deploy again, from main. It ingests nothing new unless something new came, and checks
+    that Pages serves what it deployed, so its outcome is the next one the rows read."""
+    at = _iso(now)
+    settings = state.settings
+    attempt = row.attempts + 1
+    error = None
+    try:
+        await github.post(f"/repos/{row.repo}/actions/workflows/{HUB_DEPLOY_FILE}/dispatches", {"ref": "main"})
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+    wait = _backoff(state, attempt)
+    state.model.upsert_pages_heal(
+        row.model_copy(
+            update={"attempts": attempt, "last_dispatch_at": at, "next_attempt_at": _iso(now + wait), "updated_at": at}
+        )
+    )
+    text = (
+        f"hub Deploy {attempt} of {settings.heal_pages_attempts} after its Pages site was not updated "
+        f"({row.note or 'no reason'})" + (f": {error}" if error else "")
+    )
+    _log_action(state, "dispatch", f"{row.repo}@main ({HUB_DEPLOY_FILE})", "error" if error else "ok", text)
+    log.info("heal: %s; next look in %s", text, wait)
     return True
 
 

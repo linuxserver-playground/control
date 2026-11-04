@@ -5,6 +5,7 @@ logs and returns None instead of raising.
 """
 
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -52,10 +53,33 @@ class Discord:
             return False
 
 
+_MASKED = re.compile(r"\]\((https?://[^\s()<>]+)\)")
+_BARE = re.compile(r"(?<![<(`])https?://[^\s<>`]+")
+_TRAILING = ".,;:!?'\""
+
+
+def _bracket(match: re.Match[str]) -> str:
+    url, tail = match.group(0), ""
+    while url and (url[-1] in _TRAILING or (url[-1] == ")" and url.count(")") > url.count("("))):
+        url, tail = url[:-1], url[-1] + tail
+    return f"<{url}>{tail}"
+
+
+def no_previews(text: str) -> str:
+    """
+    Wrap every link in a message's text in `<...>`, bare (`https://...`) or masked (`[text](https://...)`), so Discord
+    shows it as a link and not as a preview card. A GitHub link unfurls into a large box, and one alert with a release,
+    a run and the hub's runs filled the channel with three. Links already in brackets and in code are left alone; a
+    sentence's closing punctuation and an unmatched `)` stay outside the brackets. Embeds never unfurl their links,
+    so only `content` needs this.
+    """
+    return _BARE.sub(_bracket, _MASKED.sub(r"](<\1>)", text))
+
+
 def _body(content: str | None, embeds: list[dict[str, Any]] | None) -> dict[str, Any]:
     body: dict[str, Any] = {}
     if content is not None:
-        body["content"] = content
+        body["content"] = no_previews(content)
     if embeds is not None:
         body["embeds"] = embeds
     return body
