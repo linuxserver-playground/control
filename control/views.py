@@ -393,10 +393,14 @@ def run_view(state: State, run: Run, now: datetime.datetime) -> RunView:
 
 
 def pick_release(releases: list[Release], branch: str, default_branch: str, branches: list[str]) -> Release | None:
-    """Releases are tagged `[T-]<upstream>-ls<N>` (§3): a non-default branch owns tags with its prefix, the
-    default branch owns the rest."""
+    """Releases are tagged `[T-]<upstream>-ls<N>` (§3): a non-default branch owns tags with its prefix that no
+    longer sibling prefix claims, the default branch owns the rest."""
     if branch != default_branch:
-        return next((r for r in releases if r.tag.startswith(f"{branch}-")), None)
+        longer = [f"{b}-" for b in branches if b != branch and b.startswith(f"{branch}-")]
+        return next(
+            (r for r in releases if r.tag.startswith(f"{branch}-") and not any(r.tag.startswith(p) for p in longer)),
+            None,
+        )
     others = [f"{b}-" for b in branches if b != default_branch]
     return next((r for r in releases if not any(r.tag.startswith(prefix) for prefix in others)), None)
 

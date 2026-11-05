@@ -158,13 +158,24 @@ def tag_pattern(release_tag: str) -> re.Pattern[str]:
     return re.compile(rf"^{re.escape(release_tag)}-(?P<upstream>.+)-ls(?P<n>\d+)$")
 
 
+def owned_by_sibling(tag: str, release_tag: str, other_tags: list[str]) -> bool:
+    """Whether `tag` belongs to another branch: for the unprefixed branch, any other branch's prefix; for a prefixed
+    branch, a longer sibling prefix that starts with its own."""
+    for other in other_tags:
+        if not other or other in ("latest", release_tag):
+            continue
+        if release_tag != "latest" and not other.startswith(f"{release_tag}-"):
+            continue
+        if tag.startswith(f"{other}-"):
+            return True
+    return False
+
+
 def released_from_tag(tag: str, release_tag: str, other_tags: list[str]) -> str | None:
     """The `<upstream>` part of a release tag that belongs to the branch publishing `release_tag`, as
-    next_tag.py matches it: the unprefixed branch never claims `develop-1.2.3-ls4`."""
+    next_tag.py matches it, never one that belongs to another branch."""
     match = tag_pattern(release_tag).match(tag)
-    if not match:
-        return None
-    if release_tag == "latest" and any(o and o != "latest" and tag.startswith(f"{o}-") for o in other_tags):
+    if not match or owned_by_sibling(tag, release_tag, other_tags):
         return None
     return match.group("upstream")
 

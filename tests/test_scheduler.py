@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 import pytest
 
-from control import batch, events, scheduler
+from control import batch, events, scheduler, views
 from control.__main__ import main
 from control.fleet import manifest_row
 from control.github import GitHub
@@ -190,6 +190,12 @@ def test_released_from_tag_follows_next_tag_rules() -> None:
     assert scheduler.released_from_tag("5.0.1.1234-ls7", "develop", ["latest"]) is None
     assert scheduler.released_from_tag("v1.2.3", "latest", []) is None
     assert scheduler.released_from_tag("2024.01-r1-ls12", "latest", []) == "2024.01-r1"
+    siblings = ["latest", "beta-legacy"]
+    assert scheduler.released_from_tag("beta-legacy-1.2.0-ls4", "beta", siblings) is None
+    assert scheduler.released_from_tag("beta-1.2.0-ls6", "beta", siblings) == "1.2.0"
+    assert scheduler.released_from_tag("beta-legacy-1.2.0-ls4", "beta-legacy", ["latest", "beta"]) == "1.2.0"
+    assert scheduler.released_from_tag("beta-legacy-1.2.0-ls4", "latest", ["beta", "beta-legacy"]) is None
+    assert scheduler.released_from_tag("beta-1.2.0-ls1", "beta", ["betax"]) == "1.2.0"
 
 
 def test_released_version_picks_newest_of_branch() -> None:
@@ -213,6 +219,17 @@ def test_released_version_picks_newest_of_branch() -> None:
     assert scheduler.released_version(releases, "main", "latest", ["develop"]) == ("4.0.20", "4.0.20-ls3")
     assert scheduler.released_version(releases, "develop", "develop", ["latest"]) == ("5.0.2", "develop-5.0.2-ls8")
     assert scheduler.released_version([], "main", "latest", []) == (None, None)
+
+    nested = [
+        release("beta-legacy-1.2.0-ls4", "2026-10-24T12:00:00+00:00"),
+        release("beta-1.2.0-ls6", "2026-10-23T12:00:00+00:00"),
+        release("1.2.0-ls4", "2026-10-25T12:00:00+00:00"),
+    ]
+    branches = ["main", "beta", "beta-legacy"]
+    assert scheduler.released_version(nested, "beta", "beta", ["latest", "beta-legacy"]) == ("1.2.0", "beta-1.2.0-ls6")
+    assert getattr(views.pick_release(nested, "beta", "main", branches), "tag", None) == "beta-1.2.0-ls6"
+    assert getattr(views.pick_release(nested, "beta-legacy", "main", branches), "tag", None) == "beta-legacy-1.2.0-ls4"
+    assert getattr(views.pick_release(nested, "main", "main", branches), "tag", None) == "1.2.0-ls4"
 
 
 # -- decisions ----------------------------------------------------------------------------------------------------
