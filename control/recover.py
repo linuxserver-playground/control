@@ -14,8 +14,8 @@ started it. After `heal_pages_attempts` retries without one it gives up and repo
 (pages.py reports those) is never retried.
 
 **The hub's Pages.** The hub's Deploy ends by deploying its Pages site, and checks that the site then serves its run's
-`deploy.json`, deploying up to three times (the hub's `scripts/pages_serves.sh`): on 2026-11-04 GitHub reported five
-hub deploys in a row successful while the site kept serving an older one, for over an hour. A Deploy that fails in one
+`deploy.json`, deploying at most twice and keeping its deploys apart (the hub's `scripts/pages_serves.sh`): Pages
+reports deploys successful that it never serves when a repository deploys too often. A Deploy that fails in one
 of its Pages steps (HUB_PAGES_STEPS) starts the same retries, one row for the hub repo, and a retry dispatches the
 hub's `deploy.yml` on main; any Deploy that succeeds clears it. A Deploy that failed elsewhere (the ingest, the data
 publish) is not Pages' fault and is left to people. publish.py starts the retries too when an overdue release turns
@@ -81,8 +81,7 @@ HUB_PAGES_STEPS = frozenset(
         "Deploy to Pages",
         "Upload the Pages artifact again",
         "Deploy to Pages again",
-        "Upload the Pages artifact a last time",
-        "Deploy to Pages a last time",
+        "Wait for the Pages deploy budget again",
         "Check that Pages serves the last deploy",
     }
 )
@@ -294,10 +293,10 @@ def pages_outcome(job: Job, hub: str | None = None) -> tuple[bool, str | None] |
             return None
         if job.conclusion == "success":
             return True, None
-        # The first two serve checks continue on error, so read every step that failed, not the first.
+        # The first serve check continues on error, so read every step that failed, not the first.
         failed = [s.name for s in job.steps if s.conclusion in ("failure", "cancelled")]
         if HUB_STALE_STEP in failed:
-            return False, "Pages still served an older deploy after three"
+            return False, "Pages still served an older deploy after two"
         pages = [name for name in failed if name in HUB_PAGES_STEPS]
         return (False, f"{pages[0]} failed") if pages else None
     if is_pages_job(job.name):

@@ -479,10 +479,9 @@ HUB_STEPS_STALE = [
     step("Ingest every pending release"),
     step("Deploy to Pages", number=2),
     step("Check that Pages serves the deploy", "failure", 3),
-    step("Deploy to Pages again", number=4),
-    step("Check that Pages serves the second deploy", "failure", 5),
-    step("Deploy to Pages a last time", number=6),
-    step("Check that Pages serves the last deploy", "failure", 7),
+    step("Wait for the Pages deploy budget again", number=4),
+    step("Deploy to Pages again", number=5),
+    step("Check that Pages serves the last deploy", "failure", 6),
 ]
 
 
@@ -516,7 +515,7 @@ async def test_a_hub_deploy_pages_never_served_is_redeployed_until_one_is(
     hub_deploy(state, 70, "failure", HUB_STEPS_STALE, T0)
     assert await tick(state, world, monkeypatch, T0 + MINUTE) == 0
     row = state.model.pages_heal(HUB)
-    assert row is not None and row.state == "retrying" and row.note == "Pages still served an older deploy after three"
+    assert row is not None and row.state == "retrying" and row.note == "Pages still served an older deploy after two"
     assert await tick(state, world, monkeypatch, T0 + 5 * MINUTE) == 1
     assert world.posts == [(f"/repos/{HUB}/actions/workflows/deploy.yml/dispatches", {"ref": "main"})]
     action = state.model.recent_actions(1)[0]

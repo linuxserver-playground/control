@@ -593,8 +593,9 @@ gives up; a repo with no Pages site (*Pages on image repos*) is never retried. E
 decision of kind `heal` (a Pages deploy never starts a branch's build cooldown) and an action by `control`.
 
 The hub's Pages site is healed the same way, as one more row. GitHub can report a Pages deploy successful that never
-goes live (2026-11-04: five hub deploys in an hour, the site stuck on the one before), so the hub's Deploy checks
-that its site serves its run's `deploy.json`, deploying up to three times, and fails when it never does. A Deploy
+goes live, most often when a repository deploys about ten times an hour, so the hub's Deploy keeps its deploys a few
+minutes apart, checks that its site serves its run's `deploy.json`, deploys at most twice, and fails when it never
+does. A Deploy
 that failed in one of its Pages steps (`recover.HUB_PAGES_STEPS`), or an overdue release that is in the hub's data
 but not on its site, starts the retries; each dispatches the hub's `deploy.yml` on main, and any Deploy that succeeds
 clears them. A Deploy that failed in its ingest or data publish is not retried.
