@@ -358,6 +358,13 @@ MIGRATIONS: list[str] = [
         WHERE id IN (SELECT id FROM run_workflow_names);
     DROP TABLE run_workflow_names;
     """,
+    # 13: GitHub's own Pages builds of the hub's and the site's gh-pages were stored as runs before control ignored
+    # them, and their completion webhooks were then dropped, so they showed as running forever.
+    """
+    DELETE FROM jobs WHERE run_id IN (SELECT id FROM runs
+        WHERE workflow_name IN ('pages build and deployment', 'pages-build-deployment'));
+    DELETE FROM runs WHERE workflow_name IN ('pages build and deployment', 'pages-build-deployment');
+    """,
 ]
 
 

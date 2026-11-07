@@ -100,3 +100,36 @@ def test_the_loop_heals_every_five_minutes(
     assert asyncio.run(heal.tick(state, now + datetime.timedelta(minutes=4))) is None
     assert asyncio.run(heal.tick(state, now + heal.HEAL_INTERVAL)) == 0
     assert seen == [f"/repos/{REPO}/actions/runs/5001/jobs"]
+
+
+def test_a_stored_run_control_does_not_track_is_dropped(
+    state: State, credentials: AppCredentials, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GitHub's own Pages build of a gh-pages branch, stored before control ignored it: healing drops it instead of
+    keeping it on the runs pages."""
+    now = datetime.datetime.now(datetime.UTC)
+    created = (now - datetime.timedelta(hours=1)).isoformat(timespec="seconds")
+    data: dict[str, Any] = {
+        **fixture("workflow_run.in_progress")["workflow_run"],
+        "id": 6001,
+        "name": "pages build and deployment",
+        "path": "dynamic/pages/pages-build-deployment",
+        "workflow_id": 400,
+        "created_at": created,
+        "updated_at": created,
+    }
+    state.model.upsert_run(Run.from_github(REPO, data, "pages build and deployment"))
+    install(state, credentials)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if (token := token_response(request)) is not None:
+            return token
+        if request.url.path.endswith("/actions/workflows"):
+            return httpx.Response(
+                200, json={"total_count": 1, "workflows": [{"id": 400, "name": "pages-build-deployment"}]}
+            )
+        return httpx.Response(200, json={**data, "status": "completed", "conclusion": "failure"})
+
+    mock_github(state, monkeypatch, handler)
+    asyncio.run(heal.heal(state, delay=0))
+    assert state.model.run(6001) is None

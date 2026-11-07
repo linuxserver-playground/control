@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 
 from .github import GitHub, installation_client
-from .model import Job, Run, is_build_job
+from .model import Job, Run, is_build_job, is_build_run
 from .state import State
 
 log = logging.getLogger(__name__)
@@ -98,7 +98,13 @@ async def read_run(state: State, github: GitHub, repo: str, run_id: int, names: 
     if repo not in names:
         workflows = await github.paginate(f"/repos/{repo}/actions/workflows", {"per_page": 100}, key="workflows")
         names[repo] = {w["id"]: str(w["name"]) for w in workflows if w.get("id") and w.get("name")}
-    run = Run.from_github(repo, data, names[repo].get(data.get("workflow_id")))
+    workflow = names[repo].get(data.get("workflow_id"))
+    if not is_build_run({**data, "name": workflow or data.get("name")}):
+        # A run control does not track (GitHub's Pages build, the PR report): drop it if an older control stored it.
+        state.model.delete_run(run_id)
+        state.stream.publish("runs", run_id)
+        return before is not None
+    run = Run.from_github(repo, data, workflow)
     state.model.upsert_run(run)
     after = state.model.run(run_id)
     changed = after is not None and (
