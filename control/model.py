@@ -79,7 +79,9 @@ class Repo(BaseModel):
 IGNORED_WORKFLOW_FILES = frozenset({".github/workflows/pr-report.yml"})
 """Workflows of image repositories that are not builds. The trusted PR report runs on the default branch
 (workflow_run, pull_request_target), so storing its runs would make them look like that branch's latest build."""
-IGNORED_WORKFLOW_NAMES = frozenset({"PR report"})
+IGNORED_WORKFLOW_NAMES = frozenset({"PR report", "pages build and deployment"})
+"""Also GitHub's own Pages build of the hub's and the site's `gh-pages`: their Deploy waits for it and reports it,
+and its `deploy` job would read as theirs."""
 
 
 def is_build_run(data: dict[str, Any]) -> bool:

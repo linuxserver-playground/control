@@ -314,3 +314,27 @@ def test_pr_report_runs_and_jobs_are_not_builds(state: State) -> None:
     assert state.model.job(9999) is None
     seed(state, "workflow_run.completed")
     assert state.model.run(5001) is not None
+
+
+def test_github_pages_builds_are_not_runs_control_tracks(state: State) -> None:
+    """GitHub's own build of a gh-pages branch: the hub's and the site's Deploy wait for it, and its `deploy` job
+    must not read as theirs."""
+    run = fixture("workflow_run.completed")
+    run["workflow_run"] = {
+        **run["workflow_run"],
+        "id": 6999,
+        "name": "pages build and deployment",
+        "path": "dynamic/pages/pages-build-deployment",
+    }
+    run["workflow"] = {**run.get("workflow", {}), "name": "pages build and deployment"}
+    handlers.process(state.model, state.stream, "workflow_run", run)
+    assert state.model.run(6999) is None
+    job = fixture("workflow_job.queued")
+    job["workflow_job"] = {
+        **job["workflow_job"],
+        "id": 9998,
+        "name": "deploy",
+        "workflow_name": "pages build and deployment",
+    }
+    handlers.process(state.model, state.stream, "workflow_job", job)
+    assert state.model.job(9998) is None
