@@ -49,9 +49,9 @@ docker run --rm -p 8080:8080 -e PUID=1000 -e PGID=1000 -e CONTROL_PUBLIC_URL=htt
 | `GITHUB_ORG`          | `linuxserver-playground`      | The organisation the GitHub App is created in and installed on.                      |
 | `CONTROL_APP_NAME`    | `LinuxServer CI (playground)` | The GitHub App's display name.                                                       |
 | `SITE_URL`            | `https://linuxserver-playground.github.io/site` | Public URL of the website, the single pane of glass: Discord embeds link to its image pages (`/images/<image>/`), build pages (`/images/<image>/builds/<tag>/`) and scheduler page (`/fleet/scheduler/?image=<image>`). No trailing slash. |
-| `HUB_REPO`            | `hub`                       | Repository in the org that gets a `repository_dispatch` `image-released` after every successful live build, so the hub ingests the release right away. |
-| `SITE_REPO`           | `site`                      | Repository in the org that gets a `repository_dispatch` `hub-updated` whenever the hub's Deploy workflow succeeds, so the website refreshes from the hub. |
-| `HUB_CONSUMERS`       | `site,docs`                 | Every repository that rebuilds from hub data; each gets `hub-updated` after a successful hub Deploy (the site repo is always included). |
+| `HUB_REPO`            | `hub`                       | Repository in the org whose `deploy.yml` control dispatches on its slots (*Hub and site deploys*) after live releases and other changes. |
+| `SITE_REPO`           | `site`                      | The website's repository, whose `deploy.yml` control dispatches on its slots after the hub publishes or its `main` moves. |
+| `HUB_CONSUMERS`       | `site`                      | Every repository that rebuilds from hub data and deploys on the site's slots (the site repo is always included; repositories the org lacks are skipped). |
 | `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET` | unset | A classic OAuth App (callback `${CONTROL_PUBLIC_URL}/login/callback`) used only for sign-in: its consent screen lists `read:user` and `read:org`, and membership is read with the user's token. Without it the GitHub App's OAuth client is used, which needs the App's Members permission. |
 | `CONTROL_SETUP_TOKEN` | unset                         | When set, `/setup` requires `?token=<value>`. Set it on any public deployment.       |
 | `DISCORD_WEBHOOK_URL` | unset                         | Discord webhook for notifications; without it they are logged and dropped.           |
@@ -245,6 +245,21 @@ that sanitised version; the next version builds again). Members set and clear th
 fleet board and image pages; each flag keeps who set it and why. The fleet board shows `upstream`,
 `released`, `drift` (`ahead`, `same`, `unknown`), `next_check` and the matching flags per branch.
 
+**Hub and site deploys** (`control/deploys.py`). Control is the only thing that starts the hub's and the website's
+`deploy.yml`: neither deploys on a push, a cron or another workflow's dispatch. What needs a deploy is requested:
+for the hub, a live release (its tag goes in the `force` input, so a republished tag is ingested again), a push to
+its `main`, a `data` commit of its Refresh (`Refresh data`), an image repo created, deleted, archived or renamed,
+a Pages retry (*Self-healing*), and an hourly reconcile when nothing else asked; for the site (and every
+`HUB_CONSUMERS` repo), a push to the hub's `gh-pages` (the hub published something new), a push to its own `main`
+(merged website edits included), a Pages retry, and once a day after 04:17 UTC a full refresh (`refresh_all`).
+The minute loop dispatches a requested Deploy at the repository's next slot: slots are 400 s apart, the hub's on
+multiples of 400 s since the epoch and the site's 200 s later, and a dispatch also waits until 400 s have passed
+since the previous one and until no Deploy of the repository (for the site, of the hub as well) is running. So each
+repository deploys at most nine times an hour, below GitHub Pages' ten builds an hour for a site published from a
+branch, and every request since the last dispatch rides on the next one. A Deploy that finds what it built already
+on `gh-pages` pushes nothing, so Pages builds only for a real change. `/api/status.json` `deploys` shows each
+repository's pending request (count, reasons, since), last dispatch, next slot and the last few dispatches.
+
 ## Batch build projects
 
 `control/batch.py` starts the org's batch build projects from the same loop: repositories that are not images
@@ -426,8 +441,9 @@ opens `${SITE_URL}/images/<image>/`. A finished build without a website page ope
 `<!-- lsio-build-report -->` marker; the first build of a pull request finishes before the comment exists, so
 every completed `PR report` run re-links the latest message of each recent pull request build of its repo),
 any other build its run page scrolled to the Publish job's summary (`#summary-<job id>`, from the jobs
-control holds; the run page until that job's webhook arrived), which opens with the same report. A running
-build opens the control run page.
+control holds; the run page until that job's webhook arrived), which opens with the same report. A release held
+at "publishing" opens that run summary too until its page is on the website, and a running build opens its run.
+An amber message (running or publishing) never links control.
 
 - Title `<image> <tag> · <dot> <result>`, the dot in the embed's colour, the Jenkins-era scheme: green
   (`0x19A719`) `passed` for a live success, dark green (`0x3C6124`) for a dev/pr success, red (`0xFF0000`)
@@ -439,7 +455,7 @@ build opens the control run page.
 - Fields in two columns: **Platforms** (per arch: short digest, compressed size in MiB, tests passed/failed,
   or the arch's own failure), **Upstream** (the version linked to `version.source_url`, with the source
   type), **Timing** (build time per arch, `started → finished (elapsed)`), **Links** (CI report, run, release,
-  artifact, PR, control). Footer `<repository> · run <id>`. No thumbnail.
+  artifact, PR, and control once the message is no longer amber). Footer `<repository> · run <id>`. No thumbnail.
 - Every part is clipped to Discord's limits (title 256, description 4096, field value 1024, 25 fields, 6000
   in all) with an ellipsis, so a long error can never bounce the message.
 
@@ -485,11 +501,11 @@ events keep the stored installation id current.
 
 ## Publication hold
 
-A released build's website page appears minutes after the release: the hub ingests it and deploys, then the site
-refreshes and deploys, longer when a burst of releases queues. So the build's Discord message is edited into the
-summary as "passed, publishing", linking control instead of a page that would 404, and `control/publish.py` checks
-every held build's page once a minute. When it answers the message becomes the final summary with its CI report
-link. Past `CONTROL_PUBLISH_DEADLINE_MINUTES` the message turns into "not on the site" and a separate post (an edit
+A released build's website page appears once the hub's next Deploy (*Hub and site deploys*, at most a slot away)
+serves it. So the build's Discord message is edited into the summary as "passed, publishing", amber, linking the
+run's job summary (which opens with the build's report) instead of a page that would 404, and `control/publish.py`
+checks every held build's page every 20 seconds. When it answers the message turns green, its links go to the
+build's website page, and the control link comes back. Past `CONTROL_PUBLISH_DEADLINE_MINUTES` the message turns into "not on the site" and a separate post (an edit
 does not notify) says where it is stuck, read from the hub's own data: the hub rejected the release, has not
 ingested it, has ingested it (its `data` branch has the build) while its Pages site still serves an older deploy
 (the run its `deploy.json` names; this also starts control's redeploys of the hub, *Self-healing*), or has it and the
@@ -592,13 +608,12 @@ deploys anyway) and while the fleet has no free slot. After `CONTROL_HEAL_PAGES_
 gives up; a repo with no Pages site (*Pages on image repos*) is never retried. Each dispatch is a scheduler
 decision of kind `heal` (a Pages deploy never starts a branch's build cooldown) and an action by `control`.
 
-The hub's Pages site is healed the same way, as one more row. GitHub can report a Pages deploy successful that never
-goes live, most often when a repository deploys about ten times an hour, so the hub's Deploy keeps its deploys a few
-minutes apart, checks that its site serves its run's `deploy.json`, deploys at most twice, and fails when it never
-does. A Deploy
-that failed in one of its Pages steps (`recover.HUB_PAGES_STEPS`), or an overdue release that is in the hub's data
-but not on its site, starts the retries; each dispatches the hub's `deploy.yml` on main, and any Deploy that succeeds
-clears them. A Deploy that failed in its ingest or data publish is not retried.
+The hub's and the site's Pages sites are healed the same way, one row each. Both publish to their `gh-pages` branch
+and their Deploy checks that the site then serves its run's `deploy.json`, failing when it never does. A Deploy that
+failed in one of its Pages steps (`recover.DEPLOY_PAGES_STEPS`), or an overdue release that is in the hub's data but
+not on its site, starts the retries; each requests the repository's next Deploy slot, so retries stay within the
+nine deploys an hour, and a Deploy that finds `gh-pages` already holding what it built asks Pages to build it again.
+Any Deploy that succeeds clears them. A Deploy that failed before its Pages steps is not retried.
 
 **Infrastructure failures of live builds**: a failed first attempt of a push or dispatch run on a live branch (never
 a pull request run, so never a fork) is judged once from its jobs, `CONTROL_HEAL_RERUN_DELAY_MINUTES` after it

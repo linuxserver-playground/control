@@ -1655,18 +1655,20 @@ class Model:
             rows = conn.execute(sql, (state,) if state else ()).fetchall()
         return [PagesHeal(**dict(row)) for row in rows]
 
-    def pages_outcomes(self, since: str, hub_repo: str | None = None) -> list[Job]:
+    def pages_outcomes(self, since: str, deploy_repos: tuple[str, ...] = ()) -> list[Job]:
         """Completed Pages deploys since `since`, oldest first: every `Pages` job that ran (it runs only in a
         `reason: pages` run), every live Publish job, whose `Pages (live)` step deploys after a release, and every
-        `deploy` job of `hub_repo` (the hub's Deploy, which ends by deploying its Pages site)."""
+        `deploy` job of `deploy_repos` (the hub's and the site's Deploy, which end by publishing their Pages site)."""
+        marks = ", ".join("?" for _ in deploy_repos) or "''"
         with self.db.connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM jobs WHERE status = 'completed' AND completed_at >= ? AND ("
                 f"((name = '{PAGES_JOB}' OR name LIKE '% / {PAGES_JOB}') AND conclusion IN ('success', 'failure')) "
                 "OR name = 'Publish' OR name LIKE '% / Publish' "
-                "OR (repo = ? AND name IN ('deploy', 'deploy / deploy') AND conclusion IN ('success', 'failure'))) "
+                f"OR (repo IN ({marks}) AND name IN ('deploy', 'deploy / deploy') "
+                "AND conclusion IN ('success', 'failure'))) "
                 "ORDER BY completed_at, id",
-                (since, hub_repo or ""),
+                (since, *deploy_repos),
             ).fetchall()
         return [_job_row(row) for row in rows]
 

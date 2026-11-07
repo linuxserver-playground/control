@@ -12,7 +12,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 
-from . import archive, fleet, handlers, heal, mods, relay
+from . import archive, deploys, fleet, handlers, heal, mods
 from .state import INSTALLATION_ID, state_of
 
 log = logging.getLogger(__name__)
@@ -70,8 +70,10 @@ async def github_webhook(
         fleet.schedule_refresh(state, payload)  # re-reads image.yml for a live branch, in the background
         fleet.forget_deleted_branch(state, payload)  # a deleted helper repo branch leaves the fleet board
         mods.schedule_refresh(state, payload)  # re-reads a docker-mods branch's mod.yml when the push touched it
+        deploys.observe(state, x_github_event, payload)  # a push to the hub's or the site's main, the hub's data
+    elif x_github_event == "repository":
+        deploys.observe(state, x_github_event, payload)  # the hub reconciles a created or deleted image repo
     elif x_github_event == "workflow_run":
-        relay.schedule_site_refresh(state, payload)  # a successful hub Deploy makes the website refresh
         archive.wake(state, payload)  # a completed released run gets its record and logs onto its Release
         heal.schedule_heal(state, payload)  # a completed run's jobs whose own webhook never came
         from .events import schedule_conclusion_check, schedule_pr_report_refresh  # events imports this module

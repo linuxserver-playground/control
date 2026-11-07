@@ -477,11 +477,8 @@ def test_events_feed_the_pages_outcome(client: TestClient, state: State) -> None
 HUB = "example-org/hub"
 HUB_STEPS_STALE = [
     step("Ingest every pending release"),
-    step("Deploy to Pages", number=2),
+    step("Publish to Pages", number=2),
     step("Check that Pages serves the deploy", "failure", 3),
-    step("Wait for the Pages deploy budget again", number=4),
-    step("Deploy to Pages again", number=5),
-    step("Check that Pages serves the last deploy", "failure", 6),
 ]
 
 
@@ -510,14 +507,19 @@ async def test_a_hub_deploy_pages_never_served_is_redeployed_until_one_is(
     state: State, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """2026-11-04: GitHub reported the hub's Pages deploys successful for an hour while the site served an older one.
-    The Deploy now fails when its site never shows its run, and control dispatches the Deploy again with backoff."""
+    The Deploy fails when its site never shows its run, and control asks for the hub's next Deploy slot with backoff
+    (deploys.py dispatches it, within the nine an hour)."""
+    from control import deploys
+
     world = World()
     hub_deploy(state, 70, "failure", HUB_STEPS_STALE, T0)
     assert await tick(state, world, monkeypatch, T0 + MINUTE) == 0
     row = state.model.pages_heal(HUB)
-    assert row is not None and row.state == "retrying" and row.note == "Pages still served an older deploy after two"
+    assert row is not None and row.state == "retrying" and row.note == "Pages still served an older deploy"
     assert await tick(state, world, monkeypatch, T0 + 5 * MINUTE) == 1
-    assert world.posts == [(f"/repos/{HUB}/actions/workflows/deploy.yml/dispatches", {"ref": "main"})]
+    assert world.posts == []
+    pending = deploys.status(state)[HUB]["pending"]
+    assert pending["reasons"] == ["Pages retry 1 (Pages still served an older deploy)"]
     action = state.model.recent_actions(1)[0]
     assert (action.actor, action.target, action.result) == ("control", f"{HUB}@main (deploy.yml)", "ok")
     # That Deploy works: the retries stop.
@@ -525,13 +527,13 @@ async def test_a_hub_deploy_pages_never_served_is_redeployed_until_one_is(
         state,
         71,
         "success",
-        [step("Deploy to Pages"), step("Check that Pages serves the deploy", number=2)],
+        [step("Publish to Pages"), step("Check that Pages serves the deploy", number=2)],
         T0 + 9 * MINUTE,
     )
     await tick(state, world, monkeypatch, T0 + 10 * MINUTE)
     row = state.model.pages_heal(HUB)
     assert row is not None and row.state == "ok"
-    assert await tick(state, world, monkeypatch, T0 + 10 * 60 * MINUTE) == 0 and len(world.posts) == 1
+    assert await tick(state, world, monkeypatch, T0 + 10 * 60 * MINUTE) == 0 and world.posts == []
 
 
 @pytest.mark.anyio
@@ -545,11 +547,13 @@ async def test_a_hub_deploy_that_failed_before_pages_is_left_alone(
     assert state.model.pages_heal(HUB) is None and world.posts == []
 
 
-def test_a_first_serve_check_that_continued_still_counts_as_a_success() -> None:
-    steps = [step("Deploy to Pages"), step("Check that Pages serves the deploy", "failure", 2)]
-    steps += [step("Deploy to Pages again", number=3), step("Check that Pages serves the second deploy", number=4)]
+def test_only_the_deploy_job_of_the_hub_or_site_speaks_for_pages() -> None:
+    steps = [step("Publish to Pages"), step("Check that Pages serves the deploy", number=2)]
     job = Job.from_github(HUB, {**job_data(73, 730, "deploy / deploy", "success", steps), "html_url": None})
-    assert recover.pages_outcome(job, HUB) == (True, None)
+    assert recover.pages_outcome(job, (HUB,)) == (True, None)
+    failed = [step("Publish to Pages", "failure")]
+    job = Job.from_github(HUB, {**job_data(75, 750, "deploy", "failure", failed), "html_url": None})
+    assert recover.pages_outcome(job, (HUB,)) == (False, "Publish to Pages failed")
     # And the hub's other workflows say nothing about Pages.
     refresh = Job.from_github(HUB, {**job_data(74, 740, "refresh / refresh", "failure", steps), "html_url": None})
-    assert recover.pages_outcome(refresh, HUB) is None
+    assert recover.pages_outcome(refresh, (HUB,)) is None

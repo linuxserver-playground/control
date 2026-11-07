@@ -40,11 +40,11 @@ class Settings(BaseModel):
     publish_watch: bool = True
     """Hold released builds' Discord messages until their website page is live (publish.py). Tests turn it off."""
     hub_repo: str = "hub"
-    """Repository (in github_org) that receives a repository_dispatch `image-released` after a live release."""
+    """The hub repository (in github_org), whose Deploy control dispatches on its slots (deploys.py)."""
     site_repo: str = "site"
-    """Repository (in github_org) that receives a repository_dispatch `hub-updated` when the hub's Deploy succeeds."""
+    """The website repository (in github_org), whose Deploy control dispatches on its slots (deploys.py)."""
     hub_consumers: tuple[str, ...] = ("site",)
-    """Repositories (in github_org) that rebuild from hub data; each gets `hub-updated`. Env HUB_CONSUMERS (csv)."""
+    """Repositories (in github_org) that rebuild from hub data, on the site's slots. Env HUB_CONSUMERS (csv)."""
     oauth_client_id: str | None = None
     oauth_client_secret: str | None = None
     """A classic OAuth App used only for sign-in. Its consent screen lists plain scopes (read:user, read:org)

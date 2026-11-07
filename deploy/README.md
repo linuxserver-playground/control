@@ -50,7 +50,7 @@ Active members of the organisation then see the action forms on control's pages 
 The scheduler, the run archive, the Pages check, the reconcile of missed webhooks, self-healing, retention and the
 database snapshots all run with code defaults and the App's own permissions; the README describes each and the
 setting that turns it off. Control drives only what its organisation has: batch projects, the hub refresh and the
-`hub-updated` relay skip an organisation without those repositories.
+hub's and site's deploy slots skip an organisation without those repositories.
 
 ## Updating
 

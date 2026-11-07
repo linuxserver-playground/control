@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from . import auth, badge, recover
+from . import auth, badge, deploys, recover
 from . import batch as batches
 from . import scheduler as sched
 from .backfill import last_backfill
@@ -330,6 +330,8 @@ class StatusPage(BaseModel):
     disk_free_bytes: int = 0
     healing: dict[str, Any] | None = None
     """What self-healing is retrying now (recover.status): Pages sites and failed runs it will re-run."""
+    deploys: dict[str, Any] | None = None
+    """The hub's and the site's Deploys (deploys.status): what is requested, the last dispatch, the next slot."""
 
 
 class ManagementPage(BaseModel):
@@ -813,6 +815,7 @@ def status_page(state: State) -> StatusPage:
         db_bytes=state.db.size_bytes(),
         disk_free_bytes=shutil.disk_usage(state.settings.data_dir).free,
         healing=recover.status(state),
+        deploys=deploys.status(state),
     )
 
 

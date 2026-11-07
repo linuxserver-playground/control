@@ -93,8 +93,10 @@ def test_started_posts_and_summary_edits_one_live_message(
     site = state.settings.site_url
     assert embed["title"] == "sonarr main \u00b7 \U0001f7e1 running" and embed["color"] == AMBER
     assert embed["description"] == "live \u00b7 upstream"
-    # Nothing is released yet, so the provisional message points at the control run page.
-    assert embed["url"] == f"https://ci.example.test:8443/builds/{REPO}/5001"
+    # Nothing is released yet, so the provisional message points at the run; amber never links control.
+    run = "https://github.com/example-org/docker-sonarr/actions/runs/5001"
+    assert embed["url"] == run
+    assert "[control]" not in field(embed, "Links")
     assert embed["author"] == {"name": "sonarr", "url": f"{site}/images/sonarr/"}
     assert field(embed, "Platforms") == "pending" and field(embed, "Timing") == "started 12:00 UTC"
     assert "[run](https://github.com/example-org/docker-sonarr/actions/runs/5001)" in field(embed, "Links")
@@ -102,12 +104,14 @@ def test_started_posts_and_summary_edits_one_live_message(
 
     assert post_event(client, fixture("control.build.summary")).status_code == 202
     assert len(calls) == 2 and calls[1][0] == "PATCH" and calls[1][1].endswith("/messages/msg-1")
-    # Released, but its website page is minutes away: held at "publishing", pointing at control.
+    # Released, but its website page waits for the hub's next deploy: held at "publishing", pointing at the run's
+    # summary (the Publish job's, once control has seen it), which opens with the report.
     held = calls[1][2]["embeds"][0]
     assert held["title"] == "sonarr 4.0.20.3014-ls1 \u00b7 \U0001f7e1 passed, publishing" and held["color"] == AMBER
     assert held["description"] == "live \u00b7 upstream \u00b7 publishing to the website"
-    assert held["url"] == f"https://ci.example.test:8443/builds/{REPO}/5001"
-    assert field(held, "Links").startswith("CI report (publishing\u2026)")
+    assert held["url"] == run
+    assert field(held, "Links").startswith(f"[CI report]({run})")
+    assert "[control]" not in field(held, "Links")
     build = state.model.build(REPO, 5001)
     assert build and build.publish_state == "pending" and build.publish_started_at
 
@@ -386,41 +390,26 @@ def test_embed_links_the_website_for_released_builds() -> None:
     assert embed["author"]["url"] == f"{SITE}/images/{build.image}/"
 
 
-def test_live_success_summary_dispatches_the_hub(
-    client: TestClient, state: State, monkeypatch: pytest.MonkeyPatch, credentials: AppCredentials
-) -> None:
-    from .conftest import install, mock_github, token_response
+def test_live_success_summary_requests_the_hub_deploy(client: TestClient, state: State) -> None:
+    from control import deploys
+    from control.model import Repo
 
-    install(state, credentials)
-    dispatches: list[dict[str, Any]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if (token := token_response(request)) is not None:
-            return token
-        if request.url.path == f"/repos/{state.settings.github_org}/{state.settings.hub_repo}/dispatches":
-            dispatches.append(json.loads(request.content))
-            return httpx.Response(204)
-        return httpx.Response(404)
-
-    mock_github(state, monkeypatch, handler)
+    hub = f"{state.settings.github_org}/{state.settings.hub_repo}"
+    state.model.upsert_repo(Repo.from_github({**fixture("api.repos")[0], "full_name": hub, "name": "hub"}))
     payload = fixture("control.build.summary")
     assert post_event(client, payload).status_code == 202
-    assert dispatches == [
-        {
-            "event_type": "image-released",
-            "client_payload": {"repository": payload["repository"], "tag": payload["bundle"]["version"]["tag"]},
-        }
-    ]
-    # A failed summary never dispatches.
-    dispatches.clear()
+    pending = deploys.status(state)[hub]["pending"]
+    tag = payload["bundle"]["version"]["tag"]
+    assert pending["count"] == 1 and pending["force"] == [f"{payload['repository']}@{tag}"]
+    # A failed summary asks for nothing.
     assert post_event(client, fixture("control.build.summary.failed")).status_code == 202
-    assert dispatches == []
+    assert deploys.status(state)[hub]["pending"]["count"] == 1
     # Neither does a successful run that released nothing (a package check): no release_url.
     unreleased = json.loads(json.dumps(payload))
     unreleased.pop("release_url", None)
     unreleased["run_id"] = payload["run_id"] + 1
     assert post_event(client, unreleased).status_code == 202
-    assert dispatches == []
+    assert deploys.status(state)[hub]["pending"]["count"] == 1
 
 
 def test_only_a_completed_pr_report_run_refreshes_the_messages(state: State) -> None:

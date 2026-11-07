@@ -6,9 +6,10 @@ announced on Discord. A live build gets one message, posted on `build.started` a
 summary; dev and pr builds only get the summary, and a package check that released nothing only when it
 fails (one that found a change releases from the same run and is announced like any release). A released
 build links its page on the website, the single pane of glass;
-that page reaches the website minutes later (hub, then site), so its summary says "publishing" and points at
-control until publish.py sees the page live and edits it into the final form. Any other build links the
-report GitHub shows: a pull request build its report comment, a dev or failed build its run's job summary.
+that page reaches the website once the hub's next Deploy serves it (deploys.py), so until publish.py sees the page
+live and edits it into the final form, the amber summary says "publishing" and links the run's job summary, which
+opens with the build's report. Any other build links the report GitHub shows: a pull request build its report
+comment, a dev or failed build its run's job summary. An amber message (running or publishing) never links control.
 """
 
 import asyncio
@@ -22,7 +23,7 @@ from contracts import errors as contract_errors
 from contracts import format_error
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from . import archive, handlers
+from . import archive, deploys, handlers
 from .config import Settings
 from .db import utcnow
 from .github import installation_client
@@ -367,11 +368,8 @@ def instant(timestamp: str) -> float:
 
 def links_field(build: Build, public_url: str, site_url: str, report: str | None = None) -> str:
     links = []
-    if build.mode == "live" and build.version_tag and build.release_url:
-        if build.publish_state == "pending":
-            links.append("CI report (publishing\u2026)")
-        else:
-            links.append(f"[CI report]({site_build_url(site_url, build.image, build.version_tag)})")
+    if build.mode == "live" and build.version_tag and build.release_url and not awaiting_site(build):
+        links.append(f"[CI report]({site_build_url(site_url, build.image, build.version_tag)})")
     elif report:
         links.append(f"[CI report]({report})")
     if build.run_url:
@@ -382,7 +380,8 @@ def links_field(build: Build, public_url: str, site_url: str, report: str | None
         links.append(f"[artifact]({build.artifact_url})")
     if build.pull_request:
         links.append(f"[PR #{build.pull_request}](https://github.com/{build.repo}/pull/{build.pull_request})")
-    links.append(f"[control]({control_build_url(public_url, build)})")
+    if embed_color(build) != AMBER:
+        links.append(f"[control]({control_build_url(public_url, build)})")
     return " \u00b7 ".join(links)
 
 
@@ -390,17 +389,20 @@ def build_embed(
     build: Build, settings: Settings, previous: Build | None = None, report: str | None = None
 ) -> dict[str, Any]:
     """One embed per build; the same shape for the provisional and the final message so an edit reads well.
-    A released live build points at its page on the website (the embed url and the "CI report" link), the
-    image name above the title at the image page. Any other finished build points at `report`, the report
-    GitHub shows (`report_url`: the pull request comment, or the run's job summary), and a running one or one
-    without a report at the control run page. `previous` is the previous release's build (for the packages
+    A released live build on the website points at its page there (the embed url and the "CI report" link), the
+    image name above the title at the image page. Any other finished build, a release still publishing included,
+    points at `report`, the report GitHub shows (`report_url`: the pull request comment, or the run's job summary),
+    a running one at its run, and one without a report or run at the control run page. Amber messages carry no
+    control link. `previous` is the previous release's build (for the packages
     line), when control has it."""
     color = embed_color(build)
     released = build.mode == "live" and build.version_tag and build.release_url and not awaiting_site(build)
     if released:
         url = site_build_url(settings.site_url, build.image, str(build.version_tag))
-    elif report and not (build.mode == "live" and build.release_url):
+    elif report:
         url = report
+    elif color == AMBER and build.run_url:
+        url = build.run_url
     else:
         url = control_build_url(settings.public_url, build)
     fields = [
@@ -439,7 +441,8 @@ async def announce(state: State, build: Build, event_type: str) -> None:
         return
     if not announced(build):
         return
-    report = None if (build.mode == "live" and build.release_url) else await report_url(state, build)
+    on_site = build.mode == "live" and build.release_url and not awaiting_site(build)
+    report = None if on_site else await report_url(state, build)
     embed = build_embed(build, state.settings, previous_build(state.model, build), report)
     if build.discord_message_id and await state.discord.edit(build.discord_message_id, embeds=[embed]):
         return
@@ -492,32 +495,18 @@ async def reconcile_conclusion(state: State, payload: dict[str, Any]) -> bool:
     return True
 
 
-async def notify_hub(state: State, build: Build) -> None:
-    """Tell the hub a live release exists so it ingests the bundle now instead of at its hourly reconcile.
-
-    The hub's deploy workflow listens for repository_dispatch `image-released` with {repository, tag}.
-    Best effort: the hub reconciles on its own anyway, so a failure here only costs freshness.
-    """
+def notify_hub(state: State, build: Build) -> None:
+    """Ask for the hub's next Deploy (deploys.py) for a live release, with its tag to ingest again even when the hub
+    holds it (a rebuild of a released head republishes under the same tag)."""
     # Only a build that actually released (a package check reports success without releasing anything).
     if build.mode != "live" or build.result != "success" or not build.version_tag or not build.release_url:
         return
-    try:
-        github = await installation_client(state)
-        if github is None:
-            return
-        response = await github.post(
-            f"/repos/{state.settings.github_org}/{state.settings.hub_repo}/dispatches",
-            json={
-                "event_type": "image-released",
-                "client_payload": {"repository": build.repo, "tag": build.version_tag},
-            },
-        )
-        if response.status_code != 204:
-            log.warning("hub dispatch for %s %s returned %s", build.repo, build.version_tag, response.status_code)
-        else:
-            log.info("hub dispatch sent for %s %s", build.repo, build.version_tag)
-    except Exception:  # never let a hub hiccup fail the event intake
-        log.exception("hub dispatch failed for %s %s", build.repo, build.version_tag)
+    deploys.request(
+        state,
+        deploys.hub(state),
+        f"release {build.repo.rsplit('/', 1)[-1]} {build.version_tag}",
+        force=f"{build.repo}@{build.version_tag}",
+    )
 
 
 @router.post("/events", status_code=202)
@@ -555,7 +544,7 @@ async def control_event(
     if applied and build is not None:
         await announce(state, build, event_type)
         if event_type == "build.summary":
-            await notify_hub(state, build)
+            notify_hub(state, build)
             if released(build):
                 archive.wake(state)  # archived once its run completes; a completion seen first is waiting on this
             from . import recover  # recover imports the scheduler, which imports this module
