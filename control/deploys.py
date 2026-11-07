@@ -45,6 +45,8 @@ DEPLOY_FILE = "deploy.yml"
 DEPLOY_WORKFLOW = "Deploy"
 BACKSTOP = datetime.timedelta(hours=1)
 FULL_REFRESH_AT = datetime.time(4, 17)
+HUB_SETTLE = datetime.timedelta(minutes=3)
+"""How long the site waits after a hub dispatch for the hub's run to show up, after which `_running` holds it."""
 REASONS_KEPT = 20
 """Reasons kept per pending request (the oldest go; the count stays exact)."""
 FORCE_KEPT = 100
@@ -157,6 +159,13 @@ def _running(state: State, repo: str, now: datetime.datetime) -> bool:
     )
 
 
+def _hub_busy(state: State, at: datetime.datetime) -> bool:
+    """The hub's Deploy is running, or was dispatched so lately that its run may not have reached control yet: the
+    site waits for it, so it reads what the hub then serves."""
+    last = _load(state, hub(state)).get("last_dispatch_at")
+    return _running(state, hub(state), at) or bool(last and at - _at(last) < HUB_SETTLE)
+
+
 def _inputs(t: Target, pending: dict[str, Any]) -> dict[str, str]:
     if t.kind == "hub" and pending.get("force"):
         return {"force": ",".join(pending["force"])}
@@ -206,7 +215,7 @@ async def _maybe_dispatch(state: State, github: GitHub, t: Target, at: datetime.
     last = value.get("last_dispatch_at")
     if last and at - _at(last) < SLOT:
         return False
-    if _running(state, t.repo, at) or (t.kind == "site" and _running(state, hub(state), at)):
+    if _running(state, t.repo, at) or (t.kind == "site" and _hub_busy(state, at)):
         return False
     inputs = _inputs(t, pending)
     body: dict[str, Any] = {"ref": "main", **({"inputs": inputs} if inputs else {})}

@@ -169,9 +169,11 @@ async def test_backstops(state: State) -> None:
     have(state, "hub", "site")
     world = World()
     # Never dispatched: the hub reconciles; past 04:17 UTC the site makes its daily full refresh.
+    # The site waits for the hub dispatched in the same tick.
     morning = datetime.datetime(2026, 11, 7, 4, 20, tzinfo=datetime.UTC)
-    assert await tick(state, world, morning) == 2
-    assert dispatch(HUB) in world.posts and dispatch(SITE, {"refresh_all": "true"}) in world.posts
+    assert await tick(state, world, morning) == 1 and world.posts == [dispatch(HUB)]
+    assert await tick(state, world, morning + deploys.HUB_SETTLE) == 1
+    assert world.posts[-1] == dispatch(SITE, {"refresh_all": "true"})
     world.posts.clear()
     # Within the hour nothing else is due, and the full refresh is once a day.
     assert await tick(state, world, morning + datetime.timedelta(minutes=30)) == 0
@@ -214,3 +216,19 @@ def test_an_org_without_a_hub_or_site_requests_nothing(state: State) -> None:
     assert deploys.targets(state) == []
     assert not deploys.request(state, HUB, "release")
     assert deploys.status(state) == {}
+
+
+@pytest.mark.anyio
+async def test_the_site_waits_for_a_hub_dispatched_in_the_same_tick(state: State) -> None:
+    have(state, "hub", "site")
+    quiet(state, T0)
+    world = World()
+    deploys.request(state, HUB, "release sonarr 1-ls1")
+    deploys.request(state, SITE, "main abc1234")
+    assert await tick(state, world, T0 + 250 * SECOND) == 1
+    assert world.posts == [dispatch(HUB)]
+    # Its run has not reached control yet, and the site still waits for it.
+    assert await tick(state, world, T0 + 310 * SECOND) == 0
+    # Once the hub's run is gone and the settle time has passed, the site goes at its slot.
+    assert await tick(state, world, T0 + 250 * SECOND + deploys.HUB_SETTLE) == 1
+    assert world.posts[-1] == dispatch(SITE)
