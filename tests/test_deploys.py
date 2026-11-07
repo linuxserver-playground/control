@@ -175,9 +175,9 @@ async def test_backstops(state: State) -> None:
     assert await tick(state, world, morning + deploys.HUB_SETTLE) == 1
     assert world.posts[-1] == dispatch(SITE, {"refresh_all": "true"})
     world.posts.clear()
-    # Within the hour nothing else is due, and the full refresh is once a day.
-    assert await tick(state, world, morning + datetime.timedelta(minutes=30)) == 0
-    assert await tick(state, world, morning + datetime.timedelta(minutes=61)) == 1
+    # Nothing else is due until the backstop comes round again, and the full refresh is once a day.
+    assert await tick(state, world, morning + datetime.timedelta(hours=5)) == 0
+    assert await tick(state, world, morning + datetime.timedelta(hours=6, minutes=1)) == 1
     assert world.posts == [dispatch(HUB)]
 
 

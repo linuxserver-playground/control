@@ -15,7 +15,7 @@ A dispatch is a promise to look, not to publish: each Deploy compares what it bu
 pushes only when they differ, so a run that finds nothing new leaves Pages alone.
 
 Two backstops keep the data honest without anything asking: the hub is requested when it has not been dispatched
-for BACKSTOP (its reconcile notices deleted repositories and replaced bundles), and the site once a day after
+for BACKSTOP (its reconcile notices anything a lost webhook hid), and the site once a day after
 FULL_REFRESH_AT UTC with `refresh_all`, which refetches every build the site keeps.
 
 State lives in kv, one JSON value per repository (`deploys:<owner>/<repo>`): what is requested and why, the tags the
@@ -43,7 +43,7 @@ SLOT = datetime.timedelta(seconds=400)
 SITE_OFFSET = SLOT / 2
 DEPLOY_FILE = "deploy.yml"
 DEPLOY_WORKFLOW = "Deploy"
-BACKSTOP = datetime.timedelta(hours=1)
+BACKSTOP = datetime.timedelta(hours=6)
 FULL_REFRESH_AT = datetime.time(4, 17)
 HUB_SETTLE = datetime.timedelta(minutes=3)
 """How long the site waits after a hub dispatch for the hub's run to show up, after which `_running` holds it."""
@@ -181,7 +181,7 @@ def _backstops(state: State, now: datetime.datetime) -> None:
         value = _load(state, t.repo)
         last = value.get("last_dispatch_at")
         if not value.get("pending") and (not last or now - _at(last) >= BACKSTOP):
-            request(state, t.repo, "hourly reconcile", now=now)
+            request(state, t.repo, "reconcile", now=now)
     day = now.date().isoformat()
     if now.time() >= FULL_REFRESH_AT and state.db.get(FULL_REFRESH_DAY) != day:
         state.db.set(FULL_REFRESH_DAY, day)

@@ -249,7 +249,7 @@ fleet board and image pages; each flag keeps who set it and why. The fleet board
 `deploy.yml`: neither deploys on a push, a cron or another workflow's dispatch. What needs a deploy is requested:
 for the hub, a live release (its tag goes in the `force` input, so a republished tag is ingested again), a push to
 its `main`, a `data` commit of its Refresh (`Refresh data`), an image repo created, deleted, archived or renamed,
-a Pages retry (*Self-healing*), and an hourly reconcile when nothing else asked; for the site (and every
+a Pages retry (*Self-healing*), and a reconcile when nothing else asked for six hours; for the site (and every
 `HUB_CONSUMERS` repo), a push to the hub's `gh-pages` (the hub published something new), a push to its own `main`
 (merged website edits included), a Pages retry, and once a day after 04:17 UTC a full refresh (`refresh_all`).
 The minute loop dispatches a requested Deploy at the repository's next slot: slots are 400 s apart, the hub's on
